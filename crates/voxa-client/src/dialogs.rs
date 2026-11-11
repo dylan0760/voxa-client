@@ -86,6 +86,30 @@ pub struct ServerDlg {
     pub password: String,
     pub change_password: bool,
     pub had_password: bool,
+    /// File limits as loaded from the server (None = not loaded / unsupported).
+    pub limits: Option<FileLimits>,
+    pub max_unlimited: bool,
+    pub max_gb: f64,
+    pub quota_unlimited: bool,
+    pub quota_gb: f64,
+}
+
+impl ServerDlg {
+    pub fn set_limits(&mut self, l: FileLimits) {
+        self.limits = Some(l);
+        self.max_unlimited = l.max_upload_mb == 0;
+        self.max_gb = if l.max_upload_mb == 0 { 10.0 } else { l.max_upload_mb as f64 / 1024.0 };
+        self.quota_unlimited = l.channel_quota_mb == 0;
+        self.quota_gb = if l.channel_quota_mb == 0 { 100.0 } else { l.channel_quota_mb as f64 / 1024.0 };
+    }
+
+    fn edited_limits(&self) -> FileLimits {
+        let mb = |gb: f64| ((gb * 1024.0).round() as u64).max(1);
+        FileLimits {
+            max_upload_mb: if self.max_unlimited { 0 } else { mb(self.max_gb) },
+            channel_quota_mb: if self.quota_unlimited { 0 } else { mb(self.quota_gb) },
+        }
+    }
 }
 
 pub struct GroupsDlg {
@@ -264,10 +288,25 @@ impl Dialogs {
                         password: String::new(),
                         change_password: false,
                         had_password: i.has_password,
+                        limits: None,
+                        max_unlimited: false,
+                        max_gb: 2.0,
+                        quota_unlimited: true,
+                        quota_gb: 100.0,
                     });
+                    if crate::app::server_at_least(&i.version, "1.3.0") {
+                        if let (Some(d), Some(l)) = (&mut self.server, s.file_limits) {
+                            d.set_limits(l);
+                        }
+                        // Refresh: another admin may have changed it.
+                        s.conn.send(C2S::GetFileLimits);
+                    }
                 }
             }
             Open::Files(ch) => {
+                if s.server.as_ref().map(|i| crate::app::server_at_least(&i.version, "1.3.0")).unwrap_or(false) {
+                    s.conn.send(C2S::GetFileLimits);
+                }
                 s.conn.send(C2S::FileList { channel: ch, path: String::new() });
                 self.files = Some(FileBrowser { channel: ch, path: String::new(), entries: Vec::new(), loading: true, selected: None, new_folder: None });
             }
@@ -1023,6 +1062,32 @@ fn server_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 ui.label(RichText::new("(0 = keep forever)").weak());
             });
         });
+        ui.add_space(6.0);
+        ui.label(RichText::new("File transfers").strong());
+        if d.limits.is_some() {
+            egui::Grid::new("srvfiles").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                form_row(ui, "Max file size:", |ui| {
+                    ui.checkbox(&mut d.max_unlimited, "Unlimited");
+                    if !d.max_unlimited {
+                        ui.add(egui::DragValue::new(&mut d.max_gb).range(0.01..=1_000_000.0).speed(0.5).max_decimals(2).suffix(" GB"));
+                    }
+                });
+                form_row(ui, "Storage per channel:", |ui| {
+                    ui.checkbox(&mut d.quota_unlimited, "Unlimited");
+                    if !d.quota_unlimited {
+                        ui.add(egui::DragValue::new(&mut d.quota_gb).range(0.01..=10_000_000.0).speed(1.0).max_decimals(2).suffix(" GB"));
+                    }
+                });
+            });
+            ui.label(RichText::new("Applies to uploads in every channel's file browser. Make sure the server disk has room.").small().weak());
+        } else if s.server.as_ref().map(|i| crate::app::server_at_least(&i.version, "1.3.0")).unwrap_or(false) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading file limits...");
+            });
+        } else {
+            ui.label(RichText::new("Update the server to 1.3.0 or newer to change file size limits here.").weak());
+        }
         let (ok, cancel) = ok_cancel(ui, "OK");
         if ok {
             let mut e = d.edit.clone();
@@ -1032,6 +1097,12 @@ fn server_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 PasswordChange::Keep
             };
             s.conn.send(C2S::EditServer(e));
+            if let Some(old) = d.limits {
+                let new = d.edited_limits();
+                if new != old {
+                    s.conn.send(C2S::SetFileLimits(new));
+                }
+            }
             close = true;
         }
         if cancel {
@@ -1291,6 +1362,7 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut open = true;
     let mut upload: Vec<std::path::PathBuf> = Vec::new();
     let mut download: Option<(String, std::path::PathBuf)> = None;
+    let mut cmds: Vec<TransferCmd> = Vec::new();
     let cname = s.channels.get(&d.channel).map(|c| c.name.clone()).unwrap_or_default();
     egui::Window::new(format!("File Browser - {cname}")).id(egui::Id::unique("filebrowser")).open(&mut open).collapsible(false).resizable(true).default_size([640.0, 420.0]).show(ctx, |ui| {
         let refresh = |d: &mut FileBrowser| {
@@ -1384,9 +1456,14 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             d.selected = None;
             refresh(&mut d);
         }
+        if let Some(l) = s.file_limits {
+            let lim = |mb: u64| if mb == 0 { "unlimited".to_string() } else { fmt_size(mb * 1024 * 1024) };
+            ui.label(RichText::new(format!("Max file size: {} · Storage per channel: {}", lim(l.max_upload_mb), lim(l.channel_quota_mb))).small().weak());
+        }
         ui.separator();
-        transfer_list(ui, s, 4);
+        cmds = transfer_list(ui, s, 4);
     });
+    run_transfer_cmds(app, std::mem::take(&mut cmds));
     let (ch, path) = (d.channel, d.path.clone());
     if open {
         app.dlg.files = Some(d);
@@ -1399,19 +1476,26 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     }
 }
 
-fn transfer_list(ui: &mut Ui, s: &Session, max: usize) {
-    let list: Vec<&Transfer> = s.transfers.values().rev().take(max).collect();
+enum TransferCmd {
+    Cancel(u32),
+    Retry(u32),
+}
+
+fn transfer_list(ui: &mut Ui, s: &Session, max: usize) -> Vec<TransferCmd> {
+    let mut cmds = Vec::new();
+    let list: Vec<(&u32, &Transfer)> = s.transfers.iter().rev().take(max).collect();
     if list.is_empty() {
         ui.label(RichText::new("No file transfers").weak());
     }
-    for t in list {
+    for (id, t) in list {
         ui.horizontal(|ui| {
             ui.label(if t.upload { "⬆" } else { "⬇" });
             ui.label(&t.name);
             let done = t.done.load(Ordering::Relaxed);
             match &t.state {
                 TransferState::Waiting => {
-                    ui.label("waiting...");
+                    ui.spinner();
+                    ui.label("waiting for server...");
                 }
                 TransferState::Active => {
                     let frac = if t.size > 0 { done as f32 / t.size as f32 } else { 0.0 };
@@ -1424,7 +1508,24 @@ fn transfer_list(ui: &mut Ui, s: &Session, max: usize) {
                     ui.label(RichText::new(format!("failed: {e}")).color(Color32::from_rgb(0xE0, 0x50, 0x50)));
                 }
             }
+            if t.is_running() {
+                if ui.small_button("✖ Cancel").clicked() {
+                    cmds.push(TransferCmd::Cancel(*id));
+                }
+            } else if matches!(t.state, TransferState::Failed(_)) && ui.small_button("⟲ Retry").clicked() {
+                cmds.push(TransferCmd::Retry(*id));
+            }
         });
+    }
+    cmds
+}
+
+fn run_transfer_cmds(app: &mut VoxaApp, cmds: Vec<TransferCmd>) {
+    for c in cmds {
+        match c {
+            TransferCmd::Cancel(id) => app.cancel_transfer(id),
+            TransferCmd::Retry(id) => app.retry_transfer(id),
+        }
     }
 }
 
@@ -1434,15 +1535,17 @@ fn transfers_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     }
     let mut open = true;
     let mut clear = false;
+    let mut cmds = Vec::new();
     if let Some(s) = &app.sess {
         egui::Window::new("File Transfers").open(&mut open).resizable(true).show(ctx, |ui| {
-            transfer_list(ui, s, 50);
+            cmds = transfer_list(ui, s, 50);
             clear = ui.button("Clear finished").clicked();
         });
     }
+    run_transfer_cmds(app, cmds);
     if clear {
         if let Some(s) = &mut app.sess {
-            s.transfers.retain(|_, t| matches!(t.state, TransferState::Active | TransferState::Waiting));
+            s.transfers.retain(|_, t| t.is_running());
         }
     }
     app.dlg.transfers = open;

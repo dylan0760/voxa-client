@@ -48,6 +48,12 @@ The MSI is not code-signed. If Windows SmartScreen warns you, choose
 * **Screen sharing:** share a whole screen or a single application. Streams are relayed
   through the server, never peer-to-peer. Viewers watch on a stage above the chat or in
   full view.
+* **File transfers:**
+  * Uploads and downloads show progress, with **Cancel** and **Retry**.
+  * Stalled or interrupted transfers are detected automatically, and the file
+    connection reconnects by itself.
+  * Admins set the max file size and per-channel storage (or unlimited) under
+    **Edit Virtual Server ▸ File transfers**.
 * **Server tools:** file browser per channel, permissions (server and channel groups),
   privilege keys, bans, kick, move, poke, talk power, channel commander.
 * **Everyday conveniences:** identities (export/import), bookmarks, `voxa://host:port`

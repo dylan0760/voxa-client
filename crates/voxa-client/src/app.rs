@@ -118,7 +118,51 @@ pub struct Transfer {
     pub file: Option<std::fs::File>,
     pub state: TransferState,
     pub channel: ChannelId,
+    /// Full path on the server (for retries).
+    pub remote: String,
+    /// Stops the upload pump when the transfer fails or is cancelled.
+    pub cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Watchdog: bytes seen at the last progress check and when they changed.
+    pub last_done: u64,
+    pub last_change: Instant,
 }
+
+impl Transfer {
+    fn new(name: String, upload: bool, size: u64, local: std::path::PathBuf, channel: ChannelId, remote: String) -> Transfer {
+        Transfer {
+            name,
+            upload,
+            size,
+            done: Arc::new(AtomicU64::new(0)),
+            local,
+            file: None,
+            state: TransferState::Waiting,
+            channel,
+            remote,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_done: 0,
+            last_change: Instant::now(),
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.state, TransferState::Waiting | TransferState::Active)
+    }
+
+    fn fail(&mut self, why: impl Into<String>) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.file = None;
+        self.state = TransferState::Failed(why.into());
+    }
+}
+
+/// True if the server version is `min` or newer (feature detection for optional messages).
+pub fn server_at_least(server_version: &str, min: &str) -> bool {
+    !voxa_proto::update::is_newer(min, server_version)
+}
+
+/// No progress for this long marks a transfer as stalled.
+const TRANSFER_STALL: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub struct Session {
     pub conn: Connection,
@@ -147,6 +191,8 @@ pub struct Session {
     pub collapsed: HashSet<ChannelId>,
     pub tcp_ping: u32,
     pub connected_at: Instant,
+    /// File browser limits from the server (1.3.0+); None if unknown.
+    pub file_limits: Option<FileLimits>,
 }
 
 impl Session {
@@ -521,6 +567,7 @@ impl VoxaApp {
             collapsed: HashSet::new(),
             tcp_ping: 0,
             connected_at: Instant::now(),
+            file_limits: None,
         };
         sess.log(EventKind::Info, format!("Trying to connect to {} ({})...", req.label, req.address));
         self.sess = Some(sess);
@@ -604,6 +651,30 @@ impl VoxaApp {
             NetEvent::BulkReady => {
                 if let Some(s) = &mut self.sess {
                     s.bulk_ready = true;
+                    // After a reconnect: resend the full screen and re-subscribe to streams.
+                    if let Some(st) = &s.streamer {
+                        st.keyframe.store(true, Ordering::Relaxed);
+                    }
+                    let watching: Vec<ClientId> = s.watching.iter().copied().collect();
+                    for w in watching {
+                        s.conn.send(C2S::WatchStream { streamer: w, watch: true });
+                    }
+                }
+            }
+            NetEvent::BulkLost(why) => {
+                if let Some(s) = &mut self.sess {
+                    s.bulk_ready = false;
+                    let mut failed = 0;
+                    for t in s.transfers.values_mut().filter(|t| t.is_running()) {
+                        t.fail("Connection lost - click Retry");
+                        failed += 1;
+                    }
+                    let msg = if failed > 0 {
+                        format!("File connection lost ({why}); {failed} transfer(s) stopped. Reconnecting...")
+                    } else {
+                        format!("File connection lost ({why}). Reconnecting...")
+                    };
+                    s.log(EventKind::Warn, msg);
                 }
             }
             NetEvent::Disconnected(reason) => {
@@ -641,19 +712,25 @@ impl VoxaApp {
                 }
             }
             BulkS2C::UploadReady { id } => {
-                if let Some(t) = s.transfers.get_mut(&id) {
+                if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.is_running()) {
                     t.state = TransferState::Active;
+                    t.last_change = Instant::now();
                     let path = t.local.clone();
                     let done = t.done.clone();
+                    let cancel = t.cancel.clone();
                     let tx = s.conn.bulk_tx.clone();
+                    let ctl = s.conn.bulk_ctl.clone();
                     self.rt.spawn(async move {
                         use tokio::io::AsyncReadExt;
                         let Ok(mut f) = tokio::fs::File::open(&path).await else {
-                            let _ = tx.send(BulkC2S::Cancel { id }).await;
+                            let _ = ctl.send(BulkC2S::Cancel { id });
                             return;
                         };
                         let mut buf = vec![0u8; FILE_CHUNK];
                         loop {
+                            if cancel.load(Ordering::Relaxed) {
+                                return;
+                            }
                             match f.read(&mut buf).await {
                                 Ok(0) => break,
                                 Ok(n) => {
@@ -663,11 +740,12 @@ impl VoxaApp {
                                     done.fetch_add(n as u64, Ordering::Relaxed);
                                 }
                                 Err(_) => {
-                                    let _ = tx.send(BulkC2S::Cancel { id }).await;
+                                    let _ = ctl.send(BulkC2S::Cancel { id });
                                     return;
                                 }
                             }
                         }
+                        // Sent on the data queue so it is ordered after the last chunk.
                         let _ = tx.send(BulkC2S::UploadEnd { id }).await;
                     });
                 }
@@ -687,37 +765,51 @@ impl VoxaApp {
                 }
             }
             BulkS2C::DownloadBegin { id, size } => {
-                if let Some(t) = s.transfers.get_mut(&id) {
+                let mut cancel = false;
+                if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.is_running()) {
                     t.size = size;
+                    t.last_change = Instant::now();
                     match std::fs::File::create(&t.local) {
                         Ok(f) => {
                             t.file = Some(f);
                             t.state = TransferState::Active;
                         }
                         Err(e) => {
-                            t.state = TransferState::Failed(e.to_string());
-                            s.conn.bulk_tx.try_send(BulkC2S::Cancel { id }).ok();
+                            t.fail(format!("Cannot save file: {e}"));
+                            cancel = true;
                         }
                     }
                 }
+                if cancel {
+                    s.conn.bulk_control(BulkC2S::Cancel { id });
+                }
             }
             BulkS2C::DownloadChunk { id, data } => {
+                let mut cancel = false;
                 if let Some(t) = s.transfers.get_mut(&id) {
                     use std::io::Write;
                     if let Some(f) = &mut t.file {
                         if let Err(e) = f.write_all(&data) {
-                            t.state = TransferState::Failed(e.to_string());
-                            t.file = None;
+                            t.fail(format!("Write failed: {e}"));
+                            cancel = true;
                         } else {
                             t.done.fetch_add(data.len() as u64, Ordering::Relaxed);
                         }
                     }
                 }
+                if cancel {
+                    s.conn.bulk_control(BulkC2S::Cancel { id });
+                }
             }
             BulkS2C::DownloadEnd { id } => {
-                if let Some(t) = s.transfers.get_mut(&id) {
-                    t.file = None;
-                    if !matches!(t.state, TransferState::Failed(_)) {
+                if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.is_running()) {
+                    if let Some(f) = t.file.take() {
+                        let _ = f.sync_all();
+                    }
+                    let got = t.done.load(Ordering::Relaxed);
+                    if got != t.size {
+                        t.fail(format!("Incomplete download ({} of {})", crate::ui::fmt_size(got), crate::ui::fmt_size(t.size)));
+                    } else {
                         t.state = TransferState::Done;
                         let msg = format!("Downloaded \"{}\" to {}", t.name, t.local.display());
                         s.log(EventKind::Good, msg);
@@ -725,9 +817,8 @@ impl VoxaApp {
                 }
             }
             BulkS2C::TransferError { id, message } => {
-                if let Some(t) = s.transfers.get_mut(&id) {
-                    t.file = None;
-                    t.state = TransferState::Failed(message.clone());
+                if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.is_running()) {
+                    t.fail(message.clone());
                     let msg = format!("Transfer of \"{}\" failed: {message}", t.name);
                     s.log(EventKind::Error, msg);
                 }
@@ -753,7 +844,11 @@ impl VoxaApp {
                 if !server.host_message.is_empty() {
                     self.dlg.error = Some(server.host_message.clone());
                 }
+                let supports_limits = server_at_least(&server.version, "1.3.0");
                 s.server = Some(server);
+                if supports_limits {
+                    s.conn.send(C2S::GetFileLimits);
+                }
                 s.conn.send(C2S::FetchHistory { target: TextTarget::Server, before: None, limit: 50 });
                 let ch = s.my_channel();
                 s.channel_logs.entry(ch).or_default().loading = true;
@@ -958,6 +1053,12 @@ impl VoxaApp {
                     d.result = Some(key);
                 }
             }
+            S2C::FileLimits(l) => {
+                s.file_limits = Some(l);
+                if let Some(d) = &mut self.dlg.server {
+                    d.set_limits(l);
+                }
+            }
             S2C::FileList { channel, path, entries } => {
                 if let Some(fb) = &mut self.dlg.files {
                     if fb.channel == channel && fb.path == path {
@@ -972,25 +1073,26 @@ impl VoxaApp {
 
     pub fn start_upload(&mut self, channel: ChannelId, dir: &str, local: std::path::PathBuf) {
         let Some(s) = &mut self.sess else { return };
-        let Ok(meta) = std::fs::metadata(&local) else { return };
         let name = local.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let id = s.next_transfer;
         s.next_transfer += 1;
         let path = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
-        s.transfers.insert(
-            id,
-            Transfer {
-                name: name.clone(),
-                upload: true,
-                size: meta.len(),
-                done: Arc::new(AtomicU64::new(0)),
-                local,
-                file: None,
-                state: TransferState::Waiting,
-                channel,
-            },
-        );
-        let _ = s.conn.bulk_tx.try_send(BulkC2S::UploadBegin { id, channel, path, size: meta.len(), overwrite: true });
+        let size = std::fs::metadata(&local).map(|m| m.len());
+        let mut t = Transfer::new(name, true, *size.as_ref().unwrap_or(&0), local, channel, path.clone());
+        match size {
+            Err(e) => t.fail(format!("Cannot read file: {e}")),
+            Ok(size) => {
+                let limit = s.file_limits.map(|l| l.max_upload_mb).unwrap_or(0);
+                if limit > 0 && size > limit * 1024 * 1024 {
+                    t.fail(format!("File is larger than the server limit ({})", crate::ui::fmt_size(limit * 1024 * 1024)));
+                } else if !s.bulk_ready {
+                    t.fail("File connection not ready - try again in a moment");
+                } else {
+                    s.conn.bulk_control(BulkC2S::UploadBegin { id, channel, path, size, overwrite: true });
+                }
+            }
+        }
+        s.transfers.insert(id, t);
     }
 
     pub fn start_download(&mut self, channel: ChannelId, remote: String, local: std::path::PathBuf) {
@@ -998,20 +1100,59 @@ impl VoxaApp {
         let id = s.next_transfer;
         s.next_transfer += 1;
         let name = remote.rsplit('/').next().unwrap_or(&remote).to_string();
-        s.transfers.insert(
-            id,
-            Transfer {
-                name,
-                upload: false,
-                size: 0,
-                done: Arc::new(AtomicU64::new(0)),
-                local,
-                file: None,
-                state: TransferState::Waiting,
-                channel,
-            },
-        );
-        let _ = s.conn.bulk_tx.try_send(BulkC2S::Download { id, channel, path: remote });
+        let mut t = Transfer::new(name, false, 0, local, channel, remote.clone());
+        if s.bulk_ready {
+            s.conn.bulk_control(BulkC2S::Download { id, channel, path: remote });
+        } else {
+            t.fail("File connection not ready - try again in a moment");
+        }
+        s.transfers.insert(id, t);
+    }
+
+    /// Restarts a failed transfer with the same file and destination.
+    pub fn retry_transfer(&mut self, id: u32) {
+        let Some(s) = &mut self.sess else { return };
+        let Some(t) = s.transfers.remove(&id) else { return };
+        if t.upload {
+            let dir = t.remote.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
+            self.start_upload(t.channel, &dir, t.local);
+        } else {
+            self.start_download(t.channel, t.remote, t.local);
+        }
+    }
+
+    pub fn cancel_transfer(&mut self, id: u32) {
+        let Some(s) = &mut self.sess else { return };
+        if let Some(t) = s.transfers.get_mut(&id) {
+            if t.is_running() {
+                t.fail("Cancelled");
+                if !t.upload {
+                    let _ = std::fs::remove_file(&t.local);
+                }
+                s.conn.bulk_control(BulkC2S::Cancel { id });
+            }
+        }
+    }
+
+    /// Fails transfers that made no progress for a while instead of hanging forever.
+    fn transfer_watchdog(&mut self) {
+        let Some(s) = &mut self.sess else { return };
+        let mut stalled = Vec::new();
+        for (id, t) in s.transfers.iter_mut().filter(|(_, t)| t.is_running()) {
+            let done = t.done.load(Ordering::Relaxed);
+            if done != t.last_done {
+                t.last_done = done;
+                t.last_change = Instant::now();
+            } else if t.last_change.elapsed() > TRANSFER_STALL {
+                t.fail("Stalled (no data for 60 s) - click Retry");
+                stalled.push(*id);
+            }
+        }
+        for id in stalled {
+            s.conn.bulk_control(BulkC2S::Cancel { id });
+            let name = s.transfers.get(&id).map(|t| t.name.clone()).unwrap_or_default();
+            s.log(EventKind::Warn, format!("Transfer of \"{name}\" stalled and was stopped"));
+        }
     }
 }
 
@@ -1022,6 +1163,11 @@ impl eframe::App for VoxaApp {
         self.process_events();
         self.handle_tray(ctx);
         self.handle_hotkeys();
+        self.transfer_watchdog();
+        // Keep the watchdog ticking (also while hidden in the tray) during transfers.
+        if self.sess.as_ref().map(|s| s.transfers.values().any(|t| t.is_running())).unwrap_or(false) {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
         if self.settings.auto_update {
             self.updater.auto_check();
         }
