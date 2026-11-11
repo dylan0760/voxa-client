@@ -143,8 +143,11 @@ pub fn apply_style(ctx: &egui::Context, s: &Settings) {
     for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive, &mut v.widgets.open] {
         w.corner_radius = CornerRadius::same(6);
     }
+    // Buttons use the "weak" fill; radio buttons, checkboxes and slider tracks use
+    // `bg_fill`, which must differ from the window background to stay visible.
     v.widgets.inactive.weak_bg_fill = t.card;
-    v.widgets.inactive.bg_fill = t.card;
+    v.widgets.inactive.bg_fill = if s.dark_theme { Color32::from_rgb(0x3A, 0x3D, 0x46) } else { Color32::from_rgb(0xD5, 0xD9, 0xE0) };
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, if s.dark_theme { Color32::from_rgb(0x55, 0x5A, 0x66) } else { Color32::from_rgb(0xA8, 0xAE, 0xB8) });
     v.widgets.hovered.weak_bg_fill = t.hover;
     v.widgets.hovered.bg_fill = t.hover;
     v.widgets.active.weak_bg_fill = ACCENT;

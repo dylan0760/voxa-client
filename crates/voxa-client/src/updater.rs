@@ -107,6 +107,26 @@ impl Updater {
     }
 }
 
+/// egui sizes a window to its content's height, so a window can only be made taller
+/// by dragging if the content fills the space it is given. `show_fill` lets the
+/// content take up the remaining height, which makes every window resizable both ways.
+pub trait ShowFill {
+    fn show_fill<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<Option<R>>>;
+}
+
+impl ShowFill for egui::Window<'_> {
+    fn show_fill<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<Option<R>>> {
+        self.show(ctx, |ui| {
+            let r = add(ui);
+            let rest = ui.available_height();
+            if rest.is_finite() && rest > 0.0 {
+                ui.allocate_space(egui::vec2(0.0, rest));
+            }
+            r
+        })
+    }
+}
+
 // ------------------------------------------------------------------ what's new
 
 const NOTES_FILE: &str = "update-notes.json";
@@ -198,7 +218,7 @@ pub fn whats_new_window(ctx: &egui::Context, wn: &WhatsNew, product: &str) -> bo
         .resizable(true)
         .default_size([520.0, 440.0])
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
+        .show_fill(ctx, |ui| {
             let state = wn.state.lock().unwrap().clone();
             match state {
                 NotesState::Loading => {
@@ -214,7 +234,7 @@ pub fn whats_new_window(ctx: &egui::Context, wn: &WhatsNew, product: &str) -> bo
                 NotesState::Ready { title, notes, url } => {
                     ui.label(RichText::new(title).heading());
                     ui.separator();
-                    egui::ScrollArea::vertical().max_height(340.0).auto_shrink([false, true]).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height((ui.available_height() - 70.0).max(120.0)).auto_shrink([false, false]).show(ui, |ui| {
                         render_notes(ui, &notes);
                     });
                     ui.separator();
@@ -293,5 +313,61 @@ pub fn ui(updater: &mut Updater, ui: &mut egui::Ui, product: &str) {
     ui.add_space(6.0);
     if ui.add_enabled(!updater.busy(), egui::Button::new("⟲ Check for updates")).clicked() {
         updater.check();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShowFill;
+    use egui::{pos2, vec2, Event, PointerButton, RawInput, Rect};
+
+    /// Drags the bottom edge of a window down by 200 px, then up by 150 px, and
+    /// returns its heights: (start, after down, after up).
+    fn drag_bottom(fill: bool) -> (f32, f32, f32) {
+        let ctx = egui::Context::default();
+        let mut rect = Rect::NOTHING;
+        let mut frame = |events: Vec<Event>, rect: &mut Rect| {
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 900.0))), events, ..Default::default() };
+            let out = ctx.run_ui(input, |ui| {
+                let w = egui::Window::new("Test").default_pos([100.0, 100.0]).default_size([400.0, 200.0]).resizable(true).collapsible(false);
+                let body = |ui: &mut egui::Ui| {
+                    ui.label("Some setting");
+                    ui.checkbox(&mut true, "A checkbox");
+                };
+                let r = if fill { w.show_fill(ui.ctx(), body) } else { w.show(ui.ctx(), body) };
+                *rect = r.unwrap().response.rect;
+            });
+            out.drop_without_applying_deltas();
+        };
+        for _ in 0..3 {
+            frame(vec![], &mut rect);
+        }
+        let start = rect.height();
+        let mut drag = |dy: f32, rect: &mut Rect| {
+            let p = pos2(rect.center().x, rect.bottom() - 1.0);
+            frame(vec![Event::PointerMoved(p)], rect);
+            frame(vec![Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Default::default() }], rect);
+            for i in 1..=10 {
+                frame(vec![Event::PointerMoved(p + vec2(0.0, dy * i as f32 / 10.0))], rect);
+            }
+            let end = p + vec2(0.0, dy);
+            frame(vec![Event::PointerButton { pos: end, button: PointerButton::Primary, pressed: false, modifiers: Default::default() }], rect);
+            for _ in 0..3 {
+                frame(vec![Event::PointerMoved(pos2(5.0, 5.0))], rect);
+            }
+        };
+        drag(200.0, &mut rect);
+        let down = rect.height();
+        drag(-150.0, &mut rect);
+        (start, down, rect.height())
+    }
+
+    #[test]
+    fn windows_resize_vertically() {
+        let plain = drag_bottom(false);
+        let fill = drag_bottom(true);
+        println!("plain show: {plain:?}  show_fill: {fill:?}");
+        assert!(fill.1 > fill.0 + 150.0, "window did not grow: {fill:?}");
+        assert!(fill.2 < fill.1 - 100.0, "window did not shrink: {fill:?}");
     }
 }

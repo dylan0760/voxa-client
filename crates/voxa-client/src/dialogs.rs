@@ -6,6 +6,7 @@ use voxa_proto::*;
 use crate::app::*;
 use crate::config::*;
 use crate::ui::{fmt_date, fmt_size, Action};
+use crate::updater::ShowFill;
 
 pub enum Open {
     Connect,
@@ -392,7 +393,7 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
 }
 
 fn window(title: &str) -> egui::Window<'_> {
-    egui::Window::new(title).collapsible(false).resizable(false)
+    egui::Window::new(title).collapsible(false).resizable(true).min_width(280.0)
 }
 
 fn form_row(ui: &mut Ui, label: &str, f: impl FnOnce(&mut Ui)) {
@@ -416,7 +417,7 @@ fn ok_cancel(ui: &mut Ui, ok: &str) -> (bool, bool) {
 fn text_prompt(ctx: &egui::Context, title: &str, label: &str, text: &mut String, keep: &mut bool, multiline: bool) -> bool {
     let mut ok = false;
     let mut open = true;
-    window(title).open(&mut open).show(ctx, |ui| {
+    window(title).open(&mut open).show_fill(ctx, |ui| {
         ui.label(label);
         let r = if multiline {
             ui.add(egui::TextEdit::multiline(text).desired_width(360.0).desired_rows(4))
@@ -460,7 +461,7 @@ fn connect_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.connect.take() else { return };
     let mut open = true;
     let mut close = false;
-    window("Connect").open(&mut open).show(ctx, |ui| {
+    window("Connect").open(&mut open).show_fill(ctx, |ui| {
         egui::Grid::new("conn").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
             form_row(ui, "Server address:", |ui| {
                 ui.horizontal(|ui| {
@@ -546,11 +547,11 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     }
     let mut open = true;
     let mut connect = None;
-    egui::Window::new("Bookmarks").open(&mut open).collapsible(false).resizable(true).default_size([620.0, 360.0]).show(ctx, |ui| {
+    egui::Window::new("Bookmarks").open(&mut open).collapsible(false).resizable(true).default_size([620.0, 360.0]).show_fill(ctx, |ui| {
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(200.0);
-                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height((ui.available_height() - 40.0).max(120.0)).auto_shrink([true, false]).show(ui, |ui| {
                     for (i, b) in app.settings.bookmarks.iter().enumerate() {
                         let label = if b.name.is_empty() { b.address.clone() } else { b.name.clone() };
                         if ui.selectable_label(d.selected == Some(i), label).clicked() {
@@ -630,7 +631,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut open = true;
     let mut close = false;
     let mut apply = false;
-    egui::Window::new("Options").open(&mut open).collapsible(false).resizable(true).default_size([560.0, 420.0]).show(ctx, |ui| {
+    egui::Window::new("Options").open(&mut open).collapsible(false).resizable(true).default_size([600.0, 480.0]).show_fill(ctx, |ui| {
         ui.horizontal(|ui| {
             for (i, t) in ["Capture", "Playback", "Screen Share", "Hotkeys", "Application"].iter().enumerate() {
                 if ui.selectable_label(d.tab == i as u8, *t).clicked() {
@@ -875,7 +876,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
 fn identities_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.identities.take() else { return };
     let mut open = true;
-    egui::Window::new("Identities").open(&mut open).collapsible(false).resizable(true).default_size([600.0, 340.0]).show(ctx, |ui| {
+    egui::Window::new("Identities").open(&mut open).collapsible(false).resizable(true).default_size([600.0, 380.0]).show_fill(ctx, |ui| {
         ui.label(RichText::new("Your identity is a cryptographic key pair that the server uses to recognize you. Keep a backup (Export) to keep your permissions.").weak());
         ui.separator();
         ui.horizontal_top(|ui| {
@@ -957,7 +958,7 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut open = true;
     let mut close = false;
     let title = if d.id.is_some() { "Edit Channel" } else { "Create Channel" };
-    egui::Window::new(title).open(&mut open).collapsible(false).resizable(true).default_width(480.0).show(ctx, |ui| {
+    egui::Window::new(title).open(&mut open).collapsible(false).resizable(true).default_width(480.0).show_fill(ctx, |ui| {
         egui::Grid::new("chg").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
             form_row(ui, "Name:", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut d.edit.name).desired_width(320.0));
@@ -1062,7 +1063,7 @@ fn server_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(s) = &app.sess else { return };
     let mut open = true;
     let mut close = false;
-    egui::Window::new("Edit Virtual Server").open(&mut open).collapsible(false).resizable(true).default_width(520.0).show(ctx, |ui| {
+    egui::Window::new("Edit Virtual Server").open(&mut open).collapsible(false).resizable(true).default_width(520.0).show_fill(ctx, |ui| {
         egui::Grid::new("srv").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
             form_row(ui, "Server name:", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut d.edit.name).desired_width(340.0));
@@ -1149,7 +1150,7 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(s) = &app.sess else { return };
     let mut open = true;
     let title = if d.kind == GroupKind::Server { "Server Groups" } else { "Channel Groups" };
-    egui::Window::new(title).open(&mut open).collapsible(false).resizable(true).default_size([760.0, 520.0]).show(ctx, |ui| {
+    egui::Window::new(title).open(&mut open).collapsible(false).resizable(true).default_size([760.0, 520.0]).show_fill(ctx, |ui| {
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(200.0);
@@ -1196,7 +1197,7 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                 });
                 ui.label(RichText::new("Permissions").strong());
-                egui::ScrollArea::vertical().max_height(220.0).id_salt("perms").show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height((ui.available_height() - 250.0).max(140.0)).auto_shrink([false, false]).id_salt("perms").show(ui, |ui| {
                     for (bit, name) in perm::NAMES {
                         let mut on = g.perms & bit != 0;
                         if ui.checkbox(&mut on, *name).changed() {
@@ -1265,8 +1266,8 @@ fn bans_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.bans.take() else { return };
     let Some(s) = &app.sess else { return };
     let mut open = true;
-    egui::Window::new("Ban List").open(&mut open).collapsible(false).resizable(true).default_size([760.0, 420.0]).show(ctx, |ui| {
-        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+    egui::Window::new("Ban List").open(&mut open).collapsible(false).resizable(true).default_size([760.0, 420.0]).show_fill(ctx, |ui| {
+        egui::ScrollArea::vertical().max_height((ui.available_height() - 200.0).max(100.0)).auto_shrink([false, false]).show(ui, |ui| {
             egui::Grid::new("bans").num_columns(7).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
                 for h in ["Name", "Unique ID", "IP", "Reason", "Expires", "By", ""] {
                     ui.label(RichText::new(h).strong());
@@ -1342,7 +1343,7 @@ fn privkey_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.privkey_create.take() else { return };
     let Some(s) = &app.sess else { return };
     let mut open = true;
-    window("Create Privilege Key").open(&mut open).show(ctx, |ui| {
+    window("Create Privilege Key").open(&mut open).show_fill(ctx, |ui| {
         egui::Grid::new("pk").num_columns(2).show(ui, |ui| {
             form_row(ui, "Group:", |ui| {
                 egui::ComboBox::from_id_salt("pkg").selected_text(s.group_name(d.group)).show_ui(ui, |ui| {
@@ -1419,7 +1420,7 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         .collapsible(false)
         .resizable(true)
         .default_size([700.0, 480.0])
-        .show(ctx, |ui| {
+        .show_fill(ctx, |ui| {
             let refresh = |d: &mut FileBrowser| {
                 d.loading = true;
                 d.selected.clear();
@@ -1534,7 +1535,7 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             ui.separator();
             let mut enter_dir = None;
             let list_h = (ui.available_height() - 150.0).max(140.0);
-            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                 if d.loading {
                     ui.spinner();
                 }
@@ -1697,8 +1698,10 @@ fn transfers_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut clear = false;
     let mut cmds = Vec::new();
     if let Some(s) = &app.sess {
-        egui::Window::new("File Transfers").open(&mut open).resizable(true).show(ctx, |ui| {
-            cmds = transfer_list(ui, s, 50);
+        egui::Window::new("File Transfers").open(&mut open).resizable(true).default_size([520.0, 320.0]).show_fill(ctx, |ui| {
+            egui::ScrollArea::vertical().max_height((ui.available_height() - 36.0).max(80.0)).auto_shrink([false, false]).show(ui, |ui| {
+                cmds = transfer_list(ui, s, 500);
+            });
             clear = ui.button("Clear finished").clicked();
         });
     }
@@ -1718,7 +1721,7 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut open = true;
     let mut close = false;
     let mut start = None;
-    egui::Window::new("Share Screen / Application").open(&mut open).collapsible(false).resizable(true).default_size([460.0, 380.0]).show(ctx, |ui| {
+    egui::Window::new("Share Screen / Application").open(&mut open).collapsible(false).resizable(true).default_size([460.0, 380.0]).show_fill(ctx, |ui| {
         ui.label("Choose what to share with your channel. The stream is relayed through the server.");
         ui.horizontal(|ui| {
             if ui.button("⟲ Refresh list").clicked() {
@@ -1726,7 +1729,7 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 d.selected = 0;
             }
         });
-        egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height((ui.available_height() - 170.0).max(100.0)).auto_shrink([false, false]).show(ui, |ui| {
             for (i, src) in d.sources.iter().enumerate() {
                 ui.selectable_value(&mut d.selected, i, src.label());
             }
@@ -1789,7 +1792,7 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if let Some((target, id, author, text)) = app.dlg.delete_msg.take() {
         let mut open = true;
         let mut close = false;
-        window("Delete Message").open(&mut open).show(ctx, |ui| {
+        window("Delete Message").open(&mut open).show_fill(ctx, |ui| {
             ui.set_max_width(420.0);
             ui.label("Delete this message? It is removed for everyone and from the chat history.");
             Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(6).inner_margin(Margin::same(8)).show(ui, |ui| {
@@ -1825,7 +1828,7 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             ),
             TextTarget::Private(_) => "this conversation".into(),
         };
-        window("Clear Chat History").open(&mut open).show(ctx, |ui| {
+        window("Clear Chat History").open(&mut open).show_fill(ctx, |ui| {
             ui.set_max_width(420.0);
             ui.label(RichText::new(format!("Delete every message in {what}?")).strong());
             ui.label("This removes all messages for everyone and permanently deletes them from the server's chat history. It cannot be undone.");
@@ -1859,7 +1862,7 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             .collapsible(false)
             .resizable(true)
             .default_size([460.0, 520.0])
-            .show(ctx, |ui| {
+            .show_fill(ctx, |ui| {
                 ui.label("Personal permissions apply to this user on top of their server and channel groups.");
                 ui.label(RichText::new(format!("Unique ID: {}", d.uid)).small().weak());
                 ui.separator();
@@ -1870,7 +1873,7 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                     return;
                 }
-                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height((ui.available_height() - 50.0).max(120.0)).auto_shrink([false, false]).show(ui, |ui| {
                     for (bit, name) in perm::NAMES {
                         let via_group = (from_groups | channel_group) & bit != 0;
                         let mut on = d.edit & bit != 0;
@@ -1989,7 +1992,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut open = true;
         let mut close = false;
         let name = app.sess.as_ref().map(|s| s.client_name(p.target)).unwrap_or_default();
-        window("Ban Client").open(&mut open).show(ctx, |ui| {
+        window("Ban Client").open(&mut open).show_fill(ctx, |ui| {
             ui.label(format!("Ban {name} (by unique ID and IP address)"));
             egui::Grid::new("banc").num_columns(2).show(ui, |ui| {
                 form_row(ui, "Reason:", |ui| {
@@ -2019,7 +2022,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut close = false;
         let name = app.sess.as_ref().and_then(|s| s.channels.get(&id)).map(|c| c.name.clone()).unwrap_or_default();
         let occupied = app.sess.as_ref().map(|s| s.clients.values().any(|c| c.channel == id)).unwrap_or(false);
-        window("Delete Channel").open(&mut open).show(ctx, |ui| {
+        window("Delete Channel").open(&mut open).show_fill(ctx, |ui| {
             ui.label(format!("Really delete channel \"{name}\" and all its sub-channels, files and chat history?"));
             if occupied {
                 ui.checkbox(&mut force, "The channel is not empty - move clients out and delete anyway");
@@ -2042,7 +2045,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let (from, msg) = app.dlg.pokes[0].clone();
         let mut open = true;
         let mut ok = false;
-        window("You were poked").id(egui::Id::unique("poked")).open(&mut open).show(ctx, |ui| {
+        window("You were poked").id(egui::Id::unique("poked")).open(&mut open).show_fill(ctx, |ui| {
             ui.label(RichText::new(format!("{from} poked you:")).strong());
             ui.label(&msg);
             ok = ui.button("OK").clicked();
@@ -2055,7 +2058,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if let Some((req, expected, got)) = app.dlg.fingerprint.take() {
         let mut open = true;
         let mut close = false;
-        window("Server identity changed!").open(&mut open).show(ctx, |ui| {
+        window("Server identity changed!").open(&mut open).show_fill(ctx, |ui| {
             ui.label(RichText::new("⚠ The identity of this server has changed.").color(Color32::from_rgb(0xE0, 0x9B, 0x30)).strong());
             ui.label("This can happen after a server reinstall, but it could also mean someone is intercepting your connection.");
             ui.label(format!("Server: {}", req.address));
@@ -2082,7 +2085,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut open = true;
         if let Some(s) = &app.sess {
             let v = &app.voice_shared;
-            window("Connection Info").open(&mut open).show(ctx, |ui| {
+            window("Connection Info").open(&mut open).show_fill(ctx, |ui| {
                 egui::Grid::new("ci").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
                     form_row(ui, "Server:", |ui| {
                         ui.label(s.req.address.as_str());
@@ -2124,7 +2127,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut show_notes = false;
     if app.dlg.about {
         let mut open = true;
-        window("About Voxa").open(&mut open).show(ctx, |ui| {
+        window("About Voxa").open(&mut open).show_fill(ctx, |ui| {
             ui.heading(format!("Voxa {}", APP_VERSION));
             ui.label("Free and open source voice chat, text chat and screen sharing.");
             ui.label("No license keys, no accounts, no registration.");
@@ -2158,7 +2161,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     // Updates.
     if app.dlg.update {
         let mut open = true;
-        window("Voxa Updates").open(&mut open).show(ctx, |ui| {
+        window("Voxa Updates").open(&mut open).show_fill(ctx, |ui| {
             ui.set_min_width(380.0);
             crate::updater::ui(&mut app.updater, ui, "Voxa");
         });
@@ -2168,7 +2171,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if let Some(e) = app.dlg.error.take() {
         let mut open = true;
         let mut ok = false;
-        window("Voxa").id(egui::Id::unique("errorbox")).open(&mut open).show(ctx, |ui| {
+        window("Voxa").id(egui::Id::unique("errorbox")).open(&mut open).show_fill(ctx, |ui| {
             ui.label(&e);
             ok = ui.button("OK").clicked();
         });
