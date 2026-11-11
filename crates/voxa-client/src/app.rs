@@ -103,6 +103,8 @@ impl ChatLog {
 }
 
 pub enum TransferState {
+    /// Waiting for a free slot (see MAX_PARALLEL_TRANSFERS).
+    Queued,
     Waiting,
     Active,
     Done,
@@ -161,6 +163,9 @@ pub fn server_at_least(server_version: &str, min: &str) -> bool {
     !voxa_proto::update::is_newer(min, server_version)
 }
 
+/// Transfers running at the same time; the rest wait in the queue.
+pub const MAX_PARALLEL_TRANSFERS: usize = 3;
+
 /// No progress for this long marks a transfer as stalled.
 const TRANSFER_STALL: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -193,6 +198,10 @@ pub struct Session {
     pub connected_at: Instant,
     /// File browser limits from the server (1.3.0+); None if unknown.
     pub file_limits: Option<FileLimits>,
+    /// My personal permissions on top of my groups (servers 1.4.0+).
+    pub extra_perms: u64,
+    /// Folder downloads waiting for their server listing: (channel, remote dir) -> local dir.
+    pub pending_downloads: HashMap<(ChannelId, String), std::path::PathBuf>,
 }
 
 impl Session {
@@ -209,7 +218,44 @@ impl Session {
     }
 
     pub fn server_perms_of(&self, c: &ClientInfo) -> u64 {
-        c.server_groups.iter().filter_map(|g| self.groups.get(g)).fold(0, |a, g| a | g.perms)
+        let own = if c.id == self.me { self.extra_perms } else { 0 };
+        c.server_groups.iter().filter_map(|g| self.groups.get(g)).fold(own, |a, g| a | g.perms)
+    }
+
+    /// Permission check for a chat: server chat uses server-wide permissions only,
+    /// channel chat also the channel group (same rules as the server).
+    pub fn chat_perm(&self, target: TextTarget, bit: u64) -> bool {
+        let Some(me) = self.me() else { return false };
+        match target {
+            TextTarget::Server => self.server_perms_of(me) & bit == bit,
+            TextTarget::Channel(_) => self.perms() & bit == bit,
+            TextTarget::Private(_) => false,
+        }
+    }
+
+    pub fn queue_upload(&mut self, channel: ChannelId, dir: &str, local: std::path::PathBuf) {
+        let name = local.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let path = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
+        let size = std::fs::metadata(&local).map(|m| m.len()).unwrap_or(0);
+        let mut t = Transfer::new(name, true, size, local, channel, path);
+        t.state = TransferState::Queued;
+        let id = self.next_transfer;
+        self.next_transfer += 1;
+        self.transfers.insert(id, t);
+    }
+
+    pub fn queue_download(&mut self, channel: ChannelId, remote: String, local: std::path::PathBuf) {
+        let name = remote.rsplit('/').next().unwrap_or(&remote).to_string();
+        let mut t = Transfer::new(name, false, 0, local, channel, remote);
+        t.state = TransferState::Queued;
+        let id = self.next_transfer;
+        self.next_transfer += 1;
+        self.transfers.insert(id, t);
+    }
+
+    /// True if the connected server is at least min (for optional newer messages).
+    pub fn supports(&self, min: &str) -> bool {
+        self.server.as_ref().map(|i| server_at_least(&i.version, min)).unwrap_or(false)
     }
 
     /// Best-effort client side view of my permissions (the server enforces).
@@ -323,6 +369,8 @@ pub struct VoxaApp {
     update_notified: bool,
     pub emoji: crate::ui::EmojiPicker,
     pub hotkeys: crate::hotkeys::Hotkeys,
+    /// "What's new" window (shown once after an update, or from About).
+    pub whats_new: Option<crate::updater::WhatsNew>,
     hotkey_rx: Receiver<crate::hotkeys::HotkeyAction>,
 }
 
@@ -379,12 +427,21 @@ impl VoxaApp {
             quitting: false,
             hidden: false,
             want_show: false,
-            updater: crate::updater::Updater::new(UPDATE_REPO, is_client_msi, cc.egui_ctx.clone()),
+            updater: crate::updater::Updater::new(UPDATE_REPO, is_client_msi, cc.egui_ctx.clone()).with_notes_dir(crate::config::config_dir()),
             update_notified: false,
             emoji: Default::default(),
             hotkeys,
             hotkey_rx,
+            whats_new: None,
         };
+        // First start of a new version: show its change log (not on a fresh install).
+        if app.settings.last_seen_version != APP_VERSION {
+            if !app.settings.fresh {
+                app.show_whats_new();
+            }
+            app.settings.last_seen_version = APP_VERSION.to_string();
+            app.settings.save();
+        }
         app.offline_log.lines.push(ChatLine::Event {
             ts: now_unix(),
             text: "Select a bookmark or click Connect to join a server.".into(),
@@ -395,6 +452,10 @@ impl VoxaApp {
             app.connect_link(&t);
         }
         app
+    }
+
+    pub fn show_whats_new(&mut self) {
+        self.whats_new = Some(crate::updater::WhatsNew::fetch(UPDATE_REPO, APP_VERSION, Some(crate::config::config_dir()), self.ctx.clone()));
     }
 
     fn connect_link(&mut self, t: &str) {
@@ -568,6 +629,8 @@ impl VoxaApp {
             tcp_ping: 0,
             connected_at: Instant::now(),
             file_limits: None,
+            extra_perms: 0,
+            pending_downloads: HashMap::new(),
         };
         sess.log(EventKind::Info, format!("Trying to connect to {} ({})...", req.label, req.address));
         self.sess = Some(sess);
@@ -1053,6 +1116,29 @@ impl VoxaApp {
                     d.result = Some(key);
                 }
             }
+            S2C::YourPerms(p) => {
+                s.extra_perms = p;
+            }
+            S2C::ClientPerms { uid, perms } => {
+                if let Some(d) = &mut self.dlg.client_perms {
+                    if d.uid == uid {
+                        d.perms = Some(perms);
+                        d.edit = perms;
+                    }
+                }
+            }
+            S2C::ChatCleared { target, by } => {
+                let log = match target {
+                    TextTarget::Server => Some(&mut s.server_log),
+                    TextTarget::Channel(ch) => s.channel_logs.get_mut(&ch),
+                    TextTarget::Private(_) => None,
+                };
+                if let Some(log) = log {
+                    log.lines.retain(|l| !matches!(l, ChatLine::Msg(_)));
+                    log.complete = true;
+                    log.lines.push(ChatLine::Event { ts: now_unix(), text: format!("{by} cleared the chat history"), kind: EventKind::Warn });
+                }
+            }
             S2C::FileLimits(l) => {
                 s.file_limits = Some(l);
                 if let Some(d) = &mut self.dlg.server {
@@ -1060,6 +1146,20 @@ impl VoxaApp {
                 }
             }
             S2C::FileList { channel, path, entries } => {
+                // Recursive folder download: queue the files, descend into sub-folders.
+                if let Some(local) = s.pending_downloads.remove(&(channel, path.clone())) {
+                    for e in &entries {
+                        let remote = format!("{path}/{}", e.name);
+                        if e.is_dir {
+                            let sub = local.join(&e.name);
+                            let _ = std::fs::create_dir_all(&sub);
+                            s.pending_downloads.insert((channel, remote.clone()), sub);
+                            s.conn.send(C2S::FileList { channel, path: remote });
+                        } else {
+                            s.queue_download(channel, remote, local.join(&e.name));
+                        }
+                    }
+                }
                 if let Some(fb) = &mut self.dlg.files {
                     if fb.channel == channel && fb.path == path {
                         fb.entries = entries;
@@ -1071,42 +1171,65 @@ impl VoxaApp {
         self.update_voice_flags();
     }
 
+    /// Queues a file upload into `dir` of a channel (started by `pump_transfers`).
     pub fn start_upload(&mut self, channel: ChannelId, dir: &str, local: std::path::PathBuf) {
+        if let Some(s) = &mut self.sess {
+            s.queue_upload(channel, dir, local);
+        }
+    }
+
+    /// Queues a download of `remote` to the local file `local`.
+    pub fn start_download(&mut self, channel: ChannelId, remote: String, local: std::path::PathBuf) {
+        if let Some(s) = &mut self.sess {
+            s.queue_download(channel, remote, local);
+        }
+    }
+
+    /// Uploads a whole local folder (recursively, keeping its structure) into `dir`.
+    pub fn upload_folder(&mut self, channel: ChannelId, dir: &str, root: std::path::PathBuf) {
         let Some(s) = &mut self.sess else { return };
-        let name = local.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let id = s.next_transfer;
-        s.next_transfer += 1;
-        let path = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
-        let size = std::fs::metadata(&local).map(|m| m.len());
-        let mut t = Transfer::new(name, true, *size.as_ref().unwrap_or(&0), local, channel, path.clone());
-        match size {
-            Err(e) => t.fail(format!("Cannot read file: {e}")),
-            Ok(size) => {
-                let limit = s.file_limits.map(|l| l.max_upload_mb).unwrap_or(0);
-                if limit > 0 && size > limit * 1024 * 1024 {
-                    t.fail(format!("File is larger than the server limit ({})", crate::ui::fmt_size(limit * 1024 * 1024)));
-                } else if !s.bulk_ready {
-                    t.fail("File connection not ready - try again in a moment");
-                } else {
-                    s.conn.bulk_control(BulkC2S::UploadBegin { id, channel, path, size, overwrite: true });
+        let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "folder".into());
+        let base = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
+        s.conn.send(C2S::FileMkdir { channel, path: base.clone() });
+        let mut stack = vec![(root, base)];
+        let (mut files, mut folders) = (0usize, 0usize);
+        while let Some((local_dir, remote_dir)) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&local_dir) else { continue };
+            let mut entries: Vec<_> = rd.flatten().collect();
+            entries.sort_by_key(|e| e.file_name());
+            for e in entries {
+                let name = e.file_name().to_string_lossy().to_string();
+                let Ok(ft) = e.file_type() else { continue };
+                if ft.is_dir() {
+                    let sub = format!("{remote_dir}/{name}");
+                    // Create it explicitly so empty folders are kept too.
+                    s.conn.send(C2S::FileMkdir { channel, path: sub.clone() });
+                    stack.push((e.path(), sub));
+                    folders += 1;
+                } else if ft.is_file() {
+                    s.queue_upload(channel, &remote_dir, e.path());
+                    files += 1;
                 }
             }
         }
-        s.transfers.insert(id, t);
+        s.log(EventKind::Info, format!("Uploading folder \"{name}\": {files} file(s) in {} folder(s)", folders + 1));
     }
 
-    pub fn start_download(&mut self, channel: ChannelId, remote: String, local: std::path::PathBuf) {
+    /// Downloads several files / folders into a local destination folder. Folders are
+    /// listed on the server and downloaded recursively.
+    pub fn download_many(&mut self, channel: ChannelId, items: Vec<(String, bool)>, dest: std::path::PathBuf) {
         let Some(s) = &mut self.sess else { return };
-        let id = s.next_transfer;
-        s.next_transfer += 1;
-        let name = remote.rsplit('/').next().unwrap_or(&remote).to_string();
-        let mut t = Transfer::new(name, false, 0, local, channel, remote.clone());
-        if s.bulk_ready {
-            s.conn.bulk_control(BulkC2S::Download { id, channel, path: remote });
-        } else {
-            t.fail("File connection not ready - try again in a moment");
+        for (remote, is_dir) in items {
+            let name = remote.rsplit('/').next().unwrap_or(&remote).to_string();
+            let local = dest.join(&name);
+            if is_dir {
+                let _ = std::fs::create_dir_all(&local);
+                s.pending_downloads.insert((channel, remote.clone()), local);
+                s.conn.send(C2S::FileList { channel, path: remote });
+            } else {
+                s.queue_download(channel, remote, local);
+            }
         }
-        s.transfers.insert(id, t);
     }
 
     /// Restarts a failed transfer with the same file and destination.
@@ -1115,21 +1238,67 @@ impl VoxaApp {
         let Some(t) = s.transfers.remove(&id) else { return };
         if t.upload {
             let dir = t.remote.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
-            self.start_upload(t.channel, &dir, t.local);
+            s.queue_upload(t.channel, &dir, t.local);
         } else {
-            self.start_download(t.channel, t.remote, t.local);
+            s.queue_download(t.channel, t.remote, t.local);
         }
     }
 
     pub fn cancel_transfer(&mut self, id: u32) {
         let Some(s) = &mut self.sess else { return };
         if let Some(t) = s.transfers.get_mut(&id) {
-            if t.is_running() {
+            if matches!(t.state, TransferState::Queued) {
+                t.state = TransferState::Failed("Cancelled".into());
+            } else if t.is_running() {
                 t.fail("Cancelled");
                 if !t.upload {
                     let _ = std::fs::remove_file(&t.local);
                 }
                 s.conn.bulk_control(BulkC2S::Cancel { id });
+            }
+        }
+    }
+
+    /// Starts queued transfers, at most `MAX_PARALLEL_TRANSFERS` at a time.
+    fn pump_transfers(&mut self) {
+        let Some(s) = &mut self.sess else { return };
+        if !s.bulk_ready {
+            return;
+        }
+        let running = s.transfers.values().filter(|t| t.is_running()).count();
+        if running >= MAX_PARALLEL_TRANSFERS {
+            return;
+        }
+        let queued: Vec<u32> = s
+            .transfers
+            .iter()
+            .filter(|(_, t)| matches!(t.state, TransferState::Queued))
+            .map(|(id, _)| *id)
+            .take(MAX_PARALLEL_TRANSFERS - running)
+            .collect();
+        let limit = s.file_limits.map(|l| l.max_upload_mb).unwrap_or(0);
+        for id in queued {
+            let Some(t) = s.transfers.get_mut(&id) else { continue };
+            if t.upload {
+                let size = match std::fs::metadata(&t.local) {
+                    Ok(m) => m.len(),
+                    Err(e) => {
+                        t.state = TransferState::Failed(format!("Cannot read file: {e}"));
+                        continue;
+                    }
+                };
+                t.size = size;
+                if limit > 0 && size > limit * 1024 * 1024 {
+                    t.state = TransferState::Failed(format!("File is larger than the server limit ({})", crate::ui::fmt_size(limit * 1024 * 1024)));
+                    continue;
+                }
+                t.state = TransferState::Waiting;
+                t.last_change = Instant::now();
+                s.conn.bulk_control(BulkC2S::UploadBegin { id, channel: t.channel, path: t.remote.clone(), size, overwrite: true });
+            } else {
+                t.state = TransferState::Waiting;
+                t.last_change = Instant::now();
+                s.conn.bulk_control(BulkC2S::Download { id, channel: t.channel, path: t.remote.clone() });
             }
         }
     }
@@ -1164,8 +1333,9 @@ impl eframe::App for VoxaApp {
         self.handle_tray(ctx);
         self.handle_hotkeys();
         self.transfer_watchdog();
+        self.pump_transfers();
         // Keep the watchdog ticking (also while hidden in the tray) during transfers.
-        if self.sess.as_ref().map(|s| s.transfers.values().any(|t| t.is_running())).unwrap_or(false) {
+        if self.sess.as_ref().map(|s| s.transfers.values().any(|t| t.is_running() || matches!(t.state, TransferState::Queued))).unwrap_or(false) {
             ctx.request_repaint_after(std::time::Duration::from_secs(1));
         }
         if self.settings.auto_update {

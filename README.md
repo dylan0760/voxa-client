@@ -48,6 +48,24 @@ The MSI is not code-signed. If Windows SmartScreen warns you, choose
 * **Screen sharing:** share a whole screen or a single application. Streams are relayed
   through the server, never peer-to-peer. Viewers watch on a stage above the chat or in
   full view.
+* **Chat moderation:**
+  * Hover a message for 📋 Copy and 🗑 Delete, or right-click it. Deleted messages
+    disappear for everyone and from the stored history.
+  * You can always delete your own messages. Deleting other people's needs
+    *Delete anyone's chat messages*.
+  * Users with *Clear entire chat history* get a 🗑 button in the chat header that wipes
+    a whole channel or server chat.
+* **Personal permissions:** right-click a user ▸ **Permissions…** to grant individual
+  permissions on top of their groups (needs *Manage groups*).
+* **File browser:**
+  * Select: click, Ctrl+click, Shift+click, Select all, Ctrl+A.
+  * Delete many items at once (Delete key).
+  * **Upload Folder…** uploads whole folders with sub-folders. You can also drag files
+    and folders in from Explorer.
+  * Download several files, or whole folders, into a folder.
+  * Big batches are queued, running 3 transfers at a time.
+* **What's new:** after an update the new version shows its change log once. It's also
+  available any time under **About ▸ What's new**.
 * **File transfers:**
   * Uploads and downloads show progress, with **Cancel** and **Retry**.
   * Stalled or interrupted transfers are detected automatically, and the file

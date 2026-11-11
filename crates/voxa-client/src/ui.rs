@@ -1115,6 +1115,10 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
             a.push(Action::Dialog(dialogs::Open::Description(c.id)));
             ui.close();
         }
+        if perms & perm::GROUP_MANAGE != 0 && s.supports("1.4.0") && ui.button("🔐  Permissions...").clicked() {
+            a.push(Action::Dialog(dialogs::Open::ClientPerms(c.id)));
+            ui.close();
+        }
         if ui.button("📋  Copy Unique ID").clicked() {
             a.push(Action::CopyText(c.uid.clone()));
             ui.close();
@@ -1315,6 +1319,16 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 if icon_button(ui, "🖥", "Share your screen", s.streamer.is_some().then_some(RED)).clicked() {
                     a.push(Action::ShareScreen);
                 }
+                let chat_target = match s.tab {
+                    ChatKey::Server => Some(TextTarget::Server),
+                    ChatKey::Channel => Some(TextTarget::Channel(my_channel)),
+                    ChatKey::Private(_) => None,
+                };
+                if let Some(tg) = chat_target.filter(|tg| s.supports("1.4.0") && s.chat_perm(*tg, perm::CHAT_CLEAR)) {
+                    if icon_button(ui, "🗑", "Clear the entire chat history of this conversation", None).clicked() {
+                        a.push(Action::Dialog(dialogs::Open::ClearChat(tg)));
+                    }
+                }
             });
         });
         // Conversation tabs.
@@ -1396,6 +1410,55 @@ fn insert_emoji(input: &mut String, ch: &str) {
     input.push(' ');
 }
 
+/// Discord-style message actions: hover toolbar (copy / delete) and a right-click menu.
+fn message_actions(ui: &mut Ui, row: &egui::Response, m: &ChatMessage, target: TextTarget, can_del: bool, a: &mut Vec<Action>) {
+    let t = theme(ui.visuals().dark_mode);
+    // The row itself only senses hover; give it a click sense for the context menu.
+    let rect = row.rect.expand2(egui::vec2(0.0, 2.0));
+    let click = ui.interact(rect, egui::Id::unique(("msgrow", m.id, m.ts, &m.from_uid)), Sense::click());
+    let delete = |a: &mut Vec<Action>, shift: bool| {
+        if shift {
+            a.push(Action::DeleteMessage(target, m.id));
+        } else {
+            a.push(Action::Dialog(dialogs::Open::DeleteMessage(target, m.id, m.from_name.clone(), m.text.clone())));
+        }
+    };
+    click.context_menu(|ui| {
+        if ui.button("📋  Copy Text").clicked() {
+            a.push(Action::CopyText(m.text.clone()));
+            ui.close();
+        }
+        if can_del && ui.button(RichText::new("🗑  Delete Message").color(RED)).clicked() {
+            delete(a, false);
+            ui.close();
+        }
+    });
+    if ui.rect_contains_pointer(rect) {
+        ui.painter().rect_filled(rect, CornerRadius::same(4), t.hover.linear_multiply(0.35));
+        let n = if can_del { 2.0 } else { 1.0 };
+        let bar = egui::Rect::from_min_size(egui::pos2(rect.right() - 30.0 * n - 6.0, rect.top() + 1.0), egui::vec2(30.0 * n + 4.0, 28.0));
+        ui.painter().rect_filled(bar, CornerRadius::same(6), t.card);
+        let mut x = bar.left() + 2.0;
+        let mut button = |ui: &mut Ui, icon: &str, tip: &str, color: Color32| -> bool {
+            let r = egui::Rect::from_min_size(egui::pos2(x, bar.top() + 1.0), egui::vec2(28.0, 26.0));
+            x += 30.0;
+            let resp = ui.interact(r, egui::Id::unique((icon, m.id, m.ts)), Sense::click()).on_hover_text(tip);
+            if resp.hovered() {
+                ui.painter().rect_filled(r, CornerRadius::same(5), t.hover);
+            }
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, icon, FontId::proportional(14.0), color);
+            resp.clicked()
+        };
+        if button(ui, "📋", "Copy text", t.dim) {
+            a.push(Action::CopyText(m.text.clone()));
+        }
+        if can_del && button(ui, "🗑", "Delete message (hold Shift to skip confirmation)", RED) {
+            let shift = ui.input(|i| i.modifiers.shift);
+            delete(a, shift);
+        }
+    }
+}
+
 /// Chat message body: colour emoji font, and "jumbo" emoji for emoji-only messages.
 fn message_text(ui: &mut Ui, text: &str) {
     let size = if crate::emoji::is_only_emoji(text) { 34.0 } else { body_size(ui) };
@@ -1469,13 +1532,15 @@ fn emoji_picker(ui: &mut Ui, anchor: egui::Rect, picker: &mut EmojiPicker, input
 fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings: &Settings, picker: &mut EmojiPicker, ui: &mut Ui) {
     let t = theme(settings.dark_theme);
     let my_uid = s.my_uid.clone();
-    let can_delete_others = s.has(perm::CHAT_DELETE);
     let my_channel = s.my_channel();
     let target = match s.tab {
         ChatKey::Server => TextTarget::Server,
         ChatKey::Channel => TextTarget::Channel(my_channel),
         ChatKey::Private(id) => TextTarget::Private(id),
     };
+    // Mirrors the server: server chat uses server-wide permissions, channel chat also
+    // the channel group. Own messages can always be deleted.
+    let can_delete_others = s.chat_perm(target, perm::CHAT_DELETE);
     let hint = match s.tab {
         ChatKey::Server => "Message the server".to_string(),
         ChatKey::Channel => format!("Message #{}", s.channels.get(&my_channel).map(|c| c.name.clone()).unwrap_or_default()),
@@ -1623,16 +1688,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                                 });
                             })
                         };
-                        r.response.context_menu(|ui| {
-                            if ui.button("📋  Copy Text").clicked() {
-                                a.push(Action::CopyText(m.text.clone()));
-                                ui.close();
-                            }
-                            if can_del && ui.button(RichText::new("🗑  Delete Message").color(RED)).clicked() {
-                                a.push(Action::DeleteMessage(target, m.id));
-                                ui.close();
-                            }
-                        });
+                        message_actions(ui, &r.response, m, target, can_del, a);
                     }
                 }
             }

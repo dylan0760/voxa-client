@@ -115,6 +115,11 @@ pub struct Settings {
     pub recent_emoji: Vec<String>,
     /// Global hotkeys (Options > Hotkeys).
     pub hotkeys: Vec<crate::hotkeys::HotkeyEntry>,
+    /// Version whose "What's new" was last shown (to show it once after an update).
+    pub last_seen_version: String,
+    /// True when no settings file existed yet (fresh install). Not saved.
+    #[serde(skip)]
+    pub fresh: bool,
 }
 
 impl Default for Settings {
@@ -137,6 +142,8 @@ impl Default for Settings {
             auto_update: true,
             recent_emoji: Vec::new(),
             hotkeys: Vec::new(),
+            last_seen_version: String::new(),
+            fresh: false,
         }
     }
 }
@@ -155,10 +162,12 @@ pub fn config_dir() -> PathBuf {
 impl Settings {
     pub fn load() -> Settings {
         let path = config_dir().join("settings.json");
+        let fresh = !path.exists();
         let mut s: Settings = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
+        s.fresh = fresh;
         if s.identities.is_empty() {
             s.identities.push(Identity::generate("Default"));
             s.default_identity = 0;

@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 
-use egui::{Color32, RichText, Ui};
+use egui::{Color32, Frame, Margin, RichText, Ui};
 use voxa_proto::*;
 
 use crate::app::*;
@@ -36,6 +36,9 @@ pub enum Open {
     TalkRequest,
     Share,
     Updates,
+    DeleteMessage(TextTarget, MessageId, String, String),
+    ClearChat(TextTarget),
+    ClientPerms(ClientId),
 }
 
 pub struct ConnectDlg {
@@ -141,14 +144,26 @@ pub struct FileBrowser {
     pub path: String,
     pub entries: Vec<FileEntry>,
     pub loading: bool,
-    pub selected: Option<String>,
+    pub selected: std::collections::BTreeSet<String>,
+    /// Row of the last plain / Ctrl click (start of a Shift+click range).
+    pub anchor: Option<usize>,
     pub new_folder: Option<String>,
+    pub confirm_delete: bool,
 }
 
 pub struct ShareDlg {
     pub sources: Vec<crate::capture::Source>,
     pub selected: usize,
     pub settings: StreamSettings,
+}
+
+pub struct ClientPermsDlg {
+    pub uid: String,
+    pub name: String,
+    pub client: ClientId,
+    /// Saved value from the server (None until loaded).
+    pub perms: Option<u64>,
+    pub edit: u64,
 }
 
 pub struct TextPrompt {
@@ -182,6 +197,9 @@ pub struct Dialogs {
     pub conn_info: bool,
     pub about: bool,
     pub update: bool,
+    pub delete_msg: Option<(TextTarget, MessageId, String, String)>,
+    pub clear_chat: Option<TextTarget>,
+    pub client_perms: Option<ClientPermsDlg>,
     pub channel_password: Option<(ChannelId, String)>,
     pub away: Option<String>,
     pub talk_request: Option<String>,
@@ -194,6 +212,9 @@ pub struct Dialogs {
 
 impl Dialogs {
     pub fn close_session_dialogs(&mut self) {
+        self.delete_msg = None;
+        self.clear_chat = None;
+        self.client_perms = None;
         self.channel = None;
         self.delete_channel = None;
         self.server = None;
@@ -308,7 +329,7 @@ impl Dialogs {
                     s.conn.send(C2S::GetFileLimits);
                 }
                 s.conn.send(C2S::FileList { channel: ch, path: String::new() });
-                self.files = Some(FileBrowser { channel: ch, path: String::new(), entries: Vec::new(), loading: true, selected: None, new_folder: None });
+                self.files = Some(FileBrowser { channel: ch, path: String::new(), entries: Vec::new(), loading: true, selected: Default::default(), anchor: None, new_folder: None, confirm_delete: false });
             }
             Open::Transfers => self.transfers = true,
             Open::ConnectionInfo => self.conn_info = true,
@@ -336,6 +357,14 @@ impl Dialogs {
             Open::ChannelPassword(ch) => self.channel_password = Some((ch, String::new())),
             Open::Away => self.away = Some(String::new()),
             Open::TalkRequest => self.talk_request = Some(String::new()),
+            Open::DeleteMessage(t, id, author, text) => self.delete_msg = Some((t, id, author, text)),
+            Open::ClearChat(t) => self.clear_chat = Some(t),
+            Open::ClientPerms(id) => {
+                if let Some(c) = s.clients.get(&id) {
+                    s.conn.send(C2S::GetClientPerms(c.uid.clone()));
+                    self.client_perms = Some(ClientPermsDlg { uid: c.uid.clone(), name: c.nickname.clone(), client: id, perms: None, edit: 0 });
+                }
+            }
             Open::Share => {
                 self.share = Some(ShareDlg { sources: crate::capture::sources(), selected: 0, settings: settings.stream.clone() });
             }
@@ -422,6 +451,7 @@ pub fn draw_all(app: &mut VoxaApp, ctx: &egui::Context) {
     transfers_dialog(app, ctx);
     share_dialog(app, ctx);
     small_dialogs(app, ctx);
+    chat_dialogs(app, ctx);
 }
 
 // ---------------------------------------------------------------- connect & bookmarks
@@ -1356,123 +1386,250 @@ fn privkey_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
 
 // ---------------------------------------------------------------- files
 
+enum FileOp {
+    UploadFiles(Vec<std::path::PathBuf>),
+    UploadFolder(std::path::PathBuf),
+    DownloadOne(String, std::path::PathBuf),
+    DownloadMany(Vec<(String, bool)>, std::path::PathBuf),
+}
+
 fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.files.take() else { return };
     let Some(s) = &app.sess else { return };
     let mut open = true;
-    let mut upload: Vec<std::path::PathBuf> = Vec::new();
-    let mut download: Option<(String, std::path::PathBuf)> = None;
+    let mut ops: Vec<FileOp> = Vec::new();
     let mut cmds: Vec<TransferCmd> = Vec::new();
     let cname = s.channels.get(&d.channel).map(|c| c.name.clone()).unwrap_or_default();
-    egui::Window::new(format!("File Browser - {cname}")).id(egui::Id::unique("filebrowser")).open(&mut open).collapsible(false).resizable(true).default_size([640.0, 420.0]).show(ctx, |ui| {
-        let refresh = |d: &mut FileBrowser| {
-            d.loading = true;
-            s.conn.send(C2S::FileList { channel: d.channel, path: d.path.clone() });
-        };
-        ui.horizontal(|ui| {
-            if ui.add_enabled(!d.path.is_empty(), egui::Button::new("⬆ Up")).clicked() {
-                d.path = d.path.rsplit_once('/').map(|(a, _)| a.to_string()).unwrap_or_default();
-                d.selected = None;
-                refresh(&mut d);
-            }
-            if ui.button("⟲ Refresh").clicked() {
-                refresh(&mut d);
-            }
-            if ui.button("⬆ Upload...").clicked() {
-                if let Some(files) = rfd::FileDialog::new().set_title("Upload files").pick_files() {
-                    upload = files;
+    let remote_of = |d: &FileBrowser, name: &str| if d.path.is_empty() { name.to_string() } else { format!("{}/{}", d.path, name) };
+
+    // Files / folders dragged in from Explorer are uploaded into the current folder.
+    let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
+    for p in dropped {
+        if p.is_dir() {
+            ops.push(FileOp::UploadFolder(p));
+        } else {
+            ops.push(FileOp::UploadFiles(vec![p]));
+        }
+    }
+    let hovering_files = ctx.input(|i| !i.raw.hovered_files.is_empty());
+
+    egui::Window::new(format!("File Browser - {cname}"))
+        .id(egui::Id::unique("filebrowser"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_size([700.0, 480.0])
+        .show(ctx, |ui| {
+            let refresh = |d: &mut FileBrowser| {
+                d.loading = true;
+                d.selected.clear();
+                d.anchor = None;
+                d.confirm_delete = false;
+                s.conn.send(C2S::FileList { channel: d.channel, path: d.path.clone() });
+            };
+            // Keyboard: Ctrl+A selects everything, Delete asks to delete the selection.
+            let typing = ctx.memory(|m| m.focused().is_some());
+            if !typing && ui.ui_contains_pointer() {
+                if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A)) {
+                    d.selected = d.entries.iter().map(|e| e.name.clone()).collect();
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Delete)) && !d.selected.is_empty() {
+                    d.confirm_delete = true;
                 }
             }
-            if ui.button("📁 New Folder").clicked() {
-                d.new_folder = Some(String::new());
-            }
-            let sel_file = d.selected.as_ref().and_then(|n| d.entries.iter().find(|e| &e.name == n)).cloned();
-            if ui.add_enabled(sel_file.as_ref().map(|e| !e.is_dir).unwrap_or(false), egui::Button::new("⬇ Download")).clicked() {
-                if let Some(e) = &sel_file {
-                    if let Some(p) = rfd::FileDialog::new().set_file_name(&e.name).save_file() {
-                        let remote = if d.path.is_empty() { e.name.clone() } else { format!("{}/{}", d.path, e.name) };
-                        download = Some((remote, p));
-                    }
-                }
-            }
-            if ui.add_enabled(sel_file.is_some(), egui::Button::new("🗑 Delete")).clicked() {
-                if let Some(e) = &sel_file {
-                    let remote = if d.path.is_empty() { e.name.clone() } else { format!("{}/{}", d.path, e.name) };
-                    s.conn.send(C2S::FileDelete { channel: d.channel, path: remote });
-                    d.selected = None;
+
+            ui.horizontal_wrapped(|ui| {
+                if ui.add_enabled(!d.path.is_empty(), egui::Button::new("⬆ Up")).clicked() {
+                    d.path = d.path.rsplit_once('/').map(|(a, _)| a.to_string()).unwrap_or_default();
                     refresh(&mut d);
                 }
-            }
-        });
-        if let Some(name) = &mut d.new_folder {
-            let mut create = false;
-            let mut cancel = false;
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(name).hint_text("Folder name"));
-                create = ui.button("Create").clicked();
-                cancel = ui.button("Cancel").clicked();
-            });
-            if create && !name.trim().is_empty() {
-                let p = if d.path.is_empty() { name.trim().to_string() } else { format!("{}/{}", d.path, name.trim()) };
-                s.conn.send(C2S::FileMkdir { channel: d.channel, path: p });
-                d.new_folder = None;
-                refresh(&mut d);
-            } else if cancel {
-                d.new_folder = None;
-            }
-        }
-        ui.label(RichText::new(format!("/{}", d.path)).monospace());
-        ui.separator();
-        let mut enter_dir = None;
-        egui::ScrollArea::vertical().max_height(240.0).auto_shrink([false, true]).show(ui, |ui| {
-            if d.loading {
-                ui.spinner();
-            }
-            egui::Grid::new("files").num_columns(3).striped(true).spacing([20.0, 4.0]).show(ui, |ui| {
-                ui.label(RichText::new("Name").strong());
-                ui.label(RichText::new("Size").strong());
-                ui.label(RichText::new("Modified").strong());
-                ui.end_row();
-                for e in &d.entries {
-                    let label = format!("{} {}", if e.is_dir { "📁" } else { "📄" }, e.name);
-                    let r = ui.selectable_label(d.selected.as_deref() == Some(e.name.as_str()), label);
-                    if r.clicked() {
-                        d.selected = Some(e.name.clone());
+                if ui.button("⟲ Refresh").clicked() {
+                    refresh(&mut d);
+                }
+                ui.separator();
+                if ui.button("📄 Upload Files...").clicked() {
+                    if let Some(files) = rfd::FileDialog::new().set_title("Upload files").pick_files() {
+                        ops.push(FileOp::UploadFiles(files));
                     }
-                    if r.double_clicked() && e.is_dir {
-                        enter_dir = Some(e.name.clone());
+                }
+                if ui.button("📂 Upload Folder...").on_hover_text("Uploads a whole folder including its sub-folders").clicked() {
+                    if let Some(folder) = rfd::FileDialog::new().set_title("Upload folder").pick_folder() {
+                        ops.push(FileOp::UploadFolder(folder));
                     }
-                    ui.label(if e.is_dir { String::new() } else { fmt_size(e.size) });
-                    ui.label(fmt_date(e.modified));
-                    ui.end_row();
+                }
+                if ui.button("📁 New Folder").clicked() {
+                    d.new_folder = Some(String::new());
+                }
+                ui.separator();
+                let n = d.selected.len();
+                let dl_label = if n > 1 { format!("⬇ Download ({n})") } else { "⬇ Download".to_string() };
+                if ui.add_enabled(n > 0, egui::Button::new(dl_label)).clicked() {
+                    let items: Vec<(String, bool)> = d
+                        .entries
+                        .iter()
+                        .filter(|e| d.selected.contains(&e.name))
+                        .map(|e| (remote_of(&d, &e.name), e.is_dir))
+                        .collect();
+                    if items.len() == 1 && !items[0].1 {
+                        let name = items[0].0.rsplit('/').next().unwrap_or(&items[0].0).to_string();
+                        if let Some(p) = rfd::FileDialog::new().set_file_name(&name).save_file() {
+                            ops.push(FileOp::DownloadOne(items[0].0.clone(), p));
+                        }
+                    } else if let Some(dest) = rfd::FileDialog::new().set_title("Download into folder").pick_folder() {
+                        ops.push(FileOp::DownloadMany(items, dest));
+                    }
+                }
+                let del_label = if n > 1 { format!("🗑 Delete ({n})") } else { "🗑 Delete".to_string() };
+                if ui.add_enabled(n > 0, egui::Button::new(del_label)).clicked() {
+                    d.confirm_delete = true;
                 }
             });
-            if d.entries.is_empty() && !d.loading {
-                ui.label(RichText::new("This folder is empty. Use Upload to add files.").weak());
+
+            if let Some(name) = &mut d.new_folder {
+                let mut create = false;
+                let mut cancel = false;
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(name).hint_text("Folder name"));
+                    create = ui.button("Create").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+                if create && !name.trim().is_empty() {
+                    let p = if d.path.is_empty() { name.trim().to_string() } else { format!("{}/{}", d.path, name.trim()) };
+                    s.conn.send(C2S::FileMkdir { channel: d.channel, path: p });
+                    d.new_folder = None;
+                    refresh(&mut d);
+                } else if cancel {
+                    d.new_folder = None;
+                }
             }
+
+            if d.confirm_delete {
+                let n = d.selected.len();
+                let folders = d.entries.iter().filter(|e| e.is_dir && d.selected.contains(&e.name)).count();
+                Frame::new().fill(Color32::from_rgb(0x5A, 0x1E, 0x22)).corner_radius(6).inner_margin(Margin::same(8)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let what = if folders > 0 { format!("{n} item(s), including everything inside {folders} folder(s)") } else { format!("{n} file(s)") };
+                    ui.label(RichText::new(format!("Delete {what}? This cannot be undone.")).color(Color32::WHITE));
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new(RichText::new("Delete").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
+                            let names: Vec<String> = d.selected.iter().cloned().collect();
+                            for name in names {
+                                s.conn.send(C2S::FileDelete { channel: d.channel, path: remote_of(&d, &name) });
+                            }
+                            refresh(&mut d);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            d.confirm_delete = false;
+                        }
+                    });
+                });
+            }
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("/{}", d.path)).monospace());
+                if !d.selected.is_empty() {
+                    ui.label(RichText::new(format!("· {} of {} selected", d.selected.len(), d.entries.len())).weak());
+                }
+            });
+            ui.separator();
+            let mut enter_dir = None;
+            let list_h = (ui.available_height() - 150.0).max(140.0);
+            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
+                if d.loading {
+                    ui.spinner();
+                }
+                if hovering_files {
+                    ui.label(RichText::new("⬇ Drop here to upload into this folder").strong().color(Color32::from_rgb(0x25, 0x80, 0xC3)));
+                }
+                egui::Grid::new("files").num_columns(4).striped(true).spacing([14.0, 4.0]).show(ui, |ui| {
+                    // Header with "select all".
+                    let all = !d.entries.is_empty() && d.selected.len() == d.entries.len();
+                    let mut all_box = all;
+                    if ui.checkbox(&mut all_box, "").on_hover_text("Select all (Ctrl+A)").changed() {
+                        if all_box {
+                            d.selected = d.entries.iter().map(|e| e.name.clone()).collect();
+                        } else {
+                            d.selected.clear();
+                        }
+                    }
+                    ui.label(RichText::new("Name").strong());
+                    ui.label(RichText::new("Size").strong());
+                    ui.label(RichText::new("Modified").strong());
+                    ui.end_row();
+                    for (idx, e) in d.entries.clone().iter().enumerate() {
+                        let mut checked = d.selected.contains(&e.name);
+                        if ui.checkbox(&mut checked, "").changed() {
+                            if checked {
+                                d.selected.insert(e.name.clone());
+                            } else {
+                                d.selected.remove(&e.name);
+                            }
+                            d.anchor = Some(idx);
+                        }
+                        let label = format!("{} {}", if e.is_dir { "📁" } else { "📄" }, e.name);
+                        let r = ui.selectable_label(d.selected.contains(&e.name), label);
+                        if r.clicked() {
+                            let m = ui.input(|i| i.modifiers);
+                            if m.shift {
+                                // Range from the last clicked row.
+                                let a = d.anchor.unwrap_or(idx);
+                                if !m.command {
+                                    d.selected.clear();
+                                }
+                                for x in d.entries[a.min(idx)..=a.max(idx)].iter() {
+                                    d.selected.insert(x.name.clone());
+                                }
+                            } else if m.command {
+                                if !d.selected.remove(&e.name) {
+                                    d.selected.insert(e.name.clone());
+                                }
+                                d.anchor = Some(idx);
+                            } else {
+                                d.selected.clear();
+                                d.selected.insert(e.name.clone());
+                                d.anchor = Some(idx);
+                            }
+                        }
+                        if r.double_clicked() && e.is_dir {
+                            enter_dir = Some(e.name.clone());
+                        }
+                        ui.label(if e.is_dir { String::new() } else { fmt_size(e.size) });
+                        ui.label(fmt_date(e.modified));
+                        ui.end_row();
+                    }
+                });
+                if d.entries.is_empty() && !d.loading {
+                    ui.label(RichText::new("This folder is empty. Upload files or a folder, or drag them in from Explorer.").weak());
+                }
+            });
+            if let Some(dir) = enter_dir {
+                d.path = remote_of(&d, &dir);
+                refresh(&mut d);
+            }
+            ui.label(RichText::new("Tip: Ctrl+click / Shift+click to select several, Ctrl+A for all, Delete to remove.").small().weak());
+            if let Some(l) = s.file_limits {
+                let lim = |mb: u64| if mb == 0 { "unlimited".to_string() } else { fmt_size(mb * 1024 * 1024) };
+                ui.label(RichText::new(format!("Max file size: {} · Storage per channel: {}", lim(l.max_upload_mb), lim(l.channel_quota_mb))).small().weak());
+            }
+            ui.separator();
+            cmds = transfer_list(ui, s, 6);
         });
-        if let Some(dir) = enter_dir {
-            d.path = if d.path.is_empty() { dir } else { format!("{}/{dir}", d.path) };
-            d.selected = None;
-            refresh(&mut d);
-        }
-        if let Some(l) = s.file_limits {
-            let lim = |mb: u64| if mb == 0 { "unlimited".to_string() } else { fmt_size(mb * 1024 * 1024) };
-            ui.label(RichText::new(format!("Max file size: {} · Storage per channel: {}", lim(l.max_upload_mb), lim(l.channel_quota_mb))).small().weak());
-        }
-        ui.separator();
-        cmds = transfer_list(ui, s, 4);
-    });
     run_transfer_cmds(app, std::mem::take(&mut cmds));
     let (ch, path) = (d.channel, d.path.clone());
     if open {
         app.dlg.files = Some(d);
     }
-    for f in upload {
-        app.start_upload(ch, &path, f);
-    }
-    if let Some((remote, local)) = download {
-        app.start_download(ch, remote, local);
+    for op in ops {
+        match op {
+            FileOp::UploadFiles(files) => {
+                for f in files {
+                    app.start_upload(ch, &path, f);
+                }
+            }
+            FileOp::UploadFolder(folder) => app.upload_folder(ch, &path, folder),
+            FileOp::DownloadOne(remote, local) => app.start_download(ch, remote, local),
+            FileOp::DownloadMany(items, dest) => app.download_many(ch, items, dest),
+        }
     }
 }
 
@@ -1493,6 +1650,9 @@ fn transfer_list(ui: &mut Ui, s: &Session, max: usize) -> Vec<TransferCmd> {
             ui.label(&t.name);
             let done = t.done.load(Ordering::Relaxed);
             match &t.state {
+                TransferState::Queued => {
+                    ui.label(RichText::new("queued").weak());
+                }
                 TransferState::Waiting => {
                     ui.spinner();
                     ui.label("waiting for server...");
@@ -1508,7 +1668,7 @@ fn transfer_list(ui: &mut Ui, s: &Session, max: usize) -> Vec<TransferCmd> {
                     ui.label(RichText::new(format!("failed: {e}")).color(Color32::from_rgb(0xE0, 0x50, 0x50)));
                 }
             }
-            if t.is_running() {
+            if t.is_running() || matches!(t.state, TransferState::Queued) {
                 if ui.small_button("✖ Cancel").clicked() {
                     cmds.push(TransferCmd::Cancel(*id));
                 }
@@ -1623,6 +1783,132 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
 }
 
 // ---------------------------------------------------------------- small prompts
+
+fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
+    // Delete a single message.
+    if let Some((target, id, author, text)) = app.dlg.delete_msg.take() {
+        let mut open = true;
+        let mut close = false;
+        window("Delete Message").open(&mut open).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label("Delete this message? It is removed for everyone and from the chat history.");
+            Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(6).inner_margin(Margin::same(8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(&author).strong());
+                let preview: String = text.chars().take(300).collect();
+                ui.label(RichText::new(preview).font(crate::ui::chat_font(13.0)));
+            });
+            ui.label(RichText::new("Tip: hold Shift while clicking 🗑 to delete without this question.").small().weak());
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(RichText::new("Delete").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
+                    app.send(C2S::DeleteMessage { target, id });
+                    close = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if open && !close {
+            app.dlg.delete_msg = Some((target, id, author, text));
+        }
+    }
+    // Clear a whole chat.
+    if let Some(target) = app.dlg.clear_chat.take() {
+        let mut open = true;
+        let mut close = false;
+        let what = match target {
+            TextTarget::Server => "the server chat".to_string(),
+            TextTarget::Channel(ch) => format!(
+                "the chat of channel \"{}\"",
+                app.sess.as_ref().and_then(|s| s.channels.get(&ch)).map(|c| c.name.clone()).unwrap_or_default()
+            ),
+            TextTarget::Private(_) => "this conversation".into(),
+        };
+        window("Clear Chat History").open(&mut open).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label(RichText::new(format!("Delete every message in {what}?")).strong());
+            ui.label("This removes all messages for everyone and permanently deletes them from the server's chat history. It cannot be undone.");
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(RichText::new("Clear history").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
+                    app.send(C2S::ClearChat(target));
+                    close = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if open && !close {
+            app.dlg.clear_chat = Some(target);
+        }
+    }
+    // Per-user permissions.
+    if let Some(mut d) = app.dlg.client_perms.take() {
+        let Some(s) = &app.sess else { return };
+        let mut open = true;
+        let mut close = false;
+        let mine = s.perms();
+        let (from_groups, channel_group) = match s.clients.get(&d.client) {
+            Some(c) => (s.server_perms_of(c), s.groups.get(&c.channel_group).map(|g| g.perms).unwrap_or(0)),
+            None => (0, 0),
+        };
+        egui::Window::new(format!("Permissions - {}", d.name))
+            .id(egui::Id::unique(("clientperms", d.uid.as_str())))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([460.0, 520.0])
+            .show(ctx, |ui| {
+                ui.label("Personal permissions apply to this user on top of their server and channel groups.");
+                ui.label(RichText::new(format!("Unique ID: {}", d.uid)).small().weak());
+                ui.separator();
+                if d.perms.is_none() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Loading...");
+                    });
+                    return;
+                }
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for (bit, name) in perm::NAMES {
+                        let via_group = (from_groups | channel_group) & bit != 0;
+                        let mut on = d.edit & bit != 0;
+                        ui.horizontal(|ui| {
+                            // You can only grant what you have yourself (the server enforces this too).
+                            let r = ui.add_enabled(mine & bit != 0 || on, egui::Checkbox::new(&mut on, *name));
+                            if r.changed() {
+                                if on {
+                                    d.edit |= bit;
+                                } else {
+                                    d.edit &= !bit;
+                                }
+                            }
+                            if via_group {
+                                ui.label(RichText::new("✔ already via group").small().color(Color32::from_rgb(0x3B, 0xA5, 0x5D)));
+                            }
+                        });
+                    }
+                });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("💾 Save").clicked() {
+                        s.conn.send(C2S::SetClientPerms { uid: d.uid.clone(), perms: d.edit });
+                        close = true;
+                    }
+                    if ui.button("Clear all").clicked() {
+                        d.edit = 0;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if open && !close {
+            app.dlg.client_perms = Some(d);
+        }
+    }
+}
 
 fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     // Channel password.
@@ -1835,6 +2121,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         app.dlg.conn_info = open && app.sess.is_some();
     }
     // About.
+    let mut show_notes = false;
     if app.dlg.about {
         let mut open = true;
         window("About Voxa").open(&mut open).show(ctx, |ui| {
@@ -1848,12 +2135,25 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             ui.add_space(6.0);
             ui.label(RichText::new("Licensed under MIT OR Apache-2.0").weak());
             ui.add_space(6.0);
-            if ui.button("⬆ Check for updates").clicked() {
-                app.dlg.update = true;
-                app.updater.check();
-            }
+            ui.horizontal(|ui| {
+                if ui.button("⬆ Check for updates").clicked() {
+                    app.dlg.update = true;
+                    app.updater.check();
+                }
+                if ui.button("🎉 What's new").clicked() {
+                    show_notes = true;
+                }
+            });
         });
         app.dlg.about = open;
+    }
+    if show_notes {
+        app.show_whats_new();
+    }
+    if let Some(wn) = &app.whats_new {
+        if !crate::updater::whats_new_window(ctx, wn, "Voxa") {
+            app.whats_new = None;
+        }
     }
     // Updates.
     if app.dlg.update {
