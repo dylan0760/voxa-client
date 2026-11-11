@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Voxa client installer (WiX Toolset v3). Built by build.ps1. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Product Id="*" Name="Voxa" Language="1033" Version="$(var.Version)"
+           Manufacturer="Voxa Project" UpgradeCode="53EF9CAB-2FD8-4B53-B4F2-501F4A026ED4">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64"
+             Description="Voxa voice, chat and screen sharing client" Comments="Free and open source software" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Voxa is already installed." AllowSameVersionUpgrades="yes" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="VoxaIcon" SourceFile="$(var.Assets)\voxa.ico" />
+    <Property Id="ARPPRODUCTICON" Value="VoxaIcon" />
+    <Property Id="ARPCOMMENTS" Value="Free and open source voice chat. No license keys required." />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Voxa" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#VoxaExe]" />
+    <CustomAction Id="LaunchApplication" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" />
+    <!-- Voxa may be hidden in the system tray; close it for upgrades/uninstall. -->
+    <util:CloseApplication Id="CloseVoxa" Target="voxa.exe" CloseMessage="no" RebootPrompt="no" TerminateProcess="0" />
+
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.Assets)\license.rtf" />
+    <WixVariable Id="WixUIBannerBmp" Value="$(var.Assets)\client-banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(var.Assets)\client-dialog.bmp" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Voxa" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+      <Directory Id="DesktopFolder" />
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="VoxaExe" Guid="*" Win64="yes">
+        <File Id="VoxaExe" Source="$(var.Bin)\voxa.exe" KeyPath="yes" Checksum="yes" />
+        <!-- voxa://host[:port] links open the client and connect. -->
+        <RegistryKey Root="HKLM" Key="Software\Classes\voxa">
+          <RegistryValue Type="string" Value="URL:Voxa Protocol" />
+          <RegistryValue Name="URL Protocol" Type="string" Value="" />
+          <RegistryKey Key="DefaultIcon">
+            <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]voxa.exe&quot;,0" />
+          </RegistryKey>
+          <RegistryKey Key="shell\open\command">
+            <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]voxa.exe&quot; &quot;%1&quot;" />
+          </RegistryKey>
+        </RegistryKey>
+      </Component>
+      <Component Id="DocReadme" Guid="*" Win64="yes"><File Id="Readme" Source="$(var.Docs)\README.txt" KeyPath="yes" /></Component>
+      <Component Id="DocMit" Guid="*" Win64="yes"><File Id="LicenseMit" Source="$(var.Docs)\LICENSE-MIT.txt" KeyPath="yes" /></Component>
+      <Component Id="DocApache" Guid="*" Win64="yes"><File Id="LicenseApache" Source="$(var.Docs)\LICENSE-APACHE.txt" KeyPath="yes" /></Component>
+      <Component Id="DocNotices" Guid="*" Win64="yes"><File Id="Notices" Source="$(var.Docs)\THIRD-PARTY-NOTICES.txt" KeyPath="yes" /></Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="*" Win64="yes">
+        <Shortcut Id="StartMenuVoxa" Name="Voxa" Description="Voxa voice chat"
+                  Target="[INSTALLFOLDER]voxa.exe" WorkingDirectory="INSTALLFOLDER" Icon="VoxaIcon" />
+        <RegistryValue Root="HKLM" Key="Software\Voxa" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="*" Win64="yes">
+        <Shortcut Id="DesktopVoxa" Name="Voxa" Description="Voxa voice chat"
+                  Target="[INSTALLFOLDER]voxa.exe" WorkingDirectory="INSTALLFOLDER" Icon="VoxaIcon" />
+        <RegistryValue Root="HKLM" Key="Software\Voxa" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Main" Title="Voxa" Description="The Voxa client." Level="1"
+             ConfigurableDirectory="INSTALLFOLDER" Absent="disallow" AllowAdvertise="no">
+      <ComponentRef Id="VoxaExe" />
+      <ComponentRef Id="DocReadme" />
+      <ComponentRef Id="DocMit" />
+      <ComponentRef Id="DocApache" />
+      <ComponentRef Id="DocNotices" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <Feature Id="Desktop" Title="Desktop shortcut" Description="Create a shortcut on the desktop." Level="1" AllowAdvertise="no">
+        <ComponentRef Id="DesktopShortcut" />
+      </Feature>
+    </Feature>
+
+    <!-- In-app updates run "msiexec /passive AUTOLAUNCH=1": restart Voxa when done. -->
+    <InstallExecuteSequence>
+      <Custom Action="LaunchApplication" After="InstallFinalize">AUTOLAUNCH = "1" AND NOT REMOVE</Custom>
+    </InstallExecuteSequence>
+
+    <UI>
+      <UIRef Id="WixUI_FeatureTree" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication">
+        WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed
+      </Publish>
+    </UI>
+  </Product>
+</Wix>
