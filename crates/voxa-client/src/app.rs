@@ -191,6 +191,27 @@ impl Session {
         c.is_talker || self.talk_power(c) >= needed
     }
 
+    pub fn join_power(&self, c: &ClientInfo) -> i32 {
+        c.server_groups
+            .iter()
+            .chain(std::iter::once(&c.channel_group))
+            .filter_map(|g| self.groups.get(g))
+            .map(|g| g.join_power)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Client-side estimate of whether I may enter a channel (the server decides).
+    pub fn can_join(&self, ch: &ChannelInfo) -> bool {
+        let Some(me) = self.me() else { return false };
+        if me.channel == ch.id {
+            return true;
+        }
+        let perms = self.perms();
+        perms & perm::CHANNEL_JOIN != 0
+            && (ch.needed_join_power <= 0 || perms & perm::CHANNEL_JOIN_IGNORE_POWER != 0 || self.join_power(me) >= ch.needed_join_power)
+    }
+
     pub fn clients_in(&self, ch: ChannelId) -> Vec<&ClientInfo> {
         let mut v: Vec<&ClientInfo> = self.clients.values().filter(|c| c.channel == ch).collect();
         v.sort_by(|a, b| {
@@ -254,6 +275,9 @@ pub struct VoxaApp {
     pub want_show: bool,
     pub updater: crate::updater::Updater,
     update_notified: bool,
+    pub emoji: crate::ui::EmojiPicker,
+    pub hotkeys: crate::hotkeys::Hotkeys,
+    hotkey_rx: Receiver<crate::hotkeys::HotkeyAction>,
 }
 
 /// GitHub repository the client updates from. Forks can override it at build time
@@ -285,6 +309,8 @@ impl VoxaApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime");
         let voice_shared = VoiceShared::new(settings.audio.clone());
+        let (hk_tx, hotkey_rx) = std::sync::mpsc::channel();
+        let hotkeys = crate::hotkeys::Hotkeys::start(settings.hotkeys.clone(), hk_tx, cc.egui_ctx.clone(), voice_shared.clone());
         let mut app = VoxaApp {
             rt,
             settings,
@@ -309,6 +335,9 @@ impl VoxaApp {
             want_show: false,
             updater: crate::updater::Updater::new(UPDATE_REPO, is_client_msi, cc.egui_ctx.clone()),
             update_notified: false,
+            emoji: Default::default(),
+            hotkeys,
+            hotkey_rx,
         };
         app.offline_log.lines.push(ChatLine::Event {
             ts: now_unix(),
@@ -368,6 +397,34 @@ impl VoxaApp {
     fn hide_window(&mut self) {
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         self.hidden = true;
+    }
+
+    fn handle_hotkeys(&mut self) {
+        use crate::hotkeys::HotkeyAction as H;
+        use crate::ui::Action;
+        while let Ok(h) = self.hotkey_rx.try_recv() {
+            match h {
+                H::ToggleMic => crate::ui::apply(self, Action::ToggleMic),
+                H::ToggleSpeakers => crate::ui::apply(self, Action::ToggleSpeakers),
+                H::ToggleCommander => crate::ui::apply(self, Action::ToggleCommander),
+                H::ToggleAway => {
+                    // No prompt for a message when toggled by hotkey (may be in a game).
+                    if let Some(me) = self.sess.as_ref().and_then(|s| s.me()) {
+                        let away = if me.away.is_some() { None } else { Some(String::new()) };
+                        self.send(C2S::UpdateSelf(SelfUpdate { away: Some(away), ..Default::default() }));
+                    }
+                }
+                H::ToggleScreenShare => {
+                    let sharing = self.sess.as_ref().map(|s| s.streamer.is_some()).unwrap_or(false);
+                    if !sharing && self.sess.is_some() {
+                        self.show_window();
+                    }
+                    crate::ui::apply(self, Action::ShareScreen);
+                }
+                H::ShowWindow => self.show_window(),
+                H::PushToMute => {}
+            }
+        }
     }
 
     fn handle_tray(&mut self, ctx: &egui::Context) {
@@ -964,6 +1021,7 @@ impl eframe::App for VoxaApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_events();
         self.handle_tray(ctx);
+        self.handle_hotkeys();
         if self.settings.auto_update {
             self.updater.auto_check();
         }

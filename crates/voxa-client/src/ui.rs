@@ -49,6 +49,7 @@ pub enum Action {
     Home(bool),
     ToggleMembers,
     Attach,
+    UsedEmoji(String),
 }
 
 // ---------------------------------------------------------------- theme
@@ -93,6 +94,18 @@ pub fn theme(dark: bool) -> Theme {
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    // Chat text uses its own family that prefers the colour Segoe UI Emoji font right
+    // after the regular text font, so emotes render in full colour while UI icons keep
+    // the monochrome look.
+    if let Ok(bytes) = std::fs::read(std::path::Path::new(&windir).join("Fonts").join("seguiemj.ttf")) {
+        fonts.font_data.insert("chat_emoji".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+        let mut chat = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+        chat.insert(1.min(chat.len()), "chat_emoji".to_owned());
+        fonts.families.insert(chat_family(), chat);
+    } else {
+        let chat = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+        fonts.families.insert(chat_family(), chat);
+    }
     for (name, file) in [("segoe_symbol", "seguisym.ttf"), ("segoe_emoji", "seguiemj.ttf")] {
         if let Ok(bytes) = std::fs::read(std::path::Path::new(&windir).join("Fonts").join(file)) {
             fonts.font_data.insert(name.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
@@ -104,6 +117,14 @@ pub fn install_fonts(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
+}
+
+pub fn chat_family() -> egui::FontFamily {
+    egui::FontFamily::Name("chat".into())
+}
+
+pub fn chat_font(size: f32) -> FontId {
+    FontId::new(size, chat_family())
 }
 
 pub fn apply_style(ctx: &egui::Context, s: &Settings) {
@@ -286,6 +307,7 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
             main_view(app, ui);
         }
     });
+    drag_ghost(app, &ctx);
     dialogs::draw_all(app, &ctx);
 }
 
@@ -638,7 +660,7 @@ fn row_frame(ui: &mut Ui, selected: bool, indent: f32, add: impl FnOnce(&mut Ui)
         ui.set_width(ui.available_width());
         ui.horizontal(add);
     });
-    let resp = ui.interact(r.response.rect, ui.next_auto_id().with("row"), Sense::click());
+    let resp = ui.interact(r.response.rect, ui.next_auto_id().with("row"), Sense::click_and_drag());
     let fill = if selected { ACCENT.linear_multiply(0.35) } else if resp.hovered() { t.hover } else { Color32::TRANSPARENT };
     if fill != Color32::TRANSPARENT {
         ui.painter().rect_filled(r.response.rect, CornerRadius::same(6), fill.linear_multiply(0.6));
@@ -674,6 +696,13 @@ fn channel_rows(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, pa
                 if c.kind == ChannelKind::Temporary {
                     ui.label(RichText::new("⌛").small().color(t.dim)).on_hover_text("Temporary channel");
                 }
+                if !s.can_join(c) {
+                    ui.label(RichText::new("⛔").small().color(RED)).on_hover_text(if c.needed_join_power > 0 {
+                        format!("Your group cannot join this channel (needs join power {})", c.needed_join_power)
+                    } else {
+                        "Your group is not allowed to join channels".to_string()
+                    });
+                }
                 if c.needed_talk_power > 0 {
                     ui.label(RichText::new("🎙").small().color(t.dim)).on_hover_text(format!("Moderated (talk power {})", c.needed_talk_power));
                 }
@@ -692,8 +721,9 @@ fn channel_rows(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, pa
         if r.double_clicked() {
             a.push(Action::Join(c.id));
         }
-        let r = if c.topic.is_empty() { r } else { r.on_hover_text(&c.topic) };
+        let r = if c.topic.is_empty() || egui::DragAndDrop::has_any_payload(ui.ctx()) { r } else { r.on_hover_text(&c.topic) };
         channel_menu(s, &r, c, a);
+        channel_dnd(s, ui, &r, c, a);
         if !collapsed {
             for cl in clients {
                 client_row(s, shared, ui, cl, depth + 1, a);
@@ -701,6 +731,141 @@ fn channel_rows(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, pa
             channel_rows(s, shared, ui, Some(c.id), depth + 1, a);
         }
     }
+}
+
+/// What is being dragged in the channel tree.
+#[derive(Clone, Copy, Debug)]
+pub enum Drag {
+    Channel(ChannelId),
+    Client(ClientId),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum DropZone {
+    Before,
+    Into,
+    After,
+}
+
+fn drop_zone(r: &egui::Response, ctx: &egui::Context) -> DropZone {
+    let y = ctx.pointer_interact_pos().map(|p| p.y).unwrap_or(r.rect.center().y);
+    let f = (y - r.rect.top()) / r.rect.height().max(1.0);
+    if f < 0.3 {
+        DropZone::Before
+    } else if f > 0.7 {
+        DropZone::After
+    } else {
+        DropZone::Into
+    }
+}
+
+fn is_descendant(s: &Session, ch: ChannelId, ancestor: ChannelId) -> bool {
+    let mut cur = s.channels.get(&ch).and_then(|c| c.parent);
+    while let Some(p) = cur {
+        if p == ancestor {
+            return true;
+        }
+        cur = s.channels.get(&p).and_then(|c| c.parent);
+    }
+    false
+}
+
+/// Drag & drop on a channel row: channels are reordered (above / below) or nested
+/// (onto the middle of a row); clients dropped on a channel are moved into it.
+fn channel_dnd(s: &Session, ui: &Ui, r: &egui::Response, c: &ChannelInfo, a: &mut Vec<Action>) {
+    r.dnd_set_drag_payload(Drag::Channel(c.id));
+    if let Some(p) = r.dnd_hover_payload::<Drag>() {
+        let zone = match *p {
+            Drag::Channel(id) if id == c.id || is_descendant(s, c.id, id) => None,
+            Drag::Channel(_) => Some(drop_zone(r, ui.ctx())),
+            Drag::Client(_) => Some(DropZone::Into),
+        };
+        let painter = ui.painter();
+        let rect = r.rect;
+        match zone {
+            Some(DropZone::Before) => {
+                painter.hline(rect.x_range(), rect.top(), Stroke::new(2.5, ACCENT));
+            }
+            Some(DropZone::After) => {
+                painter.hline(rect.x_range(), rect.bottom(), Stroke::new(2.5, ACCENT));
+            }
+            Some(DropZone::Into) => {
+                painter.rect_stroke(rect, CornerRadius::same(6), Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
+            }
+            None => {}
+        }
+    }
+    let Some(p) = r.dnd_release_payload::<Drag>() else { return };
+    match *p {
+        Drag::Client(id) => move_client_to(s, id, c.id, a),
+        Drag::Channel(id) => {
+            if id == c.id || is_descendant(s, c.id, id) {
+                return;
+            }
+            let Some(dragged) = s.channels.get(&id) else { return };
+            match drop_zone(r, ui.ctx()) {
+                DropZone::Into => {
+                    let siblings = s.children(Some(c.id));
+                    let sort = siblings.iter().filter(|x| x.id != id).map(|x| x.sort).max().unwrap_or(0) + 1;
+                    let mut e = ChannelEdit::from_info(dragged);
+                    e.parent = Some(c.id);
+                    e.sort = sort;
+                    a.push(Action::Send(C2S::EditChannel { id, edit: e }));
+                }
+                zone => {
+                    // Rebuild the sibling order of the target's parent with the dragged
+                    // channel inserted before/after the target, then renumber.
+                    let mut order: Vec<&ChannelInfo> = s.children(c.parent).into_iter().filter(|x| x.id != id).collect();
+                    let pos = order.iter().position(|x| x.id == c.id).unwrap_or(order.len());
+                    let pos = if zone == DropZone::After { pos + 1 } else { pos };
+                    order.insert(pos.min(order.len()), dragged);
+                    for (n, ch) in order.iter().enumerate() {
+                        let sort = n as i64 + 1;
+                        if ch.id == id || ch.sort != sort {
+                            let mut e = ChannelEdit::from_info(ch);
+                            e.sort = sort;
+                            if ch.id == id {
+                                e.parent = c.parent;
+                            }
+                            a.push(Action::Send(C2S::EditChannel { id: ch.id, edit: e }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn move_client_to(s: &Session, client: ClientId, channel: ChannelId, a: &mut Vec<Action>) {
+    let Some(cl) = s.clients.get(&client) else { return };
+    if cl.channel == channel {
+        return;
+    }
+    if client == s.me {
+        a.push(Action::Join(channel));
+    } else {
+        a.push(Action::Send(C2S::MoveClient { target: client, channel }));
+    }
+}
+
+/// Floating label that follows the mouse while something is dragged.
+fn drag_ghost(app: &VoxaApp, ctx: &egui::Context) {
+    let Some(p) = egui::DragAndDrop::payload::<Drag>(ctx) else { return };
+    let Some(s) = &app.sess else { return };
+    let Some(pos) = ctx.pointer_interact_pos() else { return };
+    let label = match *p {
+        Drag::Channel(id) => format!("🔊 {}", s.channels.get(&id).map(|c| c.name.clone()).unwrap_or_default()),
+        Drag::Client(id) => format!("👤 {}", s.client_name(id)),
+    };
+    egui::Area::new(egui::Id::unique("voxa_drag_ghost"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pos + egui::vec2(14.0, 6.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            Frame::new().fill(ACCENT).corner_radius(6).inner_margin(Margin::symmetric(8, 3)).show(ui, |ui| {
+                ui.label(RichText::new(label).color(Color32::WHITE));
+            });
+        });
 }
 
 fn channel_menu(s: &Session, r: &egui::Response, c: &ChannelInfo, a: &mut Vec<Action>) {
@@ -830,6 +995,18 @@ fn client_row(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, c: &
         a.push(Action::OpenPrivate(c.id));
     }
     client_menu(s, shared, &r, c, a);
+    // Clients can be dragged onto channels (or onto another client to join its channel).
+    r.dnd_set_drag_payload(Drag::Client(c.id));
+    if let Some(p) = r.dnd_hover_payload::<Drag>() {
+        if matches!(*p, Drag::Client(id) if id != c.id) {
+            ui.painter().rect_stroke(r.rect, CornerRadius::same(6), Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
+        }
+    }
+    if let Some(p) = r.dnd_release_payload::<Drag>() {
+        if let Drag::Client(id) = *p {
+            move_client_to(s, id, c.channel, a);
+        }
+    }
 }
 
 fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Response, c: &ClientInfo, a: &mut Vec<Action>) {
@@ -1023,6 +1200,7 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
                 grid_row(ui, "Codec", format!("Opus, quality {} (~{} kbit/s)", c.codec_quality, quality_to_bitrate(c.codec_quality) / 1000));
                 grid_row(ui, "Encryption", "Encrypted voice");
                 grid_row(ui, "Talk power", c.needed_talk_power.to_string());
+                grid_row(ui, "Join power", if c.needed_join_power > 0 { c.needed_join_power.to_string() } else { "Anyone".into() });
                 grid_row(ui, "Password", if c.has_password { "Yes" } else { "No" });
             });
             if !c.description.is_empty() {
@@ -1083,6 +1261,7 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
                 grid_row(ui, "Channel", s.channels.get(&c.channel).map(|x| x.name.clone()).unwrap_or_default());
                 grid_row(ui, "Online for", fmt_duration(now_unix().saturating_sub(c.connected_at)));
                 grid_row(ui, "Talk power", format!("{}{}", s.talk_power(c), if c.is_talker { " (granted)" } else { "" }));
+                grid_row(ui, "Join power", s.join_power(c).to_string());
                 grid_row(ui, "Client", format!("Voxa {} ({})", c.version, c.platform));
                 if let Some(tr) = &c.talk_request {
                     grid_row(ui, "Talk request", tr.as_str());
@@ -1193,10 +1372,101 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
             });
     }
     let Some(s) = &mut app.sess else { return };
-    chat_area(s, &mut app.actions, &mut app.chat_input, &app.settings, ui);
+    chat_area(s, &mut app.actions, &mut app.chat_input, &app.settings, &mut app.emoji, ui);
 }
 
-fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings: &Settings, ui: &mut Ui) {
+/// State of the emoji picker popup.
+#[derive(Default)]
+pub struct EmojiPicker {
+    pub open: bool,
+    pub search: String,
+    pub category: usize,
+}
+
+fn body_size(ui: &Ui) -> f32 {
+    ui.style().text_styles.get(&egui::TextStyle::Body).map(|f| f.size).unwrap_or(13.0) + 0.5
+}
+
+/// Inserts an emoji at the end of the input (adding a separating space if needed).
+fn insert_emoji(input: &mut String, ch: &str) {
+    if !input.is_empty() && !input.ends_with(' ') {
+        input.push(' ');
+    }
+    input.push_str(ch);
+    input.push(' ');
+}
+
+/// Chat message body: colour emoji font, and "jumbo" emoji for emoji-only messages.
+fn message_text(ui: &mut Ui, text: &str) {
+    let size = if crate::emoji::is_only_emoji(text) { 34.0 } else { body_size(ui) };
+    ui.add(egui::Label::new(RichText::new(text).font(chat_font(size))).selectable(true).wrap());
+}
+
+fn emoji_picker(ui: &mut Ui, anchor: egui::Rect, picker: &mut EmojiPicker, input: &mut String, recent: &[String], a: &mut Vec<Action>, toggled: bool) {
+    let t = theme(ui.visuals().dark_mode);
+    let size = egui::vec2(352.0, 340.0);
+    let pos = egui::pos2((anchor.left() - 40.0).max(4.0), anchor.top() - size.y - 8.0);
+    let area = egui::Area::new(egui::Id::unique("voxa_emoji_picker")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
+        Frame::new().fill(t.card).corner_radius(10).stroke(Stroke::new(1.0, t.hover)).inner_margin(Margin::same(10)).show(ui, |ui| {
+            ui.set_min_size(size - egui::vec2(20.0, 20.0));
+            ui.set_max_width(size.x - 20.0);
+            let search = ui.add(egui::TextEdit::singleline(&mut picker.search).hint_text("🔍 Search emoji (e.g. fire, heart, gg)").desired_width(f32::INFINITY));
+            if toggled {
+                search.request_focus();
+            }
+            // Category tabs.
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let mut tab = |ui: &mut Ui, idx: usize, icon: &str, name: &str| {
+                    let sel = picker.category == idx && picker.search.is_empty();
+                    let b = egui::Button::new(RichText::new(icon).font(chat_font(18.0))).fill(if sel { ACCENT.linear_multiply(0.5) } else { Color32::TRANSPARENT });
+                    if ui.add(b).on_hover_text(name).clicked() {
+                        picker.category = idx;
+                        picker.search.clear();
+                    }
+                };
+                if !recent.is_empty() {
+                    tab(ui, usize::MAX, "🕘", "Recently used");
+                }
+                for (i, c) in crate::emoji::CATEGORIES.iter().enumerate() {
+                    tab(ui, i, c.icon, c.name);
+                }
+            });
+            ui.separator();
+            let items: Vec<(String, String)> = if !picker.search.trim().is_empty() {
+                crate::emoji::search(&picker.search).into_iter().map(|e| (e.ch.to_string(), e.code.to_string())).collect()
+            } else if picker.category == usize::MAX {
+                recent.iter().map(|e| (e.clone(), String::new())).collect()
+            } else {
+                let cat = &crate::emoji::CATEGORIES[picker.category.min(crate::emoji::CATEGORIES.len() - 1)];
+                ui.label(RichText::new(cat.name.to_uppercase()).small().strong().color(t.dim));
+                cat.items.iter().map(|e| (e.ch.to_string(), e.code.to_string())).collect()
+            };
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                if items.is_empty() {
+                    ui.label(RichText::new("No emoji found").color(t.dim));
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
+                    for (ch, code) in &items {
+                        let b = egui::Button::new(RichText::new(ch).font(chat_font(22.0))).frame(false).min_size(egui::vec2(36.0, 36.0));
+                        let r = ui.add(b);
+                        let r = if code.is_empty() { r } else { r.on_hover_text(format!(":{code}:")) };
+                        if r.clicked() {
+                            insert_emoji(input, ch);
+                            a.push(Action::UsedEmoji(ch.clone()));
+                        }
+                    }
+                });
+            });
+        });
+    });
+    if !toggled && (area.response.clicked_elsewhere() || ui.input(|i| i.key_pressed(egui::Key::Escape))) {
+        picker.open = false;
+    }
+}
+
+fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings: &Settings, picker: &mut EmojiPicker, ui: &mut Ui) {
     let t = theme(settings.dark_theme);
     let my_uid = s.my_uid.clone();
     let can_delete_others = s.has(perm::CHAT_DELETE);
@@ -1213,18 +1483,68 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
     };
     // Input bar (bottom).
     egui::Panel::bottom("chatinput").frame(Frame::new().fill(t.main).inner_margin(Margin { left: 14, right: 14, top: 4, bottom: 14 })).show(ui, |ui| {
+        // `:shortcode` autocomplete suggestions (Tab or click to insert).
+        let (token_start, suggestions) = crate::emoji::suggestions(input, 6);
+        let mut accept: Option<&'static str> = None;
+        if let Some(start) = token_start.filter(|_| !suggestions.is_empty()) {
+            Frame::new().fill(t.card).corner_radius(8).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("EMOJI MATCHING ".to_string() + &input[start..].to_uppercase()).small().strong().color(t.dim));
+                ui.horizontal_wrapped(|ui| {
+                    for (i, e) in suggestions.iter().enumerate() {
+                        let text = RichText::new(format!("{}  :{}:", e.ch, e.code)).font(chat_font(body_size(ui)));
+                        let b = egui::Button::new(text).fill(if i == 0 { ACCENT.linear_multiply(0.35) } else { Color32::TRANSPARENT });
+                        if ui.add(b).on_hover_text(if i == 0 { "Tab to insert" } else { "Click to insert" }).clicked() {
+                            accept = Some(e.ch);
+                        }
+                    }
+                });
+            });
+            ui.add_space(4.0);
+        }
         Frame::new().fill(t.card).corner_radius(10).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if !matches!(target, TextTarget::Private(_)) && icon_button(ui, "➕", "Upload a file to the channel", None).clicked() {
                     a.push(Action::Attach);
                 }
-                let te = egui::TextEdit::singleline(input).hint_text(hint).frame(egui::Frame::NONE).desired_width(ui.available_width() - 40.0);
+                let te = egui::TextEdit::singleline(input)
+                    .hint_text(format!("{hint}  -  try :fire: or the 😀 button"))
+                    .font(chat_font(body_size(ui)))
+                    .frame(egui::Frame::NONE)
+                    .lock_focus(true)
+                    .desired_width(ui.available_width() - 74.0);
                 let r = ui.add(te);
+                if r.has_focus() && !suggestions.is_empty() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
+                    accept = suggestions.first().map(|e| e.ch);
+                }
+                if let (Some(ch), Some(start)) = (accept, token_start) {
+                    input.truncate(start);
+                    input.push_str(ch);
+                    input.push(' ');
+                    a.push(Action::UsedEmoji(ch.to_string()));
+                    r.request_focus();
+                }
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                // Emoji picker toggle.
+                let (rect, eb) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
+                if eb.hovered() || picker.open {
+                    ui.painter().rect_filled(rect, CornerRadius::same(6), t.hover);
+                }
+                ui.painter().text(rect.center(), Align2::CENTER_CENTER, if picker.open || eb.hovered() { "😄" } else { "🙂" }, chat_font(18.0), Color32::WHITE);
+                let toggled = eb.on_hover_text("Emoji").clicked();
+                if toggled {
+                    picker.open = !picker.open;
+                }
                 let send = icon_button(ui, "➤", "Send", Some(ACCENT)).clicked();
                 if (send || enter) && !input.trim().is_empty() {
-                    a.push(Action::Send(C2S::SendText { target, text: std::mem::take(input) }));
+                    let text = crate::emoji::replace_shortcodes(input.trim_end());
+                    input.clear();
+                    picker.open = false;
+                    a.push(Action::Send(C2S::SendText { target, text }));
                     r.request_focus();
+                }
+                if picker.open {
+                    emoji_picker(ui, rect, picker, input, &settings.recent_emoji, a, toggled);
                 }
             });
         });
@@ -1286,7 +1606,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                         let r = if grouped {
                             ui.horizontal_wrapped(|ui| {
                                 ui.add_space(44.0);
-                                ui.add(egui::Label::new(&m.text).selectable(true));
+                                message_text(ui, &m.text);
                             })
                         } else {
                             ui.add_space(6.0);
@@ -1299,7 +1619,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                                         ui.label(RichText::new(&m.from_name).strong().color(name_color(&m.from_uid)));
                                         ui.label(RichText::new(fmt_day_time(m.ts)).small().color(t.dim));
                                     });
-                                    ui.add(egui::Label::new(&m.text).selectable(true).wrap());
+                                    message_text(ui, &m.text);
                                 });
                             })
                         };
@@ -1544,6 +1864,11 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         },
         Action::Home(h) => app.home = h,
         Action::ToggleMembers => app.show_members = !app.show_members,
+        Action::UsedEmoji(e) => {
+            app.settings.recent_emoji.retain(|x| x != &e);
+            app.settings.recent_emoji.insert(0, e);
+            app.settings.recent_emoji.truncate(24);
+        }
         Action::Attach => {
             let ch = app.sess.as_ref().map(|s| s.my_channel());
             if let (Some(ch), Some(files)) = (ch, rfd::FileDialog::new().set_title("Upload to channel").pick_files()) {

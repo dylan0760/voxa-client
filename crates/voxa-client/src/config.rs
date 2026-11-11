@@ -111,6 +111,10 @@ pub struct Settings {
     pub minimize_to_tray: bool,
     /// Check GitHub for new releases at startup and every 12 hours.
     pub auto_update: bool,
+    /// Most recently used emoji (picker "recent" tab).
+    pub recent_emoji: Vec<String>,
+    /// Global hotkeys (Options > Hotkeys).
+    pub hotkeys: Vec<crate::hotkeys::HotkeyEntry>,
 }
 
 impl Default for Settings {
@@ -131,11 +135,19 @@ impl Default for Settings {
             client_volumes: HashMap::new(),
             minimize_to_tray: true,
             auto_update: true,
+            recent_emoji: Vec::new(),
+            hotkeys: Vec::new(),
         }
     }
 }
 
 pub fn config_dir() -> PathBuf {
+    // Separate profile (settings, identities) for testing or portable use.
+    if let Ok(dir) = std::env::var("VOXA_CONFIG_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     let base = std::env::var("APPDATA").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
     base.join("Voxa")
 }

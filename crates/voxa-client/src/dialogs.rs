@@ -61,6 +61,8 @@ pub struct OptionsDlg {
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
     pub capturing_key: bool,
+    pub hotkeys: Vec<crate::hotkeys::HotkeyEntry>,
+    pub capturing_hotkey: Option<crate::hotkeys::HotkeyAction>,
 }
 
 pub struct IdentitiesDlg {
@@ -316,6 +318,8 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         inputs: crate::audio::input_devices(),
         outputs: crate::audio::output_devices(),
         capturing_key: false,
+        hotkeys: s.hotkeys.clone(),
+        capturing_hotkey: None,
     }
 }
 
@@ -559,7 +563,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut apply = false;
     egui::Window::new("Options").open(&mut open).collapsible(false).resizable(true).default_size([560.0, 420.0]).show(ctx, |ui| {
         ui.horizontal(|ui| {
-            for (i, t) in ["Capture", "Playback", "Screen Share", "Application"].iter().enumerate() {
+            for (i, t) in ["Capture", "Playback", "Screen Share", "Hotkeys", "Application"].iter().enumerate() {
                 if ui.selectable_label(d.tab == i as u8, *t).clicked() {
                     d.tab = i as u8;
                 }
@@ -669,6 +673,56 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 });
                 ui.label(RichText::new("Screen shares are relayed through the server to viewers in your channel.").weak());
             }
+            3 => {
+                use crate::hotkeys::{Binding, HotkeyAction, HotkeyEntry};
+                ui.label(RichText::new("Global hotkeys work even while Voxa is in the background, minimised or in the system tray. Combine any key or mouse button with Ctrl / Alt / Shift.").weak());
+                ui.add_space(4.0);
+                // Recording a new combination.
+                if let Some(action) = d.capturing_hotkey {
+                    app.hotkeys.paused.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if crate::audio::key_down(0x1B) {
+                        d.capturing_hotkey = None;
+                    } else if let Some(b) = Binding::capture() {
+                        // Unbind the same combination from any other action.
+                        d.hotkeys.retain(|e| e.binding != b && e.action != action);
+                        d.hotkeys.push(HotkeyEntry { action, binding: b });
+                        d.capturing_hotkey = None;
+                    }
+                    ctx.request_repaint();
+                } else {
+                    app.hotkeys.paused.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
+                egui::Grid::new("hotkeys").num_columns(3).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
+                    ui.label(RichText::new("Action").strong());
+                    ui.label(RichText::new("Hotkey").strong());
+                    ui.label("");
+                    ui.end_row();
+                    ui.label("Push-to-talk");
+                    ui.label(crate::audio::key_name(d.audio.ptt_key));
+                    ui.label(RichText::new("set under Capture").small().weak());
+                    ui.end_row();
+                    for action in HotkeyAction::ALL {
+                        let binding = d.hotkeys.iter().find(|e| e.action == action).map(|e| e.binding).unwrap_or_default();
+                        ui.label(action.label());
+                        if d.capturing_hotkey == Some(action) {
+                            ui.label(RichText::new("Press a key combination... (Esc cancels)").color(Color32::YELLOW));
+                        } else {
+                            ui.label(RichText::new(binding.label()).monospace().color(if binding.is_set() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() }));
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(d.capturing_hotkey.is_none(), egui::Button::new("Set...")).clicked() {
+                                d.capturing_hotkey = Some(action);
+                            }
+                            if ui.add_enabled(binding.is_set(), egui::Button::new("Clear")).clicked() {
+                                d.hotkeys.retain(|e| e.action != action);
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label(RichText::new("Click OK or Apply to activate changed hotkeys.").small().weak());
+            }
             _ => {
                 egui::Grid::new("app").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                     form_row(ui, "Default nickname:", |ui| {
@@ -732,6 +786,8 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         app.settings.show_timestamps = d.timestamps;
         app.settings.minimize_to_tray = d.tray;
         app.settings.auto_update = d.auto_update;
+        app.settings.hotkeys = d.hotkeys.iter().filter(|e| e.binding.is_set()).cloned().collect();
+        app.hotkeys.set(app.settings.hotkeys.clone());
         app.ensure_tray();
         app.settings.save();
         crate::ui::apply_style(ctx, &app.settings);
@@ -742,6 +798,8 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     }
     if open && !close {
         app.dlg.options = Some(d);
+    } else {
+        app.hotkeys.paused.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -883,6 +941,10 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             form_row(ui, "Needed talk power:", |ui| {
                 ui.add(egui::DragValue::new(&mut d.edit.needed_talk_power).range(0..=100));
             });
+            form_row(ui, "Needed join power:", |ui| {
+                ui.add(egui::DragValue::new(&mut d.edit.needed_join_power).range(0..=100));
+                ui.label(RichText::new("0 = everyone · 10 = members (Normal) · 75 = admins").small().weak());
+            });
             form_row(ui, "Voice encryption:", |ui| {
                 ui.checkbox(&mut d.edit.voice_encrypted, "Encrypt voice (always on in Voxa)");
             });
@@ -1020,6 +1082,10 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                     form_row(ui, "Talk power:", |ui| {
                         ui.add(egui::DragValue::new(&mut g.talk_power).range(0..=100));
+                    });
+                    form_row(ui, "Join power:", |ui| {
+                        ui.add(egui::DragValue::new(&mut g.join_power).range(0..=100))
+                            .on_hover_text("Members can enter channels whose \"needed join power\" is at most this value.");
                     });
                     form_row(ui, "Sort:", |ui| {
                         ui.add(egui::DragValue::new(&mut g.sort));

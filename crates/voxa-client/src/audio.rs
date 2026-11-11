@@ -22,6 +22,8 @@ pub struct VoiceShared {
     pub transmit_allowed: AtomicBool,
     pub output_muted: AtomicBool,
     pub self_talking: AtomicBool,
+    /// Held push-to-mute hotkey.
+    pub push_to_mute: AtomicBool,
     input_level: AtomicU32,
     pub bitrate: AtomicI32,
     pub ping_ms: AtomicU32,
@@ -42,6 +44,7 @@ impl VoiceShared {
             transmit_allowed: AtomicBool::new(true),
             output_muted: AtomicBool::new(false),
             self_talking: AtomicBool::new(false),
+            push_to_mute: AtomicBool::new(false),
             input_level: AtomicU32::new((-90f32).to_bits()),
             bitrate: AtomicI32::new(voxa_proto::quality_to_bitrate(6)),
             ping_ms: AtomicU32::new(0),
@@ -483,7 +486,7 @@ fn encoder_loop(
                     }
                 }
             };
-            let active = wants && shared.transmit_allowed.load(Ordering::Relaxed);
+            let active = wants && shared.transmit_allowed.load(Ordering::Relaxed) && !shared.push_to_mute.load(Ordering::Relaxed);
             if active {
                 let br = shared.bitrate.load(Ordering::Relaxed);
                 if enc.bitrate_bps != br {

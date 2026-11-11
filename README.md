@@ -29,6 +29,22 @@ The MSI is not code-signed. If Windows SmartScreen warns you, choose
   sounds.
 * **Chat:** channel and server chat is stored encrypted on the server, so the history
   follows you to any PC (like Discord). Private messages are also supported.
+* **Emotes:** full-colour emoji in chat.
+  * Use the 😀 picker (search, categories, recently used).
+  * Or type `:shortcode:`, e.g. `:fire:` `:+1:` `:joy:`; suggestions appear as you type
+    and Tab inserts the first one.
+  * Emoji-only messages are shown jumbo-sized.
+* **Drag & drop:** drag channels to reorder them.
+  * Drop on the top or bottom edge of a channel to place it above or below.
+  * Drop on the middle to make it a sub-channel.
+  * Drag users onto a channel to move them.
+* **Hotkeys:** global hotkeys under **Settings → Hotkeys**. They work in the background
+  and from the tray.
+  * Toggle microphone or speaker mute, push-to-mute, toggle away, channel commander,
+    start/stop screen sharing, bring Voxa to front.
+  * Push-to-talk is set under **Capture**.
+* **Join power:** channels can require a minimum group *join power* (TeamSpeak style).
+  Channels you can't enter show ⛔.
 * **Screen sharing:** share a whole screen or a single application. Streams are relayed
   through the server, never peer-to-peer. Viewers watch on a stage above the chat or in
   full view.

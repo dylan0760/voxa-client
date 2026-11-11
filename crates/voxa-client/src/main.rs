@@ -7,6 +7,8 @@ mod audio;
 mod capture;
 mod config;
 mod dialogs;
+mod emoji;
+mod hotkeys;
 mod icon;
 mod instance;
 mod net;
@@ -32,7 +34,15 @@ pub fn pending_link_file() -> std::path::PathBuf {
 fn main() -> eframe::Result<()> {
     // Only one Voxa runs at a time; a second launch brings the first one to the front
     // (e.g. out of the system tray) and hands over any voxa:// link.
-    let inst = instance::acquire("VoxaClientInstance");
+    // A custom profile (VOXA_CONFIG_DIR) runs as its own instance.
+    let instance_name = match std::env::var("VOXA_CONFIG_DIR") {
+        Ok(d) if !d.trim().is_empty() => {
+            let h = d.to_lowercase().bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+            format!("VoxaClientInstance-{h:08x}")
+        }
+        _ => "VoxaClientInstance".to_string(),
+    };
+    let inst = instance::acquire(&instance_name);
     if inst.is_none() {
         if let Some(link) = link_arg() {
             let _ = std::fs::create_dir_all(config::config_dir());
