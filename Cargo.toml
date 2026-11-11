@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/voxa-proto", "crates/voxa-client"]
 
 [workspace.package]
-version = "1.4.1"
+version = "1.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Voxa contributors"]

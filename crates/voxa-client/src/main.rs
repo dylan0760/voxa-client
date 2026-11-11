@@ -4,6 +4,7 @@
 
 mod app;
 mod audio;
+mod chat_images;
 mod capture;
 mod config;
 mod dialogs;

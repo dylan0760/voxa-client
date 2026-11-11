@@ -50,6 +50,8 @@ pub enum Action {
     ToggleMembers,
     Attach,
     UsedEmoji(String),
+    SendImage(TextTarget, crate::chat_images::ImageSource),
+    PickImages(TextTarget),
 }
 
 // ---------------------------------------------------------------- theme
@@ -1389,6 +1391,14 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
             });
     }
     let Some(s) = &mut app.sess else { return };
+    // Images dragged in from Explorer are sent to the open chat (unless the file browser
+    // is open, which takes the drop as an upload).
+    if app.dlg.files.is_none() {
+        let dropped: Vec<std::path::PathBuf> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| crate::chat_images::is_image_path(p)).collect());
+        for p in dropped {
+            app.actions.push(Action::SendImage(chat_target(s), crate::chat_images::ImageSource::File(p)));
+        }
+    }
     chat_area(s, &mut app.actions, &mut app.chat_input, &app.settings, &mut app.emoji, ui);
 }
 
@@ -1414,21 +1424,24 @@ fn insert_emoji(input: &mut String, ch: &str) {
 }
 
 /// Discord-style message actions: hover toolbar (copy / delete) and a right-click menu.
-fn message_actions(ui: &mut Ui, row: &egui::Response, m: &ChatMessage, target: TextTarget, can_del: bool, a: &mut Vec<Action>) {
+/// `row` must sense clicks from *behind* the message content (see `chat_area`), so it
+/// offers the context menu without stealing clicks from images in the message.
+fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx, m: &ChatMessage, target: TextTarget, can_del: bool, a: &mut Vec<Action>) {
     let t = theme(ui.visuals().dark_mode);
-    // The row itself only senses hover; give it a click sense for the context menu.
     let rect = row.rect.expand2(egui::vec2(0.0, 2.0));
-    let click = ui.interact(rect, egui::Id::unique(("msgrow", m.id, m.ts, &m.from_uid)), Sense::click());
+    let click = row;
+    // Image messages copy / show their file name rather than the raw image tag.
+    let shown = ImageRef::parse(&m.text).map(|r| format!("📷 {}", r.name)).unwrap_or_else(|| m.text.clone());
     let delete = |a: &mut Vec<Action>, shift: bool| {
         if shift {
             a.push(Action::DeleteMessage(target, m.id));
         } else {
-            a.push(Action::Dialog(dialogs::Open::DeleteMessage(target, m.id, m.from_name.clone(), m.text.clone())));
+            a.push(Action::Dialog(dialogs::Open::DeleteMessage(target, m.id, m.from_name.clone(), shown.clone())));
         }
     };
     click.context_menu(|ui| {
         if ui.button("📋  Copy Text").clicked() {
-            a.push(Action::CopyText(m.text.clone()));
+            a.push(Action::CopyText(shown.clone()));
             ui.close();
         }
         if can_del && ui.button(RichText::new("🗑  Delete Message").color(RED)).clicked() {
@@ -1437,7 +1450,8 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, m: &ChatMessage, target: T
         }
     });
     if ui.rect_contains_pointer(rect) {
-        ui.painter().rect_filled(rect, CornerRadius::same(4), t.hover.linear_multiply(0.35));
+        // Painted into a slot reserved before the content, so it stays behind images.
+        ui.painter().set(bg, egui::Shape::rect_filled(rect, CornerRadius::same(4), t.hover.linear_multiply(0.35)));
         let n = if can_del { 2.0 } else { 1.0 };
         let bar = egui::Rect::from_min_size(egui::pos2(rect.right() - 30.0 * n - 6.0, rect.top() + 1.0), egui::vec2(30.0 * n + 4.0, 28.0));
         ui.painter().rect_filled(bar, CornerRadius::same(6), t.card);
@@ -1453,7 +1467,7 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, m: &ChatMessage, target: T
             resp.clicked()
         };
         if button(ui, "📋", "Copy text", t.dim) {
-            a.push(Action::CopyText(m.text.clone()));
+            a.push(Action::CopyText(shown.clone()));
         }
         if can_del && button(ui, "🗑", "Delete message (hold Shift to skip confirmation)", RED) {
             let shift = ui.input(|i| i.modifiers.shift);
@@ -1532,15 +1546,29 @@ fn emoji_picker(ui: &mut Ui, anchor: egui::Rect, picker: &mut EmojiPicker, input
     }
 }
 
+fn chat_target(s: &Session) -> TextTarget {
+    match s.tab {
+        ChatKey::Server => TextTarget::Server,
+        ChatKey::Channel => TextTarget::Channel(s.my_channel()),
+        ChatKey::Private(id) => TextTarget::Private(id),
+    }
+}
+
+/// Message body: an image for image messages, otherwise the text.
+fn message_body(ui: &mut Ui, imgs: &mut crate::chat_images::ChatImages, conn: &crate::net::Connection, bulk_ready: bool, text: &str, dim: Color32) {
+    match ImageRef::parse(text) {
+        Some(r) => crate::chat_images::chat_image(ui, imgs, conn, bulk_ready, &r, dim),
+        None => message_text(ui, text),
+    }
+}
+
 fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings: &Settings, picker: &mut EmojiPicker, ui: &mut Ui) {
     let t = theme(settings.dark_theme);
     let my_uid = s.my_uid.clone();
     let my_channel = s.my_channel();
-    let target = match s.tab {
-        ChatKey::Server => TextTarget::Server,
-        ChatKey::Channel => TextTarget::Channel(my_channel),
-        ChatKey::Private(id) => TextTarget::Private(id),
-    };
+    let target = chat_target(s);
+    crate::chat_images::viewer(ui.ctx(), &mut s.images);
+    let can_images = s.supports("1.5.0");
     // Mirrors the server: server chat uses server-wide permissions, channel chat also
     // the channel group. Own messages can always be deleted.
     let can_delete_others = s.chat_perm(target, perm::CHAT_DELETE);
@@ -1570,10 +1598,14 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
             });
             ui.add_space(4.0);
         }
+        crate::chat_images::pending_sends(ui, &s.images, t.dim);
         Frame::new().fill(t.card).corner_radius(10).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if !matches!(target, TextTarget::Private(_)) && icon_button(ui, "➕", "Upload a file to the channel", None).clicked() {
                     a.push(Action::Attach);
+                }
+                if can_images && icon_button(ui, "🖼", "Send an image (you can also paste one with Ctrl+V or drag it in)", None).clicked() {
+                    a.push(Action::PickImages(target));
                 }
                 let te = egui::TextEdit::singleline(input)
                     .hint_text(format!("{hint}  -  try :fire: or the 😀 button"))
@@ -1582,6 +1614,13 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                     .lock_focus(true)
                     .desired_width(ui.available_width() - 74.0);
                 let r = ui.add(te);
+                // Ctrl+V with an image on the clipboard (screenshots, copied pictures).
+                if can_images && (r.has_focus() || ui.ctx().memory(|m| m.focused().is_none())) {
+                    let pasted: Vec<std::sync::Arc<egui::ColorImage>> = ui.input(|i| i.events.iter().filter_map(|e| if let egui::Event::PasteImage(img) = e { Some(img.clone()) } else { None }).collect());
+                    for img in pasted {
+                        a.push(Action::SendImage(target, crate::chat_images::ImageSource::Pasted(img)));
+                    }
+                }
                 if r.has_focus() && !suggestions.is_empty() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
                     accept = suggestions.first().map(|e| e.ch);
                 }
@@ -1671,10 +1710,11 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                         let grouped = prev.map(|(u, ts)| u == m.from_uid && m.ts.saturating_sub(ts) < 300).unwrap_or(false);
                         prev = Some((&m.from_uid, m.ts));
                         let can_del = m.id != 0 && (m.from_uid == my_uid || can_delete_others);
-                        let r = if grouped {
+                        let bg = ui.painter().add(egui::Shape::Noop);
+                        let r = ui.scope_builder(egui::UiBuilder::new().sense(Sense::click()), |ui| if grouped {
                             ui.horizontal_wrapped(|ui| {
                                 ui.add_space(44.0);
-                                message_text(ui, &m.text);
+                                message_body(ui, &mut s.images, &s.conn, s.bulk_ready, &m.text, t.dim);
                             })
                         } else {
                             ui.add_space(6.0);
@@ -1687,11 +1727,11 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                                         ui.label(RichText::new(&m.from_name).strong().color(name_color(&m.from_uid)));
                                         ui.label(RichText::new(fmt_day_time(m.ts)).small().color(t.dim));
                                     });
-                                    message_text(ui, &m.text);
+                                    message_body(ui, &mut s.images, &s.conn, s.bulk_ready, &m.text, t.dim);
                                 });
                             })
-                        };
-                        message_actions(ui, &r.response, m, target, can_del, a);
+                        });
+                        message_actions(ui, &r.response, bg, m, target, can_del, a);
                     }
                 }
             }
@@ -1927,6 +1967,22 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
             app.settings.recent_emoji.retain(|x| x != &e);
             app.settings.recent_emoji.insert(0, e);
             app.settings.recent_emoji.truncate(24);
+        }
+        Action::PickImages(target) => {
+            let files = rfd::FileDialog::new().set_title("Send images").add_filter("Images", crate::chat_images::IMAGE_EXTENSIONS).pick_files();
+            for f in files.unwrap_or_default() {
+                apply(app, Action::SendImage(target, crate::chat_images::ImageSource::File(f)));
+            }
+        }
+        Action::SendImage(target, src) => {
+            let Some(s) = &mut app.sess else { return };
+            if !s.supports("1.5.0") {
+                s.log(EventKind::Error, "This server can't store images yet - it needs Voxa Server 1.5.0 or newer.");
+            } else if !s.bulk_ready {
+                s.log(EventKind::Error, "The file connection isn't ready yet - try again in a moment.");
+            } else {
+                s.images.send(s.conn.bulk_tx.clone(), target, src);
+            }
         }
         Action::Attach => {
             let ch = app.sess.as_ref().map(|s| s.my_channel());

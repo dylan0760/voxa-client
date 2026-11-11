@@ -202,6 +202,8 @@ pub struct Session {
     pub extra_perms: u64,
     /// Folder downloads waiting for their server listing: (channel, remote dir) -> local dir.
     pub pending_downloads: HashMap<(ChannelId, String), std::path::PathBuf>,
+    /// Images posted in this server's chats (servers 1.5.0+).
+    pub images: crate::chat_images::ChatImages,
 }
 
 impl Session {
@@ -631,6 +633,7 @@ impl VoxaApp {
             file_limits: None,
             extra_perms: 0,
             pending_downloads: HashMap::new(),
+            images: Default::default(),
         };
         sess.log(EventKind::Info, format!("Trying to connect to {} ({})...", req.label, req.address));
         self.sess = Some(sess);
@@ -714,6 +717,7 @@ impl VoxaApp {
             NetEvent::BulkReady => {
                 if let Some(s) = &mut self.sess {
                     s.bulk_ready = true;
+                    s.images.retry_failed();
                     // After a reconnect: resend the full screen and re-subscribe to streams.
                     if let Some(st) = &s.streamer {
                         st.keyframe.store(true, Ordering::Relaxed);
@@ -879,6 +883,10 @@ impl VoxaApp {
                     }
                 }
             }
+            BulkS2C::ChatImageSent { id } => s.images.send_done(id),
+            BulkS2C::Image { image, data } => s.images.received(&self.ctx, image, data),
+            BulkS2C::ImageError { image, message } => s.images.failed(image, message),
+            BulkS2C::TransferError { id, message } if s.images.owns_send(id) => s.images.send_failed(id, message),
             BulkS2C::TransferError { id, message } => {
                 if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.is_running()) {
                     t.fail(message.clone());

@@ -551,7 +551,7 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(200.0);
-                egui::ScrollArea::vertical().max_height((ui.available_height() - 40.0).max(120.0)).auto_shrink([true, false]).show(ui, |ui| {
+                crate::updater::fill_list(ui, "list1", 40.0, 120.0, |ui| {
                     for (i, b) in app.settings.bookmarks.iter().enumerate() {
                         let label = if b.name.is_empty() { b.address.clone() } else { b.name.clone() };
                         if ui.selectable_label(d.selected == Some(i), label).clicked() {
@@ -1197,7 +1197,7 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                 });
                 ui.label(RichText::new("Permissions").strong());
-                egui::ScrollArea::vertical().max_height((ui.available_height() - 250.0).max(140.0)).auto_shrink([false, false]).id_salt("perms").show(ui, |ui| {
+                crate::updater::fill_list(ui, "perms", 250.0, 140.0, |ui| {
                     for (bit, name) in perm::NAMES {
                         let mut on = g.perms & bit != 0;
                         if ui.checkbox(&mut on, *name).changed() {
@@ -1267,7 +1267,7 @@ fn bans_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(s) = &app.sess else { return };
     let mut open = true;
     egui::Window::new("Ban List").open(&mut open).collapsible(false).resizable(true).default_size([760.0, 420.0]).show_fill(ctx, |ui| {
-        egui::ScrollArea::vertical().max_height((ui.available_height() - 200.0).max(100.0)).auto_shrink([false, false]).show(ui, |ui| {
+        crate::updater::fill_list(ui, "list3", 200.0, 100.0, |ui| {
             egui::Grid::new("bans").num_columns(7).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
                 for h in ["Name", "Unique ID", "IP", "Reason", "Expires", "By", ""] {
                     ui.label(RichText::new(h).strong());
@@ -1534,8 +1534,7 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             });
             ui.separator();
             let mut enter_dir = None;
-            let list_h = (ui.available_height() - 150.0).max(140.0);
-            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+            crate::updater::fill_list(ui, "files", 220.0, 140.0, |ui| {
                 if d.loading {
                     ui.spinner();
                 }
@@ -1613,7 +1612,9 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 ui.label(RichText::new(format!("Max file size: {} · Storage per channel: {}", lim(l.max_upload_mb), lim(l.channel_quota_mb))).small().weak());
             }
             ui.separator();
-            cmds = transfer_list(ui, s, 6);
+            egui::ScrollArea::vertical().id_salt("fb_transfers").max_height(130.0).auto_shrink([false, true]).show(ui, |ui| {
+                cmds = transfer_list(ui, s, 50);
+            });
         });
     run_transfer_cmds(app, std::mem::take(&mut cmds));
     let (ch, path) = (d.channel, d.path.clone());
@@ -1699,7 +1700,7 @@ fn transfers_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut cmds = Vec::new();
     if let Some(s) = &app.sess {
         egui::Window::new("File Transfers").open(&mut open).resizable(true).default_size([520.0, 320.0]).show_fill(ctx, |ui| {
-            egui::ScrollArea::vertical().max_height((ui.available_height() - 36.0).max(80.0)).auto_shrink([false, false]).show(ui, |ui| {
+            crate::updater::fill_list(ui, "list4", 36.0, 80.0, |ui| {
                 cmds = transfer_list(ui, s, 500);
             });
             clear = ui.button("Clear finished").clicked();
@@ -1729,7 +1730,7 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 d.selected = 0;
             }
         });
-        egui::ScrollArea::vertical().max_height((ui.available_height() - 170.0).max(100.0)).auto_shrink([false, false]).show(ui, |ui| {
+        crate::updater::fill_list(ui, "list5", 170.0, 100.0, |ui| {
             for (i, src) in d.sources.iter().enumerate() {
                 ui.selectable_value(&mut d.selected, i, src.label());
             }
@@ -1873,7 +1874,7 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                     return;
                 }
-                egui::ScrollArea::vertical().max_height((ui.available_height() - 50.0).max(120.0)).auto_shrink([false, false]).show(ui, |ui| {
+                crate::updater::fill_list(ui, "list6", 50.0, 120.0, |ui| {
                     for (bit, name) in perm::NAMES {
                         let via_group = (from_groups | channel_group) & bit != 0;
                         let mut on = d.edit & bit != 0;

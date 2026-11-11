@@ -118,6 +118,13 @@ impl ShowFill for egui::Window<'_> {
     fn show_fill<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<Option<R>>> {
         self.show(ctx, |ui| {
             let r = add(ui);
+            // Measure what was drawn below a `fill_list` so it can leave exactly that much room next frame.
+            let pending = ui.data(|d| d.get_temp::<(egui::Id, f32)>(egui::Id::unique(FILL_PENDING)));
+            if let Some((id, end)) = pending {
+                ui.data_mut(|d| d.remove::<(egui::Id, f32)>(egui::Id::unique(FILL_PENDING)));
+                let below = (ui.cursor().top() - end).max(0.0);
+                ui.data_mut(|d| d.insert_temp(id, below));
+            }
             let rest = ui.available_height();
             if rest.is_finite() && rest > 0.0 {
                 ui.allocate_space(egui::vec2(0.0, rest));
@@ -125,6 +132,28 @@ impl ShowFill for egui::Window<'_> {
             r
         })
     }
+}
+
+const FILL_PENDING: &str = "voxa_fill_list_pending";
+
+/// A vertical scroll list that takes the window's spare height (use inside `show_fill`,
+/// at most one per window). The widgets below it are measured every frame rather than
+/// guessed: a guess that is too small makes the window grow by itself up to the screen
+/// edge, because the window always expands to fit its content.
+pub fn fill_list<R>(ui: &mut egui::Ui, id_salt: &str, guess_below: f32, min: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let id = egui::Id::unique("voxa_fill_list").with(id_salt);
+    let below = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(guess_below);
+    let h = (ui.available_height() - below).max(min);
+    let r = egui::ScrollArea::vertical()
+        .id_salt(id_salt)
+        .max_height(h)
+        .min_scrolled_height(h)
+        .auto_shrink([false, false])
+        .show(ui, add)
+        .inner;
+    let end = ui.cursor().top();
+    ui.data_mut(|d| d.insert_temp(egui::Id::unique(FILL_PENDING), (id, end)));
+    r
 }
 
 // ------------------------------------------------------------------ what's new
@@ -234,7 +263,7 @@ pub fn whats_new_window(ctx: &egui::Context, wn: &WhatsNew, product: &str) -> bo
                 NotesState::Ready { title, notes, url } => {
                     ui.label(RichText::new(title).heading());
                     ui.separator();
-                    egui::ScrollArea::vertical().max_height((ui.available_height() - 70.0).max(120.0)).auto_shrink([false, false]).show(ui, |ui| {
+                    crate::updater::fill_list(ui, "list7", 70.0, 120.0, |ui| {
                         render_notes(ui, &notes);
                     });
                     ui.separator();
@@ -326,7 +355,7 @@ mod tests {
     fn drag_bottom(fill: bool) -> (f32, f32, f32) {
         let ctx = egui::Context::default();
         let mut rect = Rect::NOTHING;
-        let mut frame = |events: Vec<Event>, rect: &mut Rect| {
+        let frame = |events: Vec<Event>, rect: &mut Rect| {
             let input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 900.0))), events, ..Default::default() };
             let out = ctx.run_ui(input, |ui| {
                 let w = egui::Window::new("Test").default_pos([100.0, 100.0]).default_size([400.0, 200.0]).resizable(true).collapsible(false);
@@ -343,7 +372,7 @@ mod tests {
             frame(vec![], &mut rect);
         }
         let start = rect.height();
-        let mut drag = |dy: f32, rect: &mut Rect| {
+        let drag = |dy: f32, rect: &mut Rect| {
             let p = pos2(rect.center().x, rect.bottom() - 1.0);
             frame(vec![Event::PointerMoved(p)], rect);
             frame(vec![Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Default::default() }], rect);
@@ -360,6 +389,55 @@ mod tests {
         let down = rect.height();
         drag(-150.0, &mut rect);
         (start, down, rect.height())
+    }
+
+    /// A long list with tall content below it (like the file browser with transfers)
+    /// must not make the window grow by itself, and must still follow drags.
+    #[test]
+    fn long_list_does_not_grow_window() {
+        let ctx = egui::Context::default();
+        let mut rect = Rect::NOTHING;
+        let frame = |events: Vec<Event>, rect: &mut Rect| {
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 1400.0))), events, ..Default::default() };
+            let out = ctx.run_ui(input, |ui| {
+                let r = egui::Window::new("Files").default_pos([100.0, 100.0]).default_size([500.0, 400.0]).resizable(true).show_fill(ui.ctx(), |ui| {
+                    ui.label("toolbar");
+                    super::fill_list(ui, "t", 20.0, 100.0, |ui| {
+                        for i in 0..300 {
+                            ui.label(format!("file {i}"));
+                        }
+                    });
+                    for i in 0..10 {
+                        ui.label(format!("transfer {i}"));
+                    }
+                });
+                *rect = r.unwrap().response.rect;
+            });
+            out.drop_without_applying_deltas();
+        };
+        for _ in 0..5 {
+            frame(vec![], &mut rect);
+        }
+        let first = rect.height();
+        for _ in 0..60 {
+            frame(vec![], &mut rect);
+        }
+        let later = rect.height();
+        println!("long list window: after 5 frames {first}, after 65 frames {later}");
+        assert!((later - first).abs() < 1.0, "window grew by itself: {first} -> {later}");
+        assert!(later < 700.0, "window too tall: {later}");
+        let p = pos2(rect.center().x, rect.bottom() - 1.0);
+        frame(vec![Event::PointerMoved(p)], &mut rect);
+        frame(vec![Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Default::default() }], &mut rect);
+        for i in 1..=10 {
+            frame(vec![Event::PointerMoved(p + vec2(0.0, -10.0 * i as f32))], &mut rect);
+        }
+        frame(vec![Event::PointerButton { pos: p + vec2(0.0, -100.0), button: PointerButton::Primary, pressed: false, modifiers: Default::default() }], &mut rect);
+        for _ in 0..30 {
+            frame(vec![Event::PointerMoved(pos2(5.0, 5.0))], &mut rect);
+        }
+        println!("after dragging up 100: {}", rect.height());
+        assert!(rect.height() < later - 80.0, "did not shrink: {later} -> {}", rect.height());
     }
 
     #[test]

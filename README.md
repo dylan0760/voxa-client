@@ -48,6 +48,14 @@ The MSI is not code-signed. If Windows SmartScreen warns you, choose
 * **Screen sharing:** share a whole screen or a single application. Streams are relayed
   through the server, never peer-to-peer. Viewers watch on a stage above the chat or in
   full view.
+* **Images in chat** (Voxa Server 1.5.0+): send pictures to the server, channel or a
+  private chat in any of three ways:
+  * the 🖼 button;
+  * pasting with **Ctrl+V** (screenshots, copied pictures);
+  * dragging image files in from Explorer.
+
+  Images are stored encrypted with the chat history. Click one to view it full size and
+  save it. Up to 10 MB each; bigger photos are scaled down automatically.
 * **Chat moderation:**
   * Hover a message for 📋 Copy and 🗑 Delete, or right-click it. Deleted messages
     disappear for everyone and from the stored history.
