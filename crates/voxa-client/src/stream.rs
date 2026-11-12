@@ -19,6 +19,34 @@ pub struct Streamer {
     stop: Arc<AtomicBool>,
     pub keyframe: Arc<AtomicBool>,
     pub error: Arc<Mutex<Option<String>>>,
+    /// Show the streamer their own stream (local preview, nothing extra is sent).
+    pub preview_on: Arc<AtomicBool>,
+}
+
+/// Where the local preview of your own stream goes: the viewer's frame store, under
+/// your own client id, so it is displayed like any watched stream.
+pub struct PreviewSink {
+    pub frames: Arc<Mutex<HashMap<ClientId, ViewerFrame>>>,
+    pub me: ClientId,
+    pub ctx: egui::Context,
+}
+
+const PREVIEW_MAX_W: u32 = 1280;
+const PREVIEW_EVERY: Duration = Duration::from_millis(200);
+
+fn preview_image(img: &Scaled) -> egui::ColorImage {
+    let w = img.w.min(PREVIEW_MAX_W).max(1);
+    let h = ((img.h as u64 * w as u64) / img.w.max(1) as u64).max(1) as u32;
+    let mut px = Vec::with_capacity((w * h) as usize);
+    for y in 0..h {
+        let sy = (y as u64 * img.h as u64 / h as u64) as usize;
+        for x in 0..w {
+            let sx = (x as u64 * img.w as u64 / w as u64) as usize;
+            let o = (sy * img.w as usize + sx) * 4;
+            px.push(egui::Color32::from_rgb(img.bgra[o + 2], img.bgra[o + 1], img.bgra[o]));
+        }
+    }
+    egui::ColorImage::new([w as usize, h as usize], px)
 }
 
 impl Drop for Streamer {
@@ -84,11 +112,12 @@ fn encode_tile(img: &Scaled, x: u32, y: u32, tw: u32, th: u32, quality: u8) -> T
 }
 
 impl Streamer {
-    pub fn start(source: Source, settings: StreamSettings, bulk: tokio::sync::mpsc::Sender<BulkC2S>) -> Streamer {
+    pub fn start(source: Source, settings: StreamSettings, bulk: tokio::sync::mpsc::Sender<BulkC2S>, preview: PreviewSink) -> Streamer {
         let stop = Arc::new(AtomicBool::new(false));
         let keyframe = Arc::new(AtomicBool::new(true));
         let error = Arc::new(Mutex::new(None));
-        let s = Streamer { stop: stop.clone(), keyframe: keyframe.clone(), error: error.clone() };
+        let preview_on = Arc::new(AtomicBool::new(true));
+        let s = Streamer { stop: stop.clone(), keyframe: keyframe.clone(), error: error.clone(), preview_on: preview_on.clone() };
         std::thread::Builder::new()
             .name("voxa-screenshare".into())
             .spawn(move || {
@@ -97,6 +126,9 @@ impl Streamer {
                 let mut prev: Option<Scaled> = None;
                 let mut last_key = Instant::now();
                 let mut failures = 0;
+                let mut last_preview: Option<Instant> = None;
+                // Unique start so a texture cached from an earlier stream never looks current.
+                let mut preview_version = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
                 while !stop.load(Ordering::Relaxed) {
                     let t0 = Instant::now();
                     let Some(cap) = capture::capture(&source) else {
@@ -110,6 +142,13 @@ impl Streamer {
                     };
                     failures = 0;
                     let img = scale(cap, settings.max_width);
+                    if preview_on.load(Ordering::Relaxed) && last_preview.map(|t| t.elapsed() >= PREVIEW_EVERY).unwrap_or(true) {
+                        last_preview = Some(Instant::now());
+                        preview_version += 1;
+                        let image = preview_image(&img);
+                        preview.frames.lock().insert(preview.me, ViewerFrame { image, version: preview_version });
+                        preview.ctx.request_repaint();
+                    }
                     let dims_changed = prev.as_ref().map(|p| p.w != img.w || p.h != img.h).unwrap_or(true);
                     let key = keyframe.swap(false, Ordering::Relaxed) || dims_changed || last_key.elapsed() > Duration::from_secs(10);
                     if key {
@@ -157,6 +196,8 @@ impl Streamer {
                         std::thread::sleep(interval - spent);
                     }
                 }
+                preview.frames.lock().remove(&preview.me);
+                preview.ctx.request_repaint();
             })
             .expect("spawn screenshare thread");
         s

@@ -359,6 +359,9 @@ pub struct VoxaApp {
     pub ctx: egui::Context,
     pub actions: Vec<crate::ui::Action>,
     pub fullscreen_stream: Option<ClientId>,
+    /// Debug builds: the VOXA_DEBUG_OPEN hook already ran.
+    #[allow(dead_code)]
+    debug_done: bool,
     pub home: bool,
     pub show_members: bool,
     pub tray: Option<Tray>,
@@ -422,6 +425,7 @@ impl VoxaApp {
             ctx: cc.egui_ctx.clone(),
             actions: Vec::new(),
             fullscreen_stream: None,
+            debug_done: false,
             home: false,
             show_members: true,
             tray: None,
@@ -454,6 +458,28 @@ impl VoxaApp {
             app.connect_link(&t);
         }
         app
+    }
+
+    /// Debug builds only, for automated UI checks once connected:
+    /// VOXA_DEBUG_OPEN=share opens the share picker, =share-start shares the first screen.
+    #[cfg(debug_assertions)]
+    fn debug_hooks(&mut self) {
+        let Ok(what) = std::env::var("VOXA_DEBUG_OPEN") else { return };
+        let ready = self.sess.as_ref().map(|s| s.welcomed && s.bulk_ready).unwrap_or(false);
+        if self.debug_done || !ready {
+            return;
+        }
+        self.debug_done = true;
+        match what.as_str() {
+            "share" => crate::ui::apply(self, crate::ui::Action::ShareScreen),
+            "share-start" => {
+                if let Some(src) = crate::capture::sources().into_iter().find(|s| matches!(s, crate::capture::Source::Monitor { .. })) {
+                    let (ctx, settings) = (self.ctx.clone(), self.settings.stream.clone());
+                    crate::dialogs::start_share(self, &ctx, src, settings);
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn show_whats_new(&mut self) {
@@ -686,6 +712,8 @@ impl VoxaApp {
         while let Ok(ev) = self.events_rx.try_recv() {
             self.handle_event(ev);
         }
+        #[cfg(debug_assertions)]
+        self.debug_hooks();
         // Streamer errors.
         if let Some(s) = &mut self.sess {
             let err = s.streamer.as_ref().and_then(|st| st.error.lock().take());

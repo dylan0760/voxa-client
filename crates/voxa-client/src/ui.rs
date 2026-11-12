@@ -294,6 +294,12 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
             }
         });
 
+    // Full view of my own preview ends when I stop sharing or hide the preview.
+    if let (Some(id), Some(s)) = (app.fullscreen_stream, &app.sess) {
+        if id == s.me && !s.streamer.as_ref().map(|st| st.preview_on.load(Ordering::Relaxed)).unwrap_or(false) {
+            app.fullscreen_stream = None;
+        }
+    }
     if show_server && app.show_members && app.fullscreen_stream.is_none() {
         egui::Panel::right("info")
             .resizable(true)
@@ -574,6 +580,9 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
                     a.push(Action::Disconnect);
                 }
                 let sharing = s.streamer.is_some();
+                if s.streamer.as_ref().map(|st| !st.preview_on.load(Ordering::Relaxed)).unwrap_or(false) && icon_button(ui, "👁", "Show the preview of your own stream", None).clicked() {
+                    a.push(Action::Watch(s.me, true));
+                }
                 if icon_button(ui, "🖥", if sharing { "Stop sharing your screen" } else { "Share your screen or an application" }, sharing.then_some(RED)).clicked() {
                     a.push(Action::ShareScreen);
                 }
@@ -1366,8 +1375,12 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
         });
     });
 
-    // Stage with watched screen shares.
-    let watching: Vec<ClientId> = s.watching.iter().copied().collect();
+    // Stage with watched screen shares (and the preview of my own stream first).
+    let mut watching: Vec<ClientId> = s.watching.iter().copied().collect();
+    if s.streamer.as_ref().map(|st| st.preview_on.load(Ordering::Relaxed)).unwrap_or(false) {
+        watching.retain(|id| *id != s.me);
+        watching.insert(0, s.me);
+    }
     if !watching.is_empty() {
         egui::Panel::top("stage")
             .resizable(true)
@@ -1380,9 +1393,12 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 let h = ui.available_height();
                 ui.horizontal(|ui| {
                     for id in watching {
-                        ui.allocate_ui(egui::vec2(w, h), |ui| {
+                        // Top-down inside each tile: header bar above the picture (the row
+                        // itself is horizontal).
+                        ui.allocate_ui_with_layout(egui::vec2(w, h), Layout::top_down(Align::Min), |ui| {
                             Frame::new().fill(Color32::BLACK).corner_radius(8).show(ui, |ui| {
                                 ui.set_min_size(egui::vec2(w, h));
+                                ui.set_max_size(egui::vec2(w, h));
                                 stream_view(app, ui, id, false);
                             });
                         });
@@ -1765,16 +1781,20 @@ fn update_texture(app: &mut VoxaApp, ctx: &egui::Context, id: ClientId) -> Optio
 
 fn stream_view(app: &mut VoxaApp, ui: &mut Ui, id: ClientId, fullscreen: bool) {
     let ctx = ui.ctx().clone();
-    let name = app.sess.as_ref().map(|s| s.client_name(id)).unwrap_or_default();
+    let mine = app.sess.as_ref().map(|s| s.me == id).unwrap_or(false);
+    let name = if mine { "Your stream".to_string() } else { app.sess.as_ref().map(|s| s.client_name(id)).unwrap_or_default() };
     let title = app.sess.as_ref().and_then(|s| s.clients.get(&id)).and_then(|c| c.streaming.as_ref()).map(|st| st.title.clone()).unwrap_or_default();
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         Frame::new().fill(RED).corner_radius(4).inner_margin(Margin::symmetric(5, 1)).show(ui, |ui| {
             ui.label(RichText::new("LIVE").small().strong().color(Color32::WHITE));
         });
-        ui.label(RichText::new(format!("{name} — {title}")).color(Color32::WHITE));
+        ui.label(RichText::new(format!("{name} - {title}")).color(Color32::WHITE));
+        if mine {
+            ui.label(RichText::new("preview · this is what viewers see").small().color(Color32::from_gray(170)));
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, "✖", "Stop watching", Some(Color32::WHITE)).clicked() {
+            if icon_button(ui, "✖", if mine { "Hide my preview (keeps streaming)" } else { "Stop watching" }, Some(Color32::WHITE)).clicked() {
                 app.actions.push(Action::Watch(id, false));
             }
             if fullscreen {
@@ -1846,6 +1866,20 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         }
         Action::Watch(id, watch) => {
             if let Some(s) = &mut app.sess {
+                // My own stream: only the local preview is shown / hidden.
+                if id == s.me {
+                    if let Some(st) = &s.streamer {
+                        st.preview_on.store(watch, Ordering::Relaxed);
+                    }
+                    if !watch {
+                        s.viewer.frames.lock().remove(&id);
+                        app.textures.remove(&id);
+                        if app.fullscreen_stream == Some(id) {
+                            app.fullscreen_stream = None;
+                        }
+                    }
+                    return;
+                }
                 if watch {
                     if !s.bulk_ready {
                         s.log(EventKind::Warn, "Stream connection not ready yet, try again in a moment");

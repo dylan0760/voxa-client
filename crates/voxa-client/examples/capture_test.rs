@@ -3,6 +3,7 @@
 //! saving them) and saves a capture of the named window.
 
 #[path = "../src/capture.rs"]
+#[allow(dead_code)]
 mod capture;
 
 fn main() {

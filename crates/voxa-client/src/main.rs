@@ -13,6 +13,7 @@ mod hotkeys;
 mod icon;
 mod instance;
 mod net;
+mod share_picker;
 mod stream;
 mod tray;
 mod ui;

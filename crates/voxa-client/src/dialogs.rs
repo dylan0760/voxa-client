@@ -154,8 +154,13 @@ pub struct FileBrowser {
 
 pub struct ShareDlg {
     pub sources: Vec<crate::capture::Source>,
-    pub selected: usize,
+    /// Key of the chosen source (see Source::key).
+    pub selected: Option<String>,
+    /// 0 = Applications, 1 = Screens.
+    pub tab: usize,
     pub settings: StreamSettings,
+    /// Live previews; started when the window is first shown, stopped when it closes.
+    pub thumbs: Option<crate::share_picker::Thumbs>,
 }
 
 pub struct ClientPermsDlg {
@@ -367,7 +372,9 @@ impl Dialogs {
                 }
             }
             Open::Share => {
-                self.share = Some(ShareDlg { sources: crate::capture::sources(), selected: 0, settings: settings.stream.clone() });
+                let sources = crate::capture::sources();
+                let tab = if sources.iter().any(|s| matches!(s, crate::capture::Source::Window { .. })) { 0 } else { 1 };
+                self.share = Some(ShareDlg { sources, selected: None, tab, settings: settings.stream.clone(), thumbs: None });
             }
         }
     }
@@ -1717,69 +1724,102 @@ fn transfers_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
 
 // ---------------------------------------------------------------- screen share
 
+/// Starts sharing `src` with the current channel.
+pub fn start_share(app: &mut VoxaApp, ctx: &egui::Context, src: crate::capture::Source, settings: StreamSettings) {
+    let Some(s) = &mut app.sess else { return };
+    if !s.bulk_ready {
+        app.dlg.error = Some("The stream connection is not ready yet. Please try again in a moment.".into());
+        return;
+    }
+    app.settings.stream = settings.clone();
+    app.settings.save();
+    let (kind, title, w, h) = match &src {
+        crate::capture::Source::Monitor { name, w, h, .. } => (StreamKind::Screen, name.clone(), *w as u32, *h as u32),
+        crate::capture::Source::Window { title, .. } => (StreamKind::Window, title.clone(), 0, 0),
+    };
+    let (w, h) = if w > settings.max_width && w > 0 { (settings.max_width, h * settings.max_width / w) } else { (w, h) };
+    s.conn.send(C2S::StartStream(StreamInfo { kind, title, width: w, height: h, fps: settings.fps }));
+    let preview = crate::stream::PreviewSink { frames: s.viewer.frames.clone(), me: s.me, ctx: ctx.clone() };
+    s.streamer = Some(crate::stream::Streamer::start(src, settings, s.conn.bulk_tx.clone(), preview));
+    s.log(EventKind::Good, "You started sharing your screen - your own preview is shown above the chat");
+}
 fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.share.take() else { return };
     let mut open = true;
     let mut close = false;
     let mut start = None;
-    egui::Window::new("Share Screen / Application").open(&mut open).collapsible(false).resizable(true).default_size([460.0, 380.0]).show_fill(ctx, |ui| {
-        ui.label("Choose what to share with your channel. The stream is relayed through the server.");
-        ui.horizontal(|ui| {
-            if ui.button("⟲ Refresh list").clicked() {
-                d.sources = crate::capture::sources();
-                d.selected = 0;
-            }
-        });
-        crate::updater::fill_list(ui, "list5", 170.0, 100.0, |ui| {
-            for (i, src) in d.sources.iter().enumerate() {
-                ui.selectable_value(&mut d.selected, i, src.label());
-            }
-            if d.sources.is_empty() {
-                ui.label("No screens or windows found.");
-            }
-        });
-        ui.separator();
-        egui::Grid::new("shareopt").num_columns(2).show(ui, |ui| {
-            form_row(ui, "Frame rate:", |ui| {
+    if d.thumbs.is_none() {
+        d.thumbs = Some(crate::share_picker::Thumbs::start(ctx, d.sources.clone()));
+    }
+    let (windows, screens): (Vec<_>, Vec<_>) = d.sources.iter().cloned().partition(|s| matches!(s, crate::capture::Source::Window { .. }));
+    egui::Window::new("Share your screen")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_size([800.0, 600.0])
+        .show_fill(ctx, |ui| {
+            ui.horizontal(|ui| {
+                for (i, label) in [(0usize, format!("🗔 Applications ({})", windows.len())), (1, format!("🖥 Screens ({})", screens.len()))] {
+                    if ui.selectable_label(d.tab == i, RichText::new(label).strong()).clicked() {
+                        d.tab = i;
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("⟲ Refresh").on_hover_text("Find newly opened windows").clicked() {
+                        d.sources = crate::capture::sources();
+                        if let Some(t) = &d.thumbs {
+                            t.set_sources(d.sources.clone());
+                        }
+                    }
+                });
+            });
+            ui.separator();
+            let list = if d.tab == 0 { &windows } else { &screens };
+            let thumbs = d.thumbs.as_ref().expect("started above");
+            crate::updater::fill_list(ui, "share_sources", 150.0, 160.0, |ui| {
+                if list.is_empty() {
+                    ui.add_space(20.0);
+                    ui.label(RichText::new(if d.tab == 0 { "No application windows found. Open the app you want to share and press Refresh." } else { "No screens found." }).weak());
+                }
+                if let Some(src) = crate::share_picker::grid(ui, list, thumbs, &mut d.selected) {
+                    start = Some(src);
+                }
+            });
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Frame rate:");
                 ui.add(egui::Slider::new(&mut d.settings.fps, 1..=30).suffix(" fps"));
-            });
-            form_row(ui, "Quality:", |ui| {
+                ui.add_space(8.0);
+                ui.label("Quality:");
                 ui.add(egui::Slider::new(&mut d.settings.quality, 20..=95));
-            });
-            form_row(ui, "Max width:", |ui| {
+                ui.add_space(8.0);
+                ui.label("Max width:");
                 egui::ComboBox::from_id_salt("sharew").selected_text(format!("{} px", d.settings.max_width)).show_ui(ui, |ui| {
                     for w in [854u32, 1280, 1600, 1920, 2560, 3840] {
                         ui.selectable_value(&mut d.settings.max_width, w, format!("{w} px"));
                     }
                 });
             });
-        });
-        let (ok, cancel) = ok_cancel(ui, "🖥 Start Sharing");
-        if ok {
-            if let Some(src) = d.sources.get(d.selected) {
-                start = Some((src.clone(), d.settings.clone()));
-            }
-            close = true;
-        }
-        if cancel {
-            close = true;
-        }
-    });
-    if let Some((src, settings)) = start {
-        if let Some(s) = &mut app.sess {
-            if !s.bulk_ready {
-                app.dlg.error = Some("The stream connection is not ready yet. Please try again in a moment.".into());
-            } else {
-                let (kind, title, w, h) = match &src {
-                    crate::capture::Source::Monitor { name, w, h, .. } => (StreamKind::Screen, name.clone(), *w as u32, *h as u32),
-                    crate::capture::Source::Window { title, .. } => (StreamKind::Window, title.clone(), 0, 0),
+            let chosen = d.selected.as_ref().and_then(|k| d.sources.iter().find(|s| &s.key() == k)).cloned();
+            ui.horizontal(|ui| {
+                let label = match &chosen {
+                    Some(crate::capture::Source::Window { title, .. }) => format!("📺 Share \"{}\"", crate::share_picker::ellipsize(title, 40)),
+                    Some(crate::capture::Source::Monitor { name, .. }) => format!("📺 Share {name}"),
+                    None => "📺 Go Live".to_string(),
                 };
-                let (w, h) = if w > settings.max_width && w > 0 { (settings.max_width, h * settings.max_width / w) } else { (w, h) };
-                s.conn.send(C2S::StartStream(StreamInfo { kind, title, width: w, height: h, fps: settings.fps }));
-                s.streamer = Some(crate::stream::Streamer::start(src, settings, s.conn.bulk_tx.clone()));
-                s.log(EventKind::Good, "You started sharing your screen");
-            }
-        }
+                let go = egui::Button::new(RichText::new(label).color(Color32::WHITE).strong()).fill(Color32::from_rgb(0x25, 0x80, 0xC3));
+                if ui.add_enabled(chosen.is_some(), go).on_disabled_hover_text("Pick an application or screen first").clicked() {
+                    start = chosen.clone();
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+                ui.label(RichText::new("Tip: double-click a preview to start right away. The stream is relayed through the server.").small().weak());
+            });
+        });
+    if let Some(src) = start {
+        close = true;
+        start_share(app, ctx, src, d.settings.clone());
     }
     if open && !close {
         app.dlg.share = Some(d);

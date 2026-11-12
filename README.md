@@ -48,6 +48,10 @@ The MSI is not code-signed. If Windows SmartScreen warns you, choose
 * **Screen sharing:** share a whole screen or a single application. Streams are relayed
   through the server, never peer-to-peer. Viewers watch on a stage above the chat or in
   full view.
+  * The picker has **Applications** and **Screens** tabs with live previews of every
+    window and screen. Double-click one to go live.
+  * While you share, **your own stream** appears on the stage as a preview of what
+    viewers see. Hide it with ✖ and bring it back with 👁.
 * **Images in chat** (Voxa Server 1.5.0+): send pictures to the server, channel or a
   private chat in any of three ways:
   * the 🖼 button;

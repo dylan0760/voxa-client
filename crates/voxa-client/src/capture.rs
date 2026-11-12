@@ -3,16 +3,57 @@
 #[derive(Clone, Debug, PartialEq)]
 pub enum Source {
     Monitor { name: String, x: i32, y: i32, w: i32, h: i32 },
-    Window { title: String, hwnd: isize },
+    /// pp is the program's file name (e.g. "chrome.exe").
+    Window { title: String, app: String, hwnd: isize },
 }
 
 impl Source {
+    #[allow(dead_code)] // used by examples/capture_test.rs
     pub fn label(&self) -> String {
         match self {
             Source::Monitor { name, w, h, .. } => format!("Screen: {name} ({w}x{h})"),
             Source::Window { title, .. } => format!("Application: {title}"),
         }
     }
+
+    /// Stable key (for thumbnails and selection).
+    pub fn key(&self) -> String {
+        match self {
+            Source::Monitor { name, .. } => format!("m:{name}"),
+            Source::Window { hwnd, .. } => format!("w:{hwnd}"),
+        }
+    }
+}
+
+/// Captures a source and scales it down (averaging pixels) for a preview thumbnail.
+pub fn thumbnail(src: &Source, max_w: u32, max_h: u32) -> Option<egui::ColorImage> {
+    let c = capture(src)?;
+    if c.w == 0 || c.h == 0 {
+        return None;
+    }
+    let s = (max_w as f32 / c.w as f32).min(max_h as f32 / c.h as f32).min(1.0);
+    let (w, h) = (((c.w as f32 * s) as u32).max(1), ((c.h as f32 * s) as u32).max(1));
+    let mut out = Vec::with_capacity((w * h) as usize);
+    for y in 0..h {
+        let (y0, y1) = ((y * c.h / h) as usize, (((y + 1) * c.h / h).max(y * c.h / h + 1)) as usize);
+        for x in 0..w {
+            let (x0, x1) = ((x * c.w / w) as usize, (((x + 1) * c.w / w).max(x * c.w / w + 1)) as usize);
+            // Sample at most 4x4 points per block: fast and smooth enough for a thumbnail.
+            let (sy, sx) = (((y1 - y0) / 4).max(1), ((x1 - x0) / 4).max(1));
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for yy in (y0..y1).step_by(sy) {
+                for xx in (x0..x1).step_by(sx) {
+                    let o = (yy * c.w as usize + xx) * 4;
+                    b += c.bgra[o] as u32;
+                    g += c.bgra[o + 1] as u32;
+                    r += c.bgra[o + 2] as u32;
+                    n += 1;
+                }
+            }
+            out.push(egui::Color32::from_rgb((r / n) as u8, (g / n) as u8, (b / n) as u8));
+        }
+    }
+    Some(egui::ColorImage::new([w as usize, h as usize], out))
 }
 
 pub struct Captured {
@@ -26,8 +67,10 @@ pub struct Captured {
 mod imp {
     use super::*;
     use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
     use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
     use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -78,13 +121,32 @@ mod imp {
             if title == "Program Manager" || pid == std::process::id() {
                 return BOOL(1);
             }
-            v.push(Source::Window { title, hwnd: h.0 as isize });
+            // Cloaked windows (suspended store apps, other virtual desktops) are invisible
+            // and would only show up as black previews.
+            let mut cloaked = 0u32;
+            if DwmGetWindowAttribute(h, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4).is_ok() && cloaked != 0 {
+                return BOOL(1);
+            }
+            v.push(Source::Window { title, app: exe_name(pid), hwnd: h.0 as isize });
             BOOL(1)
         }
         unsafe {
             let _ = EnumWindows(Some(win), LPARAM(&mut out as *mut _ as isize));
         }
         out
+    }
+
+    unsafe fn exe_name(pid: u32) -> String {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return String::new() };
+        let mut buf = [0u16; 520];
+        let mut n = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut n).is_ok();
+        let _ = CloseHandle(h);
+        if !ok {
+            return String::new();
+        }
+        let path = String::from_utf16_lossy(&buf[..n as usize]);
+        path.rsplit('\\').next().unwrap_or_default().to_string()
     }
 
     unsafe fn read_bitmap(mem: HDC, bmp: HBITMAP, w: i32, h: i32) -> Option<Captured> {
