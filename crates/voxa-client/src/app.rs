@@ -381,6 +381,9 @@ pub struct VoxaApp {
     /// "What's new" window (shown once after an update, or from About).
     pub whats_new: Option<crate::updater::WhatsNew>,
     hotkey_rx: Receiver<crate::hotkeys::HotkeyAction>,
+    /// Title last sent to the window. Viewport commands request a repaint, so sending
+    /// it every frame would redraw the window nonstop.
+    pub window_title: String,
 }
 
 /// GitHub repository the client updates from. Forks can override it at build time
@@ -445,6 +448,7 @@ impl VoxaApp {
             hotkeys,
             hotkey_rx,
             whats_new: None,
+            window_title: "Voxa".to_string(),
         };
         // First start of a new version: show its change log (not on a fresh install).
         if app.settings.last_seen_version != APP_VERSION {

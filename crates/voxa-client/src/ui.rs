@@ -283,7 +283,10 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
         },
         None => "Voxa".to_string(),
     };
-    ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+    if title != app.window_title {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+        app.window_title = title;
+    }
     let show_server = app.sess.is_some() && !app.home;
 
     egui::Panel::left("rail")
