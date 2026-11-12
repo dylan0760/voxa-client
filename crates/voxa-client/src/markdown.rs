@@ -332,9 +332,22 @@ pub fn has_markup(text: &str) -> bool {
 
 // ------------------------------------------------------------------ rendering
 
+/// Opens a web link in the default browser. (`explorer.exe <url>` must not be used: it
+/// misreads links with a query string such as `watch?v=` and opens File Explorer.)
 pub fn open_link(url: &str) {
-    if url.starts_with("https://") || url.starts_with("http://") {
-        let _ = std::process::Command::new("explorer.exe").arg(url).spawn();
+    if !(url.starts_with("https://") || url.starts_with("http://")) || url.chars().any(char::is_control) {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use windows::core::{w, HSTRING};
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let target = HSTRING::from(url);
+        // SAFETY: plain Win32 call with valid, null-terminated strings.
+        unsafe {
+            ShellExecuteW(None, w!("open"), &target, None, None, SW_SHOWNORMAL);
+        }
     }
 }
 

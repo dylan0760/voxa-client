@@ -284,7 +284,7 @@ pub fn whats_new_window(ctx: &egui::Context, wn: &WhatsNew, product: &str, rende
 
 pub fn open_url(url: &str) {
     if url.starts_with("https://") {
-        let _ = std::process::Command::new("explorer.exe").arg(url).spawn();
+        crate::markdown::open_link(url);
     }
 }
 
