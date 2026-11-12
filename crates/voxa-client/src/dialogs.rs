@@ -29,6 +29,7 @@ pub enum Open {
     CreateChannel(Option<ChannelId>),
     EditChannel(ChannelId),
     DeleteChannel(ChannelId),
+    CloneChannel(ChannelId),
     Poke(ClientId),
     Kick(ClientId, bool),
     Ban(ClientId),
@@ -191,6 +192,8 @@ pub struct Dialogs {
     pub identities: Option<IdentitiesDlg>,
     pub channel: Option<ChannelDlg>,
     pub delete_channel: Option<(ChannelId, bool)>,
+    /// Clone channel: (source, new name, with sub-channels).
+    pub clone_channel: Option<(ChannelId, String, bool)>,
     pub server: Option<ServerDlg>,
     pub groups: Option<GroupsDlg>,
     pub bans: Option<BansDlg>,
@@ -225,6 +228,7 @@ impl Dialogs {
         self.client_perms = None;
         self.channel = None;
         self.delete_channel = None;
+        self.clone_channel = None;
         self.server = None;
         self.groups = None;
         self.bans = None;
@@ -359,6 +363,10 @@ impl Dialogs {
                 }
             }
             Open::DeleteChannel(id) => self.delete_channel = Some((id, false)),
+            Open::CloneChannel(id) => {
+                let name = s.channels.get(&id).map(|c| format!("{} (copy)", c.name)).unwrap_or_default();
+                self.clone_channel = Some((id, name, false));
+            }
             Open::Poke(id) => self.poke = Some(prompt(id, "")),
             Open::Kick(id, server) => self.kick = Some(TextPrompt { target: id, text: String::new(), flag: server, number: 0 }),
             Open::Ban(id) => self.ban_client = Some(TextPrompt { target: id, text: String::new(), flag: false, number: 60 }),
@@ -2123,6 +2131,43 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         });
         if open && !close {
             app.dlg.delete_channel = Some((id, force));
+        }
+    }
+    // Clone channel.
+    if let Some((id, mut name, mut children)) = app.dlg.clone_channel.take() {
+        let mut open = true;
+        let mut close = false;
+        let (src, has_kids) = app
+            .sess
+            .as_ref()
+            .map(|s| (s.channels.get(&id).map(|c| c.name.clone()).unwrap_or_default(), s.channels.values().any(|c| c.parent == Some(id))))
+            .unwrap_or_default();
+        window("Clone Channel").open(&mut open).show_fill(ctx, |ui| {
+            ui.label(format!("Makes a copy of \"{src}\" with all its settings, password and channel groups (e.g. channel admins), right below the original."));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("New name:");
+                let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(240.0));
+                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !name.trim().is_empty() {
+                    app.send(C2S::CloneChannel { source: id, name: name.trim().to_string(), with_children: children });
+                    close = true;
+                }
+            });
+            if has_kids {
+                ui.checkbox(&mut children, "Also clone all sub-channels");
+            }
+            ui.label(RichText::new("Chat history and files are not copied.").small().weak());
+            let (ok, cancel) = ok_cancel(ui, "📋 Clone");
+            if ok && !name.trim().is_empty() {
+                app.send(C2S::CloneChannel { source: id, name: name.trim().to_string(), with_children: children });
+                close = true;
+            }
+            if cancel {
+                close = true;
+            }
+        });
+        if open && !close {
+            app.dlg.clone_channel = Some((id, name, children));
         }
     }
     // Received pokes.

@@ -946,6 +946,21 @@ fn channel_menu(s: &Session, r: &egui::Response, c: &ChannelInfo, a: &mut Vec<Ac
             a.push(Action::Dialog(dialogs::Open::EditChannel(c.id)));
             ui.close();
         }
+        if s.supports("1.7.0") {
+            // Needs the same permission as creating this kind of channel.
+            let need = match c.kind {
+                ChannelKind::Permanent => perm::CHANNEL_CREATE_PERMANENT,
+                ChannelKind::SemiPermanent => perm::CHANNEL_CREATE_SEMI_PERMANENT,
+                ChannelKind::Temporary => perm::CHANNEL_CREATE_TEMPORARY,
+            };
+            let b = ui
+                .add_enabled(perms & need != 0, egui::Button::new("📋  Clone Channel..."))
+                .on_hover_text("Copy this channel with its settings, password and channel groups under a new name");
+            if b.clicked() {
+                a.push(Action::Dialog(dialogs::Open::CloneChannel(c.id)));
+                ui.close();
+            }
+        }
         if ui.add_enabled(!c.is_default, egui::Button::new("🗑  Delete Channel")).clicked() {
             a.push(Action::Dialog(dialogs::Open::DeleteChannel(c.id)));
             ui.close();
