@@ -52,6 +52,18 @@ The MSI is not code-signed. If Windows SmartScreen warns you, choose
     window and screen. Double-click one to go live.
   * While you share, **your own stream** appears on the stage as a preview of what
     viewers see. Hide it with ✖ and bring it back with 👁.
+* **Rich text in chat** (Discord-style Markdown):
+  * `**bold**`, `*italic*`, `__underline__`, `~~strikethrough~~` and `` `inline code` ``;
+  * `> quotes`, `# headings`, and `- bullet` or `1. numbered` lists;
+  * clickable links, including `[text](https://…)`;
+  * ```` ```lang ```` **code blocks** with syntax highlighting and a Copy button.
+
+  Shift+Enter starts a new line and Enter sends.
+* **YouTube in chat:** YouTube links get a preview card with the title, channel and
+  thumbnail. Press ▶ to play the video inside Voxa, on the stage above the chat, with
+  full view. Turn previews off under **Options ▸ Application ▸ Chat**.
+  * The player uses the Microsoft Edge WebView2 runtime that comes with Windows 10/11.
+  * Voxa ships Microsoft's small redistributable `WebView2Loader.dll` for it.
 * **Images in chat** (Voxa Server 1.5.0+): send pictures to the server, channel or a
   private chat in any of three ways:
   * the 🖼 button;

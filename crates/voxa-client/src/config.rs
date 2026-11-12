@@ -113,6 +113,8 @@ pub struct Settings {
     pub auto_update: bool,
     /// Most recently used emoji (picker "recent" tab).
     pub recent_emoji: Vec<String>,
+    /// Show previews (and the in-app player) for YouTube links in chat.
+    pub link_previews: bool,
     /// Global hotkeys (Options > Hotkeys).
     pub hotkeys: Vec<crate::hotkeys::HotkeyEntry>,
     /// Version whose "What's new" was last shown (to show it once after an update).
@@ -141,6 +143,7 @@ impl Default for Settings {
             minimize_to_tray: true,
             auto_update: true,
             recent_emoji: Vec::new(),
+            link_previews: true,
             hotkeys: Vec::new(),
             last_seen_version: String::new(),
             fresh: false,

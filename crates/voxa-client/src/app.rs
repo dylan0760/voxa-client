@@ -373,6 +373,10 @@ pub struct VoxaApp {
     pub updater: crate::updater::Updater,
     update_notified: bool,
     pub emoji: crate::ui::EmojiPicker,
+    /// YouTube link previews (shared by all servers).
+    pub previews: crate::links::Previews,
+    /// In-client video player.
+    pub player: crate::player::Player,
     pub hotkeys: crate::hotkeys::Hotkeys,
     /// "What's new" window (shown once after an update, or from About).
     pub whats_new: Option<crate::updater::WhatsNew>,
@@ -436,6 +440,8 @@ impl VoxaApp {
             updater: crate::updater::Updater::new(UPDATE_REPO, is_client_msi, cc.egui_ctx.clone()).with_notes_dir(crate::config::config_dir()),
             update_notified: false,
             emoji: Default::default(),
+            previews: Default::default(),
+            player: Default::default(),
             hotkeys,
             hotkey_rx,
             whats_new: None,
@@ -461,7 +467,8 @@ impl VoxaApp {
     }
 
     /// Debug builds only, for automated UI checks once connected:
-    /// VOXA_DEBUG_OPEN=share opens the share picker, =share-start shares the first screen.
+    /// VOXA_DEBUG_OPEN=share opens the share picker, =share-start shares the first screen,
+    /// =play:<youtube id> starts the video player.
     #[cfg(debug_assertions)]
     fn debug_hooks(&mut self) {
         let Ok(what) = std::env::var("VOXA_DEBUG_OPEN") else { return };
@@ -476,6 +483,11 @@ impl VoxaApp {
                 if let Some(src) = crate::capture::sources().into_iter().find(|s| matches!(s, crate::capture::Source::Monitor { .. })) {
                     let (ctx, settings) = (self.ctx.clone(), self.settings.stream.clone());
                     crate::dialogs::start_share(self, &ctx, src, settings);
+                }
+            }
+            w if w.starts_with("play:") => {
+                if let Some(v) = crate::links::youtube(&format!("https://youtu.be/{}", &w[5..])) {
+                    self.player.play(v, "Debug video".into());
                 }
             }
             _ => {}
@@ -667,6 +679,7 @@ impl VoxaApp {
     }
 
     pub fn disconnect(&mut self, msg: &str) {
+        self.player.close();
         if let Some(s) = self.sess.take() {
             s.conn.close(msg);
             self.offline_log = ChatLog::default();
@@ -1391,8 +1404,9 @@ impl eframe::App for VoxaApp {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         crate::ui::draw(self, ui);
+        self.player.sync(ui.ctx(), frame);
         let actions: Vec<crate::ui::Action> = std::mem::take(&mut self.actions);
         for a in actions {
             crate::ui::apply(self, a);

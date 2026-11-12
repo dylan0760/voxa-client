@@ -61,6 +61,7 @@ pub struct OptionsDlg {
     pub scale: f32,
     pub timestamps: bool,
     pub tray: bool,
+    pub link_previews: bool,
     pub auto_update: bool,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
@@ -390,6 +391,7 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         scale: s.ui_scale,
         timestamps: s.show_timestamps,
         tray: s.minimize_to_tray,
+        link_previews: s.link_previews,
         auto_update: s.auto_update,
         inputs: crate::audio::input_devices(),
         outputs: crate::audio::output_devices(),
@@ -813,7 +815,11 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         ui.add(egui::Slider::new(&mut d.scale, 0.75..=2.0));
                     });
                     form_row(ui, "Chat:", |ui| {
-                        ui.checkbox(&mut d.timestamps, "Show timestamps");
+                        ui.vertical(|ui| {
+                            ui.checkbox(&mut d.timestamps, "Show timestamps");
+                            ui.checkbox(&mut d.link_previews, "Show previews of YouTube links and play them in Voxa")
+                                .on_hover_text("Loading a preview contacts YouTube from your computer, like opening the link would.");
+                        });
                     });
                     form_row(ui, "System tray:", |ui| {
                         ui.vertical(|ui| {
@@ -862,6 +868,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         app.settings.ui_scale = d.scale;
         app.settings.show_timestamps = d.timestamps;
         app.settings.minimize_to_tray = d.tray;
+        app.settings.link_previews = d.link_previews;
         app.settings.auto_update = d.auto_update;
         app.settings.hotkeys = d.hotkeys.iter().filter(|e| e.binding.is_set()).cloned().collect();
         app.hotkeys.set(app.settings.hotkeys.clone());
@@ -2195,7 +2202,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         app.show_whats_new();
     }
     if let Some(wn) = &app.whats_new {
-        if !crate::updater::whats_new_window(ctx, wn, "Voxa") {
+        if !crate::updater::whats_new_window(ctx, wn, "Voxa", |ui, t| crate::markdown::render(ui, t, 14.0, "whats_new")) {
             app.whats_new = None;
         }
     }

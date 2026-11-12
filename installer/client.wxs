@@ -48,6 +48,8 @@
           </RegistryKey>
         </RegistryKey>
       </Component>
+      <!-- Microsoft's redistributable loader for the WebView2 runtime (in-app video player). -->
+      <Component Id="WebView2Loader" Guid="*" Win64="yes"><File Id="WebView2LoaderDll" Source="$(var.Bin)\WebView2Loader.dll" KeyPath="yes" /></Component>
       <Component Id="DocReadme" Guid="*" Win64="yes"><File Id="Readme" Source="$(var.Docs)\README.txt" KeyPath="yes" /></Component>
       <Component Id="DocMit" Guid="*" Win64="yes"><File Id="LicenseMit" Source="$(var.Docs)\LICENSE-MIT.txt" KeyPath="yes" /></Component>
       <Component Id="DocApache" Guid="*" Win64="yes"><File Id="LicenseApache" Source="$(var.Docs)\LICENSE-APACHE.txt" KeyPath="yes" /></Component>
@@ -73,6 +75,7 @@
     <Feature Id="Main" Title="Voxa" Description="The Voxa client." Level="1"
              ConfigurableDirectory="INSTALLFOLDER" Absent="disallow" AllowAdvertise="no">
       <ComponentRef Id="VoxaExe" />
+      <ComponentRef Id="WebView2Loader" />
       <ComponentRef Id="DocReadme" />
       <ComponentRef Id="DocMit" />
       <ComponentRef Id="DocApache" />
