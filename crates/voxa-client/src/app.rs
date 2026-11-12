@@ -415,6 +415,7 @@ impl VoxaApp {
         let (tx, rx) = std::sync::mpsc::channel();
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime");
         let voice_shared = VoiceShared::new(settings.audio.clone());
+        *voice_shared.ctx.lock() = Some(cc.egui_ctx.clone());
         let (hk_tx, hotkey_rx) = std::sync::mpsc::channel();
         let hotkeys = crate::hotkeys::Hotkeys::start(settings.hotkeys.clone(), hk_tx, cc.egui_ctx.clone(), voice_shared.clone());
         let mut app = VoxaApp {
@@ -699,6 +700,7 @@ impl VoxaApp {
         let Some(me) = s.me() else { return };
         let allowed = !me.input_muted && s.can_talk(me);
         self.voice_shared.transmit_allowed.store(allowed, Ordering::Relaxed);
+        self.voice_shared.input_muted.store(me.input_muted, Ordering::Relaxed);
         self.voice_shared.output_muted.store(me.output_muted, Ordering::Relaxed);
         let q = s.channels.get(&me.channel).map(|c| c.codec_quality).unwrap_or(6);
         self.voice_shared.bitrate.store(quality_to_bitrate(q), Ordering::Relaxed);

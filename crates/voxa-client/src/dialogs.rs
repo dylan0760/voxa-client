@@ -727,9 +727,16 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     form_row(ui, "Notification sounds:", |ui| {
                         ui.checkbox(&mut d.audio.sounds, "Play sounds for pokes, messages and joins");
                     });
+                    form_row(ui, "Muted warning:", |ui| {
+                        ui.checkbox(&mut d.audio.muted_warning, "Play a warning when I talk while my microphone is muted")
+                            .on_hover_text("Uses your Voice Activation level (or your push-to-talk key) to notice that you are talking.");
+                    });
                     form_row(ui, "", |ui| {
                         if ui.button("▶ Play test sound").clicked() {
                             app.voice_shared.play_tones(&[(523.0, 120), (659.0, 120), (784.0, 200)]);
+                        }
+                        if ui.button("🎙 Hear the muted warning").clicked() {
+                            app.voice_shared.queue_tones(crate::audio::MUTED_WARNING);
                         }
                     });
                 });

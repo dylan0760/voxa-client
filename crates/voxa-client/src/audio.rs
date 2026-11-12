@@ -16,6 +16,36 @@ use voxa_proto::{ClientId, FRAME_SAMPLES, SAMPLE_RATE};
 
 use crate::config::{AudioSettings, VoiceMode};
 
+/// Three falling tones: "you are talking while muted".
+pub const MUTED_WARNING: &[(f32, u32)] = &[(880.0, 90), (0.0, 40), (660.0, 90), (0.0, 40), (440.0, 160)];
+
+/// Notices talking while muted: true once ~0.3 s of speech (15 frames of 20 ms) has
+/// built up, with pauses under 1.5 s not resetting it, and at most once every 8 s.
+#[derive(Default)]
+struct MutedTalk {
+    speech_frames: u32,
+    last_speech: Option<Instant>,
+    last_warning: Option<Instant>,
+}
+
+impl MutedTalk {
+    fn frame(&mut self, speaking: bool, now: Instant) -> bool {
+        if speaking {
+            self.speech_frames += 1;
+            self.last_speech = Some(now);
+        } else if self.last_speech.map(|t| now - t > Duration::from_millis(1500)).unwrap_or(true) {
+            self.speech_frames = 0;
+        }
+        let rested = self.last_warning.map(|t| now - t > Duration::from_secs(8)).unwrap_or(true);
+        if self.speech_frames >= 15 && rested {
+            self.speech_frames = 0;
+            self.last_warning = Some(now);
+            return true;
+        }
+        false
+    }
+}
+
 pub struct VoiceShared {
     pub stop: AtomicBool,
     /// False when muted or lacking talk power.
@@ -24,6 +54,12 @@ pub struct VoiceShared {
     pub self_talking: AtomicBool,
     /// Held push-to-mute hotkey.
     pub push_to_mute: AtomicBool,
+    /// The user muted their own microphone (not: lacking talk power).
+    pub input_muted: AtomicBool,
+    /// Unix ms of the last "you are talking while muted" warning (0 = never).
+    pub muted_talk_ms: AtomicU64,
+    /// Repainted when a warning fires, so the banner shows at once.
+    pub ctx: Mutex<Option<egui::Context>>,
     input_level: AtomicU32,
     pub bitrate: AtomicI32,
     pub ping_ms: AtomicU32,
@@ -45,6 +81,9 @@ impl VoiceShared {
             output_muted: AtomicBool::new(false),
             self_talking: AtomicBool::new(false),
             push_to_mute: AtomicBool::new(false),
+            input_muted: AtomicBool::new(false),
+            muted_talk_ms: AtomicU64::new(0),
+            ctx: Mutex::new(None),
             input_level: AtomicU32::new((-90f32).to_bits()),
             bitrate: AtomicI32::new(voxa_proto::quality_to_bitrate(6)),
             ping_ms: AtomicU32::new(0),
@@ -72,6 +111,12 @@ impl VoiceShared {
         if !self.settings.lock().sounds {
             return;
         }
+        self.queue_tones(tones);
+    }
+
+    /// Like play_tones, but also when notification sounds are off (warnings).
+    /// A frequency of 0 is a pause.
+    pub fn queue_tones(&self, tones: &[(f32, u32)]) {
         let mut fx = self.effects.lock();
         if fx.len() > SAMPLE_RATE as usize * 2 {
             return;
@@ -437,6 +482,7 @@ fn encoder_loop(
     let mut frame_seq: u16 = 0;
     let mut transmitting = false;
     let mut vad_hold_until = Instant::now();
+    let mut muted_talk = MutedTalk::default();
     let mut ptt_release_at: Option<Instant> = None;
     let mut last_ping = Instant::now() - Duration::from_secs(10);
     let send = |kind: Kind, payload: &[u8]| {
@@ -486,6 +532,23 @@ fn encoder_loop(
                     }
                 }
             };
+            // Talking while the microphone is muted: warn with a sound and a banner (like
+            // TeamSpeak) after ~0.3 s of speech, at most every 8 s while it continues.
+            if settings.muted_warning && shared.input_muted.load(Ordering::Relaxed) {
+                let speaking = match settings.mode {
+                    VoiceMode::PushToTalk => key_down(settings.ptt_key),
+                    _ => db >= settings.vad_threshold_db,
+                };
+                if muted_talk.frame(speaking, Instant::now()) {
+                    shared.queue_tones(MUTED_WARNING);
+                    shared.muted_talk_ms.store(now_ms(), Ordering::Relaxed);
+                    if let Some(c) = shared.ctx.lock().as_ref() {
+                        c.request_repaint();
+                    }
+                }
+            } else {
+                muted_talk = MutedTalk::default();
+            }
             let active = wants && shared.transmit_allowed.load(Ordering::Relaxed) && !shared.push_to_mute.load(Ordering::Relaxed);
             if active {
                 let br = shared.bitrate.load(Ordering::Relaxed);
@@ -577,5 +640,42 @@ fn receiver_loop(sock: UdpSocket, cipher: Arc<VoiceCipher>, shared: Arc<VoiceSha
             }
             Kind::Ping => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod muted_talk_tests {
+    use super::*;
+
+    /// Feeds 20 ms frames; returns the times (ms) at which a warning fired.
+    fn run(pattern: impl Fn(u64) -> bool, total_ms: u64) -> Vec<u64> {
+        let start = Instant::now();
+        let mut d = MutedTalk::default();
+        (0..total_ms / 20).filter_map(|i| d.frame(pattern(i * 20), start + Duration::from_millis(i * 20)).then_some(i * 20)).collect()
+    }
+
+    #[test]
+    fn warns_after_short_speech_and_repeats_slowly() {
+        // Talking non-stop for 20 s: first warning after 0.3 s, then every ~8 s.
+        let w = run(|_| true, 20_000);
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert!(w[0] <= 300 && w[1] - w[0] > 8000 && w[1] - w[0] < 8400, "{w:?}");
+    }
+
+    #[test]
+    fn ignores_short_noises() {
+        // A 100 ms click every 2 s never adds up to a warning.
+        assert!(run(|t| t % 2000 < 100, 30_000).is_empty());
+    }
+
+    #[test]
+    fn normal_speech_with_pauses_counts() {
+        // Words of 150 ms with 200 ms gaps (speech rhythm) still warn.
+        assert_eq!(run(|t| t % 350 < 150, 3_000).len(), 1);
+    }
+
+    #[test]
+    fn silence_never_warns() {
+        assert!(run(|_| false, 30_000).is_empty());
     }
 }

@@ -57,6 +57,8 @@ pub struct AudioSettings {
     pub input_gain: f32,
     pub output_volume: f32,
     pub sounds: bool,
+    /// Warn (sound + banner) when talking while the microphone is muted.
+    pub muted_warning: bool,
 }
 
 impl Default for AudioSettings {
@@ -71,6 +73,7 @@ impl Default for AudioSettings {
             input_gain: 1.0,
             output_volume: 1.0,
             sounds: true,
+            muted_warning: true,
         }
     }
 }

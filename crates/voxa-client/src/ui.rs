@@ -613,6 +613,14 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
                 ui.label(RichText::new("✋ You need talk power to speak here").small().color(YELLOW));
             }
         }
+        // Shown for a few seconds after talking while muted.
+        let warned = shared.muted_talk_ms.load(Ordering::Relaxed);
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let since = now_ms.saturating_sub(warned);
+        if warned > 0 && since < 4000 && me.as_ref().map(|m| m.input_muted).unwrap_or(false) {
+            ui.label(RichText::new("🎙 You're muted - unmute to be heard").small().strong().color(RED));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(4100 - since));
+        }
         if s.streamer.is_some() {
             ui.label(RichText::new("🔴 You are sharing your screen").small().color(RED));
         }

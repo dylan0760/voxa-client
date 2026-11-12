@@ -45,6 +45,7 @@ The MSI is not code-signed. If Windows SmartScreen warns you, choose
   * Push-to-talk is set under **Capture**.
 * **Join power:** channels can require a minimum group *join power* (TeamSpeak style).
   Channels you can't enter show ⛔.
+* **Muted warning:** talking while your microphone is muted plays a warning sound and shows a red notice, like TeamSpeak. You can turn it off under **Options ▸ Muted warning**.
 * **Screen sharing:** share a whole screen or a single application. Streams are relayed
   through the server, never peer-to-peer. Viewers watch on a stage above the chat or in
   full view.
