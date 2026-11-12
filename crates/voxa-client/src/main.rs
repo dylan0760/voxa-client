@@ -2,6 +2,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod gpu;
 mod app;
 mod audio;
 mod chat_images;
@@ -64,6 +65,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([760.0, 480.0])
             .with_icon(icon),
+        wgpu_options: gpu::wgpu_options(),
         ..Default::default()
     };
     eframe::run_native("Voxa", options, Box::new(move |cc| Ok(Box::new(app::VoxaApp::new(cc, inst)))))

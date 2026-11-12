@@ -2185,6 +2185,9 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             ui.label("• Screen / application sharing relayed by the server");
             ui.add_space(6.0);
             ui.label(RichText::new("Licensed under MIT OR Apache-2.0").weak());
+            if let Some(gpu) = crate::gpu::adapter_info() {
+                ui.label(RichText::new(format!("Graphics: {gpu}")).weak());
+            }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui.button("⬆ Check for updates").clicked() {
