@@ -78,6 +78,7 @@ The MSI is not code-signed. If Windows SmartScreen warns you, choose
 
   Images are stored encrypted with the chat history. Click one to view it full size and
   save it. Up to 10 MB each; bigger photos are scaled down automatically.
+* **Pinned messages** (Voxa Server 1.8.0+): pin messages with 📌 (hover or right-click). A **📌 Pinned** bar at the top of the chat lists them. Needs the **Pin messages** permission.
 * **Chat moderation:**
   * Hover a message for 📋 Copy and 🗑 Delete, or right-click it. Deleted messages
     disappear for everyone and from the stored history.

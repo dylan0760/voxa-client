@@ -204,6 +204,10 @@ pub struct Session {
     pub pending_downloads: HashMap<(ChannelId, String), std::path::PathBuf>,
     /// Images posted in this server's chats (servers 1.5.0+).
     pub images: crate::chat_images::ChatImages,
+    /// Pinned messages per chat (servers 1.8.0+), most recently pinned first.
+    pub pins: HashMap<TextTarget, Vec<PinnedMessage>>,
+    /// The pinned messages list above the chat is expanded.
+    pub pins_open: bool,
 }
 
 impl Session {
@@ -253,6 +257,13 @@ impl Session {
         let id = self.next_transfer;
         self.next_transfer += 1;
         self.transfers.insert(id, t);
+    }
+
+    /// Asks for the pinned messages of a chat (servers 1.8.0+).
+    pub fn fetch_pins(&self, target: TextTarget) {
+        if self.supports("1.8.0") && !matches!(target, TextTarget::Private(_)) {
+            self.conn.send(C2S::GetPins(target));
+        }
     }
 
     /// True if the connected server is at least min (for optional newer messages).
@@ -499,6 +510,11 @@ impl VoxaApp {
                     crate::dialogs::start_share(self, &ctx, src, settings);
                 }
             }
+            "pins" => {
+                if let Some(s) = &mut self.sess {
+                    s.pins_open = true;
+                }
+            }
             w if w.starts_with("play:") => {
                 if let Some(v) = crate::links::youtube(&format!("https://youtu.be/{}", &w[5..])) {
                     self.player.play(v, "Debug video".into());
@@ -711,6 +727,8 @@ impl VoxaApp {
             extra_perms: 0,
             pending_downloads: HashMap::new(),
             images: Default::default(),
+            pins: HashMap::new(),
+            pins_open: false,
         };
         sess.log(EventKind::Info, format!("Trying to connect to {} ({})...", req.label, req.address));
         self.sess = Some(sess);
@@ -1008,9 +1026,11 @@ impl VoxaApp {
                     s.conn.send(C2S::GetFileLimits);
                 }
                 s.conn.send(C2S::FetchHistory { target: TextTarget::Server, before: None, limit: 50 });
+                s.fetch_pins(TextTarget::Server);
                 let ch = s.my_channel();
                 s.channel_logs.entry(ch).or_default().loading = true;
                 s.conn.send(C2S::FetchHistory { target: TextTarget::Channel(ch), before: None, limit: 50 });
+                s.fetch_pins(TextTarget::Channel(ch));
                 // Restore per-user volumes.
                 let mut vols = shared.volumes.lock();
                 vols.clear();
@@ -1108,6 +1128,8 @@ impl VoxaApp {
                     let log = s.channel_logs.entry(channel).or_default();
                     *log = ChatLog { loading: true, ..Default::default() };
                     s.conn.send(C2S::FetchHistory { target: TextTarget::Channel(channel), before: None, limit: 50 });
+                    s.pins_open = false;
+                    s.fetch_pins(TextTarget::Channel(channel));
                 } else {
                     if channel == my_channel {
                         shared.play_tones(&[(660.0, 70)]);
@@ -1182,6 +1204,9 @@ impl VoxaApp {
                 if let Some(log) = log {
                     log.lines.retain(|l| !matches!(l, ChatLine::Msg(m) if m.id == id));
                 }
+                if let Some(p) = s.pins.get_mut(&target) {
+                    p.retain(|x| x.message.id != id);
+                }
             }
             S2C::Poked { from, from_name, message } => {
                 let _ = from;
@@ -1223,7 +1248,23 @@ impl VoxaApp {
                     }
                 }
             }
+            S2C::Pins { target, pins } => {
+                s.pins.insert(target, pins);
+            }
+            S2C::PinChanged { target, id: _, pinned, by } => {
+                let log = match target {
+                    TextTarget::Server => Some(&mut s.server_log),
+                    TextTarget::Channel(ch) => s.channel_logs.get_mut(&ch),
+                    TextTarget::Private(_) => None,
+                };
+                if let Some(log) = log {
+                    let what = if pinned { "pinned a message to this chat" } else { "unpinned a message" };
+                    log.lines.push(ChatLine::Event { ts: now_unix(), text: format!("📌 {by} {what}"), kind: EventKind::Info });
+                }
+                s.fetch_pins(target);
+            }
             S2C::ChatCleared { target, by } => {
+                s.pins.remove(&target);
                 let log = match target {
                     TextTarget::Server => Some(&mut s.server_log),
                     TextTarget::Channel(ch) => s.channel_logs.get_mut(&ch),

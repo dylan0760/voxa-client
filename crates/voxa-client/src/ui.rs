@@ -1535,7 +1535,8 @@ fn insert_emoji(input: &mut String, ch: &str) {
 /// Discord-style message actions: hover toolbar (copy / delete) and a right-click menu.
 /// `row` must sense clicks from *behind* the message content (see `chat_area`), so it
 /// offers the context menu without stealing clicks from images in the message.
-fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx, m: &ChatMessage, target: TextTarget, can_del: bool, a: &mut Vec<Action>) {
+/// pin: Some(is pinned) when the user may pin / unpin this message.
+fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx, m: &ChatMessage, target: TextTarget, can_del: bool, pin: Option<bool>, a: &mut Vec<Action>) {
     let t = theme(ui.visuals().dark_mode);
     let rect = row.rect.expand2(egui::vec2(0.0, 2.0));
     let click = row;
@@ -1553,6 +1554,12 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
             a.push(Action::CopyText(shown.clone()));
             ui.close();
         }
+        if let Some(pinned) = pin {
+            if ui.button(if pinned { "📌  Unpin Message" } else { "📌  Pin Message" }).clicked() {
+                a.push(Action::Send(C2S::PinMessage { target, id: m.id, pin: !pinned }));
+                ui.close();
+            }
+        }
         if can_del && ui.button(RichText::new("🗑  Delete Message").color(RED)).clicked() {
             delete(a, false);
             ui.close();
@@ -1561,7 +1568,7 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
     if ui.rect_contains_pointer(rect) {
         // Painted into a slot reserved before the content, so it stays behind images.
         ui.painter().set(bg, egui::Shape::rect_filled(rect, CornerRadius::same(4), t.hover.linear_multiply(0.35)));
-        let n = if can_del { 2.0 } else { 1.0 };
+        let n = 1.0 + if can_del { 1.0 } else { 0.0 } + if pin.is_some() { 1.0 } else { 0.0 };
         let bar = egui::Rect::from_min_size(egui::pos2(rect.right() - 30.0 * n - 6.0, rect.top() + 1.0), egui::vec2(30.0 * n + 4.0, 28.0));
         ui.painter().rect_filled(bar, CornerRadius::same(6), t.card);
         let mut x = bar.left() + 2.0;
@@ -1578,11 +1585,86 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
         if button(ui, "📋", "Copy text", t.dim) {
             a.push(Action::CopyText(shown.clone()));
         }
+        if let Some(pinned) = pin {
+            if button(ui, "📌", if pinned { "Unpin message" } else { "Pin message to the top of this chat" }, if pinned { ACCENT } else { t.dim }) {
+                a.push(Action::Send(C2S::PinMessage { target, id: m.id, pin: !pinned }));
+            }
+        }
         if can_del && button(ui, "🗑", "Delete message (hold Shift to skip confirmation)", RED) {
             let shift = ui.input(|i| i.modifiers.shift);
             delete(a, shift);
         }
     }
+}
+
+/// "📌 Pinned (n)" bar above the chat: the newest pin, click to see them all.
+fn pinned_bar(ui: &mut Ui, pins: &[PinnedMessage], open: &mut bool, can_pin: bool, target: TextTarget, a: &mut Vec<Action>) {
+    if pins.is_empty() {
+        return;
+    }
+    let t = theme(ui.visuals().dark_mode);
+    let preview = |text: &str| -> String {
+        match ImageRef::parse(text) {
+            Some(r) => format!("📷 {}", r.name),
+            // First real line, without the Markdown marks (** ` ~~ ...).
+            None => {
+                let line = text.lines().find(|l| !l.trim().is_empty() && !l.trim_start().starts_with("```")).unwrap_or("");
+                crate::markdown::spans(line.trim_start_matches(['#', '>', '-', ' '])).into_iter().map(|s| s.text).collect()
+            }
+        }
+    };
+    ui.add_space(4.0);
+    Frame::new().fill(t.card).corner_radius(8).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let latest = &pins[0];
+        let header = ui
+            .horizontal(|ui| {
+                ui.label(RichText::new("📌").size(15.0));
+                ui.label(RichText::new(format!("Pinned ({})", pins.len())).strong());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new(if *open { "▲" } else { "▼" }).color(t.dim));
+                    if !*open {
+                        let line = format!("{}: {}", latest.message.from_name, preview(&latest.message.text));
+                        ui.add(egui::Label::new(RichText::new(line).color(t.dim)).truncate());
+                    }
+                });
+            })
+            .response
+            .interact(Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(if *open { "Hide pinned messages" } else { "Show all pinned messages" });
+        if header.clicked() {
+            *open = !*open;
+        }
+        if *open {
+            ui.separator();
+            egui::ScrollArea::vertical().id_salt(("pins", target)).max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
+                for p in pins {
+                    let m = &p.message;
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&m.from_name).strong().color(name_color(&m.from_uid)));
+                        ui.label(RichText::new(fmt_day_time(m.ts)).small().color(t.dim));
+                        if can_pin {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.small_button("Unpin").on_hover_text("Remove from the pinned messages").clicked() {
+                                    a.push(Action::Send(C2S::PinMessage { target, id: m.id, pin: false }));
+                                }
+                            });
+                        }
+                    });
+                    match ImageRef::parse(&m.text) {
+                        Some(_) => {
+                            ui.label(preview(&m.text));
+                        }
+                        None => message_text(ui, &m.text, (m.id, 0x9105)),
+                    }
+                    ui.label(RichText::new(format!("Pinned by {} · {}", p.pinned_by, fmt_day_time(p.pinned_at))).small().color(t.dim));
+                    ui.add_space(6.0);
+                }
+            });
+        }
+    });
+    ui.add_space(4.0);
 }
 
 /// Chat message body: colour emoji font, and "jumbo" emoji for emoji-only messages.
@@ -1768,6 +1850,9 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
     // Mirrors the server: server chat uses server-wide permissions, channel chat also
     // the channel group. Own messages can always be deleted.
     let can_delete_others = s.chat_perm(target, perm::CHAT_DELETE);
+    let can_pin = s.supports("1.8.0") && !matches!(target, TextTarget::Private(_)) && s.chat_perm(target, perm::CHAT_PIN);
+    let pins: Vec<PinnedMessage> = s.pins.get(&target).cloned().unwrap_or_default();
+    let pinned_ids: std::collections::HashSet<MessageId> = pins.iter().map(|p| p.message.id).collect();
     let hint = match s.tab {
         ChatKey::Server => "Message the server".to_string(),
         ChatKey::Channel => format!("Message #{}", s.channels.get(&my_channel).map(|c| c.name.clone()).unwrap_or_default()),
@@ -1871,7 +1956,9 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
         ChatKey::Channel => s.channel_logs.get_mut(&my_channel),
         ChatKey::Private(id) => s.private_logs.get_mut(&id),
     };
+    let pins_open = &mut s.pins_open;
     egui::CentralPanel::default().frame(Frame::new().fill(t.main).inner_margin(Margin::symmetric(14, 4))).show(ui, |ui| {
+        pinned_bar(ui, &pins, pins_open, can_pin, target, a);
         egui::ScrollArea::vertical().id_salt(format!("chat{:?}", s.tab)).auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
             let Some(log) = log else {
                 ui.label(RichText::new("No messages yet.").color(t.dim));
@@ -1937,7 +2024,8 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                                 });
                             })
                         });
-                        message_actions(ui, &r.response, bg, m, target, can_del, a);
+                        let pin = (can_pin && m.id != 0).then(|| pinned_ids.contains(&m.id));
+                        message_actions(ui, &r.response, bg, m, target, can_del, pin, a);
                     }
                 }
             }
