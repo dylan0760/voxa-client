@@ -384,6 +384,10 @@ pub struct VoxaApp {
     /// Title last sent to the window. Viewport commands request a repaint, so sending
     /// it every frame would redraw the window nonstop.
     pub window_title: String,
+    /// Start of the previous frame (frame rate limit).
+    last_frame: Option<std::time::Instant>,
+    /// Debug builds with VOXA_FPS_LOG: frames counted in the current second.
+    fps_count: (std::time::Instant, u32),
 }
 
 /// GitHub repository the client updates from. Forks can override it at build time
@@ -450,6 +454,8 @@ impl VoxaApp {
             hotkey_rx,
             whats_new: None,
             window_title: "Voxa".to_string(),
+            last_frame: None,
+            fps_count: (std::time::Instant::now(), 0),
         };
         // First start of a new version: show its change log (not on a fresh install).
         if app.settings.last_seen_version != APP_VERSION {
@@ -496,6 +502,31 @@ impl VoxaApp {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// egui redraws the whole window on every mouse movement, so a fast mouse on a 240 Hz
+    /// monitor would redraw it 240 times a second and cause visible GPU spikes. Waiting out
+    /// the rest of the frame time caps redraws (input that arrives meanwhile is handled
+    /// together in the next frame).
+    fn limit_frame_rate(&mut self) {
+        let now = std::time::Instant::now();
+        if self.settings.max_fps > 0 {
+            let min = std::time::Duration::from_secs_f64(1.0 / self.settings.max_fps as f64);
+            if let Some(prev) = self.last_frame {
+                let spent = now - prev;
+                if spent < min {
+                    std::thread::sleep(min - spent);
+                }
+            }
+        }
+        self.last_frame = Some(std::time::Instant::now());
+        if cfg!(debug_assertions) && std::env::var_os("VOXA_FPS_LOG").is_some() {
+            self.fps_count.1 += 1;
+            if self.fps_count.0.elapsed() >= std::time::Duration::from_secs(1) {
+                eprintln!("fps {}", self.fps_count.1);
+                self.fps_count = (std::time::Instant::now(), 0);
+            }
         }
     }
 
@@ -1384,6 +1415,7 @@ impl eframe::App for VoxaApp {
     /// Runs before every frame and also while the window is hidden in the tray, so
     /// network events, pokes and tray clicks are handled without a visible window.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.limit_frame_rate();
         self.process_events();
         self.handle_tray(ctx);
         self.handle_hotkeys();

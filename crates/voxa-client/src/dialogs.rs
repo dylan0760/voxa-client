@@ -59,6 +59,7 @@ pub struct OptionsDlg {
     pub nickname: String,
     pub dark: bool,
     pub scale: f32,
+    pub max_fps: u32,
     pub timestamps: bool,
     pub tray: bool,
     pub link_previews: bool,
@@ -389,6 +390,7 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         nickname: s.nickname.clone(),
         dark: s.dark_theme,
         scale: s.ui_scale,
+        max_fps: s.max_fps,
         timestamps: s.show_timestamps,
         tray: s.minimize_to_tray,
         link_previews: s.link_previews,
@@ -821,6 +823,16 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     form_row(ui, "UI scale:", |ui| {
                         ui.add(egui::Slider::new(&mut d.scale, 0.75..=2.0));
                     });
+                    form_row(ui, "Frame rate limit:", |ui| {
+                        let label = |f: u32| if f == 0 { "Monitor refresh rate".to_string() } else { format!("{f} fps") };
+                        egui::ComboBox::from_id_salt("max_fps").selected_text(label(d.max_fps)).show_ui(ui, |ui| {
+                            for f in [30u32, 60, 120, 144, 0] {
+                                ui.selectable_value(&mut d.max_fps, f, label(f));
+                            }
+                        })
+                        .response
+                        .on_hover_text("Voxa only redraws when something changes (e.g. the mouse moves). Lower limits use less GPU; 60 fps is smooth for a chat app.");
+                    });
                     form_row(ui, "Chat:", |ui| {
                         ui.vertical(|ui| {
                             ui.checkbox(&mut d.timestamps, "Show timestamps");
@@ -873,6 +885,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         }
         app.settings.dark_theme = d.dark;
         app.settings.ui_scale = d.scale;
+        app.settings.max_fps = d.max_fps;
         app.settings.show_timestamps = d.timestamps;
         app.settings.minimize_to_tray = d.tray;
         app.settings.link_previews = d.link_previews;

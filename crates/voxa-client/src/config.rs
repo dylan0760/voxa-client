@@ -118,6 +118,8 @@ pub struct Settings {
     pub recent_emoji: Vec<String>,
     /// Show previews (and the in-app player) for YouTube links in chat.
     pub link_previews: bool,
+    /// Most redraws per second (0 = as fast as the monitor refreshes).
+    pub max_fps: u32,
     /// Global hotkeys (Options > Hotkeys).
     pub hotkeys: Vec<crate::hotkeys::HotkeyEntry>,
     /// Version whose "What's new" was last shown (to show it once after an update).
@@ -147,6 +149,7 @@ impl Default for Settings {
             auto_update: true,
             recent_emoji: Vec::new(),
             link_previews: true,
+            max_fps: 60,
             hotkeys: Vec::new(),
             last_seen_version: String::new(),
             fresh: false,
