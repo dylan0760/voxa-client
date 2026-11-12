@@ -53,6 +53,11 @@ The MSI is not code-signed. If Windows SmartScreen warns you, choose
     window and screen. Double-click one to go live.
   * While you share, **your own stream** appears on the stage as a preview of what
     viewers see. Hide it with ✖ and bring it back with 👁.
+  * **Sound** (Voxa Server 1.6.0+, Windows 10 2004+):
+    * A shared screen sends everything your PC plays except Voxa itself.
+    * A shared application sends only its own sound.
+    * Viewers get a mute button and volume slider per stream.
+  * **Full screen:** 🖵 or double-click a stream to fill the whole monitor; Esc leaves.
 * **Rich text in chat** (Discord-style Markdown):
   * `**bold**`, `*italic*`, `__underline__`, `~~strikethrough~~` and `` `inline code` ``;
   * `> quotes`, `# headings`, and `- bullet` or `1. numbered` lists;

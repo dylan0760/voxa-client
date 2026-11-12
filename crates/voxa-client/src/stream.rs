@@ -21,6 +21,40 @@ pub struct Streamer {
     pub error: Arc<Mutex<Option<String>>>,
     /// Show the streamer their own stream (local preview, nothing extra is sent).
     pub preview_on: Arc<AtomicBool>,
+    /// Sound capture (stopped when the streamer is dropped).
+    _audio: Option<crate::loopback::Capture>,
+    /// Why the sound is not shared, if it was asked for but could not start.
+    pub audio_error: Option<String>,
+}
+
+/// Sharing the sound of the screen / application along with the picture.
+pub struct AudioSetup {
+    pub target: crate::loopback::Target,
+    /// Priority queue of the bulk connection (sound must not wait behind video).
+    pub ctl: tokio::sync::mpsc::UnboundedSender<BulkC2S>,
+}
+
+/// Encodes captured sound as 20 ms stereo Opus packets and sends them; silence is
+/// not sent at all.
+fn start_audio(setup: AudioSetup) -> Result<crate::loopback::Capture, String> {
+    let mut enc = rusty_opus::OpusEncoder::new(48_000, 2, rusty_opus::Application::Audio).map_err(|e| format!("{e:?}"))?;
+    enc.bitrate_bps = 96_000;
+    const FRAME: usize = 960;
+    let mut pending: Vec<f32> = Vec::with_capacity(FRAME * 4);
+    let mut packet = [0u8; 1500];
+    let ctl = setup.ctl;
+    crate::loopback::start(setup.target, move |pcm| {
+        pending.extend_from_slice(pcm);
+        while pending.len() >= FRAME * 2 {
+            let frame: Vec<f32> = pending.drain(..FRAME * 2).collect();
+            if frame.iter().all(|s| s.abs() < 0.0005) {
+                continue;
+            }
+            if let Ok(n) = enc.encode(&frame, FRAME, &mut packet) {
+                let _ = ctl.send(BulkC2S::StreamAudio(packet[..n].to_vec()));
+            }
+        }
+    })
 }
 
 /// Where the local preview of your own stream goes: the viewer's frame store, under
@@ -112,12 +146,17 @@ fn encode_tile(img: &Scaled, x: u32, y: u32, tw: u32, th: u32, quality: u8) -> T
 }
 
 impl Streamer {
-    pub fn start(source: Source, settings: StreamSettings, bulk: tokio::sync::mpsc::Sender<BulkC2S>, preview: PreviewSink) -> Streamer {
+    pub fn start(source: Source, settings: StreamSettings, bulk: tokio::sync::mpsc::Sender<BulkC2S>, preview: PreviewSink, audio: Option<AudioSetup>) -> Streamer {
         let stop = Arc::new(AtomicBool::new(false));
         let keyframe = Arc::new(AtomicBool::new(true));
         let error = Arc::new(Mutex::new(None));
         let preview_on = Arc::new(AtomicBool::new(true));
-        let s = Streamer { stop: stop.clone(), keyframe: keyframe.clone(), error: error.clone(), preview_on: preview_on.clone() };
+        let (audio_capture, audio_error) = match audio.map(start_audio) {
+            Some(Ok(c)) => (Some(c), None),
+            Some(Err(e)) => (None, Some(e)),
+            None => (None, None),
+        };
+        let s = Streamer { stop: stop.clone(), keyframe: keyframe.clone(), error: error.clone(), preview_on: preview_on.clone(), _audio: audio_capture, audio_error };
         std::thread::Builder::new()
             .name("voxa-screenshare".into())
             .spawn(move || {

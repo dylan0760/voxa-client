@@ -60,6 +60,9 @@ pub struct VoiceShared {
     pub muted_talk_ms: AtomicU64,
     /// Repainted when a warning fires, so the banner shows at once.
     pub ctx: Mutex<Option<egui::Context>>,
+    /// Sound of watched streams (stereo) and their volumes (1.0 = normal).
+    pub streams: Mutex<HashMap<ClientId, StreamSound>>,
+    pub stream_volumes: Mutex<HashMap<ClientId, f32>>,
     input_level: AtomicU32,
     pub bitrate: AtomicI32,
     pub ping_ms: AtomicU32,
@@ -84,6 +87,8 @@ impl VoiceShared {
             input_muted: AtomicBool::new(false),
             muted_talk_ms: AtomicU64::new(0),
             ctx: Mutex::new(None),
+            streams: Mutex::new(HashMap::new()),
+            stream_volumes: Mutex::new(HashMap::new()),
             input_level: AtomicU32::new((-90f32).to_bits()),
             bitrate: AtomicI32::new(voxa_proto::quality_to_bitrate(6)),
             ping_ms: AtomicU32::new(0),
@@ -114,6 +119,31 @@ impl VoiceShared {
         self.queue_tones(tones);
     }
 
+    /// Decodes a packet of a watched stream's sound into its playback queue.
+    pub fn stream_audio(&self, from: ClientId, data: &[u8]) {
+        let mut streams = self.streams.lock();
+        let s = match streams.entry(from) {
+            std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+            std::collections::hash_map::Entry::Vacant(v) => match OpusDecoder::new(SAMPLE_RATE as i32, 2) {
+                Ok(decoder) => v.insert(StreamSound { decoder, queue: VecDeque::new(), buffering: true }),
+                Err(_) => return,
+            },
+        };
+        let mut pcm = vec![0f32; FRAME_SAMPLES * 2 * 6];
+        if let Ok(n) = s.decoder.decode(data, FRAME_SAMPLES * 6, &mut pcm) {
+            s.queue.extend(pcm[..n * 2].iter().copied());
+        }
+        // Keep the delay low: never more than ~300 ms queued.
+        let max = (SAMPLE_RATE as usize * 2 * 3) / 10;
+        while s.queue.len() > max {
+            s.queue.pop_front();
+            s.queue.pop_front();
+        }
+    }
+
+    pub fn stop_stream_audio(&self, from: ClientId) {
+        self.streams.lock().remove(&from);
+    }
     /// Like play_tones, but also when notification sounds are off (warnings).
     /// A frequency of 0 is a pause.
     pub fn queue_tones(&self, tones: &[(f32, u32)]) {
@@ -250,14 +280,24 @@ struct Talker {
     last_seq: Option<u16>,
 }
 
+/// A watched stream's sound: decoder and interleaved stereo queue.
+pub struct StreamSound {
+    decoder: OpusDecoder,
+    queue: VecDeque<f32>,
+    buffering: bool,
+}
+
 #[derive(Default)]
 struct Mixer {
     talkers: HashMap<ClientId, Talker>,
 }
 
 impl Mixer {
+    /// Mixes the next block into `out` (interleaved stereo): voice (mono, both sides),
+    /// the sound of watched streams (stereo) and notification tones.
     fn pull(&mut self, shared: &VoiceShared, out: &mut [f32]) {
         out.iter_mut().for_each(|s| *s = 0.0);
+        let frames = out.len() / 2;
         let volumes = shared.volumes.lock().clone();
         for (id, t) in self.talkers.iter_mut() {
             if t.buffering && t.queue.len() >= FRAME_SAMPLES * 2 {
@@ -267,9 +307,12 @@ impl Mixer {
                 continue;
             }
             let vol = volumes.get(id).copied().unwrap_or(1.0);
-            for o in out.iter_mut() {
+            for f in 0..frames {
                 match t.queue.pop_front() {
-                    Some(s) => *o += s * vol,
+                    Some(s) => {
+                        out[2 * f] += s * vol;
+                        out[2 * f + 1] += s * vol;
+                    }
                     None => {
                         t.buffering = true;
                         break;
@@ -277,12 +320,42 @@ impl Mixer {
                 }
             }
         }
+        {
+            let svols = shared.stream_volumes.lock().clone();
+            let mut streams = shared.streams.lock();
+            for (id, s) in streams.iter_mut() {
+                // ~60 ms cushion against network jitter before playing.
+                if s.buffering && s.queue.len() >= FRAME_SAMPLES * 2 * 3 {
+                    s.buffering = false;
+                }
+                if s.buffering {
+                    continue;
+                }
+                let vol = svols.get(id).copied().unwrap_or(1.0);
+                for f in 0..frames {
+                    match (s.queue.pop_front(), s.queue.pop_front()) {
+                        (Some(l), Some(r)) => {
+                            out[2 * f] += l * vol;
+                            out[2 * f + 1] += r * vol;
+                        }
+                        _ => {
+                            s.buffering = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         let master = shared.settings.lock().output_volume;
         let muted = shared.output_muted.load(Ordering::Relaxed);
         let mut fx = shared.effects.lock();
-        for o in out.iter_mut() {
-            let v = if muted { 0.0 } else { *o * master };
-            *o = (v + fx.pop_front().unwrap_or(0.0)).clamp(-1.0, 1.0);
+        for f in 0..frames {
+            let e = fx.pop_front().unwrap_or(0.0);
+            for c in 0..2 {
+                let o = &mut out[2 * f + c];
+                let v = if muted { 0.0 } else { *o * master };
+                *o = (v + e).clamp(-1.0, 1.0);
+            }
         }
     }
 }
@@ -414,9 +487,10 @@ fn build_output(settings: &AudioSettings, mixer: Arc<Mutex<Mixer>>, shared: Arc<
     ) -> anyhow::Result<cpal::Stream> {
         // Pull-model resampling from the 48 kHz mix to the device rate.
         let step = SAMPLE_RATE as f64 / rate as f64;
-        let mut pending: VecDeque<f32> = VecDeque::new();
+        // Stereo frames (left, right) of the 48 kHz mix.
+        let mut pending: VecDeque<(f32, f32)> = VecDeque::new();
         let mut pos = 0.0f64;
-        let mut chunk = vec![0f32; 480];
+        let mut chunk = vec![0f32; 960];
         Ok(dev.build_output_stream::<T, _, _>(
             cfg,
             move |data: &mut [T], _| {
@@ -425,19 +499,28 @@ fn build_output(settings: &AudioSettings, mixer: Arc<Mutex<Mixer>>, shared: Arc<
                 for f in 0..frames {
                     while pending.len() < 2 {
                         m.pull(&shared, &mut chunk);
-                        pending.extend(chunk.iter().copied());
+                        pending.extend(chunk.chunks_exact(2).map(|p| (p[0], p[1])));
                     }
-                    let a = pending[0];
-                    let b = pending[1];
-                    let s = a + (b - a) * pos as f32;
+                    let (a, b) = (pending[0], pending[1]);
+                    let l = a.0 + (b.0 - a.0) * pos as f32;
+                    let r = a.1 + (b.1 - a.1) * pos as f32;
                     pos += step;
                     while pos >= 1.0 {
                         pending.pop_front();
                         pos -= 1.0;
                     }
-                    let v = T::from_sample(s);
-                    for c in 0..channels {
-                        data[f * channels + c] = v;
+                    if channels == 1 {
+                        data[f] = T::from_sample((l + r) * 0.5);
+                    } else {
+                        for c in 0..channels {
+                            // Left / right on the first two channels, the middle elsewhere.
+                            let s = match c {
+                                0 => l,
+                                1 => r,
+                                _ => (l + r) * 0.5,
+                            };
+                            data[f * channels + c] = T::from_sample(s);
+                        }
                     }
                 }
             },
@@ -680,5 +763,43 @@ mod muted_talk_tests {
     #[test]
     fn silence_never_warns() {
         assert!(run(|_| false, 30_000).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod stream_sound_tests {
+    use super::*;
+
+    /// Stream sound: stereo Opus in, through the jitter buffer and the stereo mixer.
+    #[test]
+    fn stereo_stream_sound_is_mixed_per_channel() {
+        let shared = VoiceShared::new(AudioSettings::default());
+        let mut enc = OpusEncoder::new(48_000, 2, Application::Audio).unwrap();
+        enc.bitrate_bps = 96_000;
+        let mut packet = [0u8; 1500];
+        // 200 ms of a 440 Hz tone on the left channel only.
+        for f in 0..10 {
+            let pcm: Vec<f32> = (0..FRAME_SAMPLES)
+                .flat_map(|i| {
+                    let t = (f * FRAME_SAMPLES + i) as f32 / 48_000.0;
+                    [(t * 440.0 * std::f32::consts::TAU).sin() * 0.5, 0.0]
+                })
+                .collect();
+            let n = enc.encode(&pcm, FRAME_SAMPLES, &mut packet).unwrap();
+            shared.stream_audio(7, &packet[..n]);
+        }
+        let mut mixer = Mixer::default();
+        let mut out = vec![0f32; FRAME_SAMPLES * 2 * 8];
+        mixer.pull(&shared, &mut out);
+        let (mut l, mut r) = (0f32, 0f32);
+        for p in out.chunks_exact(2).skip(FRAME_SAMPLES) {
+            l += p[0] * p[0];
+            r += p[1] * p[1];
+        }
+        assert!(l > 100.0 * r.max(1e-6), "left {l} right {r}");
+        // Volume 0 for that stream silences it.
+        shared.stream_volumes.lock().insert(7, 0.0);
+        mixer.pull(&shared, &mut out);
+        assert!(out.iter().all(|s| s.abs() < 1e-6));
     }
 }

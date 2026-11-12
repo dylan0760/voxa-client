@@ -287,6 +287,20 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
         app.window_title = title;
     }
+    // True full screen for a stream: only the picture on the whole monitor. Esc, the
+    // button or the stream ending leaves it.
+    if app.screen_fullscreen {
+        let live = app.fullscreen_stream.filter(|id| {
+            app.sess.as_ref().map(|s| s.watching.contains(id) || (s.me == *id && s.streamer.is_some())).unwrap_or(false)
+        });
+        match live {
+            Some(id) if !ctx.input(|i| i.key_pressed(egui::Key::Escape)) => {
+                egui::CentralPanel::default().frame(Frame::new().fill(Color32::BLACK)).show(ui, |ui| stream_view(app, ui, id, true));
+                return;
+            }
+            _ => set_screen_full(app, &ctx, false),
+        }
+    }
     let show_server = app.sess.is_some() && !app.home;
 
     egui::Panel::left("rail")
@@ -1962,6 +1976,13 @@ fn player_view(app: &mut VoxaApp, ui: &mut Ui) {
     }
 }
 
+fn set_screen_full(app: &mut VoxaApp, ctx: &egui::Context, on: bool) {
+    if app.screen_fullscreen != on {
+        app.screen_fullscreen = on;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
+    }
+}
+
 fn stream_view(app: &mut VoxaApp, ui: &mut Ui, id: ClientId, fullscreen: bool) {
     let ctx = ui.ctx().clone();
     let mine = app.sess.as_ref().map(|s| s.me == id).unwrap_or(false);
@@ -1980,12 +2001,30 @@ fn stream_view(app: &mut VoxaApp, ui: &mut Ui, id: ClientId, fullscreen: bool) {
             if icon_button(ui, "✖", if mine { "Hide my preview (keeps streaming)" } else { "Stop watching" }, Some(Color32::WHITE)).clicked() {
                 app.actions.push(Action::Watch(id, false));
             }
-            if fullscreen {
+            let full_screen = app.screen_fullscreen;
+            if icon_button(ui, "🖵", if full_screen { "Exit full screen (Esc)" } else { "Full screen (whole monitor) - or double-click the picture" }, Some(Color32::WHITE)).clicked() {
+                app.fullscreen_stream = Some(id);
+                set_screen_full(app, &ctx, !full_screen);
+            }
+            if full_screen {
+                // Full view controls are hidden in full screen.
+            } else if fullscreen {
                 if icon_button(ui, "🗗", "Exit full view", Some(Color32::WHITE)).clicked() {
                     app.fullscreen_stream = None;
                 }
             } else if icon_button(ui, "⛶", "Full view", Some(Color32::WHITE)).clicked() {
                 app.fullscreen_stream = Some(id);
+            }
+            // Stream sound: mute button and volume (only for other people's streams).
+            if !mine {
+                let mut vol = app.voice_shared.stream_volumes.lock().get(&id).copied().unwrap_or(1.0);
+                let silent = vol <= 0.0;
+                ui.spacing_mut().slider_width = 70.0;
+                ui.add(egui::Slider::new(&mut vol, 0.0..=2.0).show_value(false)).on_hover_text(format!("Stream volume: {:.0}%", vol * 100.0));
+                if icon_button(ui, if silent { "🔇" } else { "🔊" }, if silent { "Unmute the stream's sound" } else { "Mute the stream's sound" }, Some(Color32::WHITE)).clicked() {
+                    vol = if silent { 1.0 } else { 0.0 };
+                }
+                app.voice_shared.stream_volumes.lock().insert(id, vol);
             }
         });
     });
@@ -1995,7 +2034,12 @@ fn stream_view(app: &mut VoxaApp, ui: &mut Ui, id: ClientId, fullscreen: bool) {
             let scale = (avail.x / size.x).min(avail.y / size.y).max(0.05);
             let draw = size * scale;
             ui.centered_and_justified(|ui| {
-                ui.add(egui::Image::new(egui::load::SizedTexture::new(tex, draw)).fit_to_exact_size(draw));
+                let r = ui.add(egui::Image::new(egui::load::SizedTexture::new(tex, draw)).fit_to_exact_size(draw).sense(Sense::click()));
+                if r.double_clicked() {
+                    app.fullscreen_stream = Some(id);
+                    let on = !app.screen_fullscreen;
+                    set_screen_full(app, &ctx, on);
+                }
             });
         }
         None => {
@@ -2072,6 +2116,7 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
                 } else {
                     s.watching.remove(&id);
                     s.viewer.clear(id);
+                    app.voice_shared.stop_stream_audio(id);
                     app.textures.remove(&id);
                     if app.fullscreen_stream == Some(id) {
                         app.fullscreen_stream = None;

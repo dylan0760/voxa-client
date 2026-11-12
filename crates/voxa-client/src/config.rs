@@ -84,11 +84,13 @@ pub struct StreamSettings {
     pub fps: u8,
     pub max_width: u32,
     pub quality: u8,
+    /// Share the sound of the screen / application too.
+    pub audio: bool,
 }
 
 impl Default for StreamSettings {
     fn default() -> Self {
-        StreamSettings { fps: 15, max_width: 1920, quality: 70 }
+        StreamSettings { fps: 15, max_width: 1920, quality: 70, audio: true }
     }
 }
 

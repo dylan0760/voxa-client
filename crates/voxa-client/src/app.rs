@@ -359,6 +359,8 @@ pub struct VoxaApp {
     pub ctx: egui::Context,
     pub actions: Vec<crate::ui::Action>,
     pub fullscreen_stream: Option<ClientId>,
+    /// The stream in ullscreen_stream covers the whole monitor (window full screen).
+    pub screen_fullscreen: bool,
     /// Debug builds: the VOXA_DEBUG_OPEN hook already ran.
     #[allow(dead_code)]
     debug_done: bool,
@@ -437,6 +439,7 @@ impl VoxaApp {
             ctx: cc.egui_ctx.clone(),
             actions: Vec::new(),
             fullscreen_stream: None,
+            screen_fullscreen: false,
             debug_done: false,
             home: false,
             show_members: true,
@@ -716,6 +719,7 @@ impl VoxaApp {
 
     pub fn disconnect(&mut self, msg: &str) {
         self.player.close();
+        self.voice_shared.streams.lock().clear();
         if let Some(s) = self.sess.take() {
             s.conn.close(msg);
             self.offline_log = ChatLog::default();
@@ -846,6 +850,11 @@ impl VoxaApp {
         let Some(s) = &mut self.sess else { return };
         match b {
             BulkS2C::Attached => {}
+            BulkS2C::StreamAudio { from, data } => {
+                if s.watching.contains(&from) {
+                    self.voice_shared.stream_audio(from, &data);
+                }
+            }
             BulkS2C::Frame { from, frame } => {
                 if s.watching.contains(&from) {
                     s.viewer.push(from, frame);
@@ -1125,6 +1134,7 @@ impl VoxaApp {
                     }
                     if old.streaming.is_some() && c.streaming.is_none() && s.watching.remove(&c.id) {
                         s.viewer.clear(c.id);
+                        self.voice_shared.stop_stream_audio(c.id);
                         self.textures.remove(&c.id);
                     }
                 }

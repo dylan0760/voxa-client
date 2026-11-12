@@ -15,6 +15,7 @@ mod hotkeys;
 mod icon;
 mod instance;
 mod links;
+mod loopback;
 mod markdown;
 mod net;
 mod player;

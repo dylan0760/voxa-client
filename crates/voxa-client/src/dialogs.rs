@@ -1767,8 +1767,23 @@ pub fn start_share(app: &mut VoxaApp, ctx: &egui::Context, src: crate::capture::
     let (w, h) = if w > settings.max_width && w > 0 { (settings.max_width, h * settings.max_width / w) } else { (w, h) };
     s.conn.send(C2S::StartStream(StreamInfo { kind, title, width: w, height: h, fps: settings.fps }));
     let preview = crate::stream::PreviewSink { frames: s.viewer.frames.clone(), me: s.me, ctx: ctx.clone() };
-    s.streamer = Some(crate::stream::Streamer::start(src, settings, s.conn.bulk_tx.clone(), preview));
+    // Sound: screens share everything except Voxa itself, applications only their own.
+    let audio_target = match &src {
+        crate::capture::Source::Monitor { .. } => Some(crate::loopback::Target::AllExceptVoxa),
+        crate::capture::Source::Window { hwnd, .. } => crate::loopback::window_process(*hwnd).map(crate::loopback::Target::Process),
+    };
+    let server_ok = s.supports("1.6.0");
+    let audio = audio_target
+        .filter(|_| settings.audio && server_ok)
+        .map(|target| crate::stream::AudioSetup { target, ctl: s.conn.bulk_ctl.clone() });
+    let streamer = crate::stream::Streamer::start(src, settings.clone(), s.conn.bulk_tx.clone(), preview, audio);
     s.log(EventKind::Good, "You started sharing your screen - your own preview is shown above the chat");
+    if settings.audio && !server_ok {
+        s.log(EventKind::Info, "Sound is not shared: this needs Voxa Server 1.6.0 or newer.");
+    } else if let Some(e) = &streamer.audio_error {
+        s.log(EventKind::Warn, format!("Sound is not shared: {e}"));
+    }
+    s.streamer = Some(streamer);
 }
 fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.share.take() else { return };
@@ -1819,6 +1834,8 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 ui.add_space(8.0);
                 ui.label("Quality:");
                 ui.add(egui::Slider::new(&mut d.settings.quality, 20..=95));
+                ui.add_space(8.0);
+                ui.checkbox(&mut d.settings.audio, "🔊 Share sound").on_hover_text("Screens: everything your PC plays, except Voxa itself (so nobody hears the voice chat twice). Applications: only that application's sound.");
                 ui.add_space(8.0);
                 ui.label("Max width:");
                 egui::ComboBox::from_id_salt("sharew").selected_text(format!("{} px", d.settings.max_width)).show_ui(ui, |ui| {
