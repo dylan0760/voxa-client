@@ -488,7 +488,9 @@ fn encoder_loop(
     let send = |kind: Kind, payload: &[u8]| {
         let s = seq.fetch_add(1, Ordering::Relaxed);
         let pkt = cipher.seal(Direction::ToServer, kind, me, s, payload);
-        let _ = sock.send(&pkt);
+        if sock.send(&pkt).is_ok() {
+            voxa_proto::traffic::TRAFFIC.sent(voxa_proto::traffic::Cat::Voice, pkt.len());
+        }
     };
     while !shared.stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(5));
@@ -581,6 +583,7 @@ fn receiver_loop(sock: UdpSocket, cipher: Arc<VoiceCipher>, shared: Arc<VoiceSha
             Ok(n) => n,
             Err(_) => continue,
         };
+        voxa_proto::traffic::TRAFFIC.received(voxa_proto::traffic::Cat::Voice, n);
         let Some(pkt) = cipher.open(Direction::ToClient, &buf[..n]) else { continue };
         if !replay.accept(pkt.seq) {
             continue;

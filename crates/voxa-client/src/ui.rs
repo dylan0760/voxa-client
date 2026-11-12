@@ -1181,6 +1181,29 @@ fn section(ui: &mut Ui, title: &str) {
     ui.add_space(2.0);
 }
 
+/// Received / sent bytes per category, with totals.
+fn traffic_table(ui: &mut Ui, s: &voxa_proto::traffic::TrafficStats, dim: Color32) {
+    use voxa_proto::traffic::fmt_bytes;
+    egui::Grid::new("traffic").num_columns(3).spacing([12.0, 4.0]).show(ui, |ui| {
+        ui.label("");
+        ui.label(RichText::new("⬇ Received").small().color(dim));
+        ui.label(RichText::new("⬆ Sent").small().color(dim));
+        ui.end_row();
+        for (name, rx, tx) in s.rows() {
+            ui.label(RichText::new(name).color(dim));
+            ui.label(fmt_bytes(rx));
+            ui.label(fmt_bytes(tx));
+            ui.end_row();
+        }
+        ui.label(RichText::new("Total").strong());
+        ui.label(RichText::new(fmt_bytes(s.total_in())).strong());
+        ui.label(RichText::new(fmt_bytes(s.total_out())).strong());
+        ui.end_row();
+    });
+    ui.label(RichText::new(format!("All traffic combined: {}", fmt_bytes(s.total_in() + s.total_out()))).small().color(dim))
+        .on_hover_text("Bytes as sent over the network by Voxa (encrypted), without TCP/IP headers.");
+}
+
 fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
     let Some(s) = &app.sess else { return };
     if !s.welcomed {
@@ -1215,6 +1238,12 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
                 grid_row(ui, "Chat history", if info.chat_retention_days == 0 { "Encrypted on server".to_string() } else { format!("Encrypted, {} days", info.chat_retention_days) });
                 grid_row(ui, "Voice", "Encrypted");
             });
+            // Only for server admins ("Edit virtual server settings", server-wide).
+            let admin = s.me().map(|me| s.server_perms_of(me) & perm::SERVER_EDIT != 0).unwrap_or(false);
+            if admin {
+                section(ui, "Traffic since Voxa started");
+                traffic_table(ui, &voxa_proto::traffic::TRAFFIC.snapshot(), t.dim);
+            }
             if !info.welcome_message.is_empty() {
                 section(ui, "Welcome message");
                 ui.label(&info.welcome_message);

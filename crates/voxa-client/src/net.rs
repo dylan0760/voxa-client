@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, Notify};
 use tokio::time::timeout;
 use voxa_proto::identity::{fingerprint, KeyPair};
 use voxa_proto::transport;
+use voxa_proto::traffic::{self, Cat, TRAFFIC};
 use voxa_proto::*;
 
 pub enum NetEvent {
@@ -123,7 +124,9 @@ async fn run(
     let mut reader = sec.reader;
     let mut writer = sec.writer;
     writer.send(&p.hello).await?;
+    TRAFFIC.sent(Cat::Chat, writer.last_size);
     let first: S2C = timeout(Duration::from_secs(15), reader.recv()).await.map_err(|_| anyhow::anyhow!("Server did not respond"))??;
+    TRAFFIC.received(Cat::Chat, reader.last_size);
     let token = match &first {
         S2C::Refused(r) => return Ok(r.clone()),
         S2C::Welcome { bulk_token, .. } => *bulk_token,
@@ -150,12 +153,16 @@ async fn run(
         loop {
             tokio::select! {
                 m = rx.recv() => match m {
-                    Some(m) => { if writer.send(&m).await.is_err() { break; } }
+                    Some(m) => {
+                        if writer.send(&m).await.is_err() { break; }
+                        TRAFFIC.sent(Cat::Chat, writer.last_size);
+                    }
                     None => break,
                 },
                 _ = ping.tick() => {
                     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                     if writer.send(&C2S::Ping(t)).await.is_err() { break; }
+                    TRAFFIC.sent(Cat::Chat, writer.last_size);
                 }
             }
         }
@@ -163,7 +170,7 @@ async fn run(
 
     let reason = loop {
         tokio::select! {
-            m = reader.recv::<S2C>() => match m {
+            m = reader.recv::<S2C>() => match m.inspect(|_| TRAFFIC.received(Cat::Chat, reader.last_size)) {
                 Ok(S2C::Kicked(r)) => {
                     break match r {
                         LeaveReason::Kicked { by, reason } => format!("Kicked from server by {by}: {reason}"),
@@ -238,7 +245,9 @@ async fn bulk_session(
     let mut reader = sec.reader;
     let mut writer = sec.writer;
     writer.send(&C2S::AttachBulk(token)).await?;
+    TRAFFIC.sent(Cat::Chat, writer.last_size);
     let first: BulkS2C = timeout(Duration::from_secs(10), reader.recv()).await??;
+    TRAFFIC.received(Cat::Chat, reader.last_size);
     if !matches!(first, BulkS2C::Attached) {
         anyhow::bail!("bulk attach refused");
     }
@@ -250,15 +259,22 @@ async fn bulk_session(
         tokio::select! {
             biased;
             m = ctl.recv() => match m {
-                Some(m) => writer.send(&m).await?,
+                Some(m) => {
+                    writer.send(&m).await?;
+                    TRAFFIC.sent(traffic::bulk_c2s(&m), writer.last_size);
+                }
                 None => return Ok(()),
             },
             m = out.recv() => match m {
-                Some(m) => writer.send(&m).await?,
+                Some(m) => {
+                    writer.send(&m).await?;
+                    TRAFFIC.sent(traffic::bulk_c2s(&m), writer.last_size);
+                }
                 None => return Ok(()),
             },
             m = reader.recv::<BulkS2C>() => {
                 let m = m?;
+                TRAFFIC.received(traffic::bulk_s2c(&m), reader.last_size);
                 if events.send(NetEvent::Bulk(m)).is_err() {
                     return Ok(());
                 }
