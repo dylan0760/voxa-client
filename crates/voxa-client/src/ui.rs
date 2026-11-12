@@ -1697,6 +1697,19 @@ fn emoji_picker(ui: &mut Ui, anchor: egui::Rect, picker: &mut EmojiPicker, input
     }
 }
 
+/// Takes a plain Enter press ("send") before the message box sees it. egui's key
+/// matching ignores extra Shift, so Shift is checked explicitly: Shift+Enter must stay
+/// in the input and become a new line.
+fn take_send_enter(ui: &mut Ui) -> bool {
+    ui.input_mut(|i| {
+        // Use the modifiers recorded with the key press itself.
+        let plain = i.events.iter().any(|e| {
+            matches!(e, egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. } if !modifiers.shift && !i.modifiers.shift)
+        });
+        plain && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+    })
+}
+
 fn chat_target(s: &Session) -> TextTarget {
     match s.tab {
         ChatKey::Server => TextTarget::Server,
@@ -1781,7 +1794,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                 let focused = ui.memory(|m| m.has_focus(input_id));
                 let mut enter = false;
                 if focused {
-                    enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                    enter = take_send_enter(ui);
                     if !suggestions.is_empty() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
                         accept = suggestions.first().map(|e| e.ch);
                     }
@@ -2255,5 +2268,46 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use egui::{Event, Key, Modifiers, RawInput};
+
+    /// One frame of a focused multi-line message box; returns (sent, text).
+    fn frame(ctx: &egui::Context, text: &mut String, events: Vec<Event>) -> bool {
+        let id = egui::Id::unique("test_input");
+        let mut sent = false;
+        let out = ctx.run_ui(RawInput { events, ..Default::default() }, |ui| {
+            ui.memory_mut(|m| m.request_focus(id));
+            if ui.memory(|m| m.has_focus(id)) {
+                sent = take_send_enter(ui);
+            }
+            ui.add(egui::TextEdit::multiline(text).id(id));
+        });
+        out.drop_without_applying_deltas();
+        sent
+    }
+
+    fn key(k: Key, modifiers: Modifiers) -> Event {
+        Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn shift_enter_is_a_new_line_and_enter_sends() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        frame(&ctx, &mut text, vec![]);
+        frame(&ctx, &mut text, vec![]);
+        frame(&ctx, &mut text, vec![Event::Text("hello".into())]);
+        let sent = frame(&ctx, &mut text, vec![key(Key::Enter, Modifiers::SHIFT)]);
+        assert!(!sent, "Shift+Enter must not send");
+        frame(&ctx, &mut text, vec![Event::Text("world".into())]);
+        assert_eq!(text, "hello\nworld");
+        let sent = frame(&ctx, &mut text, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert!(sent, "Enter must send");
+        assert_eq!(text, "hello\nworld", "Enter must not add a line");
     }
 }
