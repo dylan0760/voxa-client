@@ -177,12 +177,13 @@ fn load_pending_notes(dir: &Path, version: &str) -> Option<(String, String, Stri
 #[derive(Clone)]
 pub enum NotesState {
     Loading,
-    Ready { title: String, notes: String, url: String },
+    /// All known releases (newest first) and the one being shown.
+    Ready { releases: Vec<update::ReleaseNote>, selected: usize },
     Failed(String),
 }
 
-/// "What's new" for the running version: fetched from GitHub, falling back to the
-/// notes saved when the update was installed.
+/// "What's new": the change log of this version and of the older ones, fetched from
+/// GitHub, falling back to the notes saved when the update was installed.
 pub struct WhatsNew {
     pub version: String,
     pub state: Arc<Mutex<NotesState>>,
@@ -193,10 +194,32 @@ impl WhatsNew {
         let state = Arc::new(Mutex::new(NotesState::Loading));
         let (st, v) = (state.clone(), version.to_string());
         std::thread::spawn(move || {
-            let r = match update::release_notes(repo, &v) {
-                Ok((title, notes, url)) => NotesState::Ready { title, notes, url },
-                Err(e) => match notes_dir.as_deref().and_then(|d| load_pending_notes(d, &v)) {
-                    Some((title, notes, url)) => NotesState::Ready { title, notes, url },
+            let saved = || {
+                notes_dir.as_deref().and_then(|d| load_pending_notes(d, &v)).map(|(title, notes, url)| update::ReleaseNote {
+                    version: v.clone(),
+                    title,
+                    notes,
+                    url,
+                    date: String::new(),
+                })
+            };
+            let r = match update::release_history(repo, 40) {
+                Ok(mut releases) => {
+                    // A version that is not published (yet) still shows its saved notes.
+                    if !releases.iter().any(|r| r.version == v) {
+                        if let Some(n) = saved() {
+                            releases.insert(0, n);
+                        }
+                    }
+                    if releases.is_empty() {
+                        NotesState::Failed("No releases have been published yet".into())
+                    } else {
+                        let selected = releases.iter().position(|r| r.version == v).unwrap_or(0);
+                        NotesState::Ready { releases, selected }
+                    }
+                }
+                Err(e) => match saved() {
+                    Some(n) => NotesState::Ready { releases: vec![n], selected: 0 },
                     None => NotesState::Failed(e),
                 },
             };
@@ -208,7 +231,7 @@ impl WhatsNew {
 }
 
 /// Minimal Markdown rendering for release notes (headings, bullets, bold, links).
-#[allow(dead_code)] // the client renders notes with crate::markdown; kept for the shared copy
+#[allow(dead_code)] // the client renders notes with its own Markdown renderer
 pub fn render_notes(ui: &mut egui::Ui, text: &str) {
     use egui::RichText;
     for raw in text.lines() {
@@ -236,50 +259,101 @@ pub fn render_notes(ui: &mut egui::Ui, text: &str) {
     }
 }
 
-/// The "What's new" window. Returns false once the user closed it.
+/// The "What's new" window: versions on the left (newest first, the installed one
+/// marked), the selected version's change log on the right. Movable and resizable like
+/// the other windows. Returns false once the user closed it.
 /// The `render` function draws the release notes (Markdown).
 pub fn whats_new_window(ctx: &egui::Context, wn: &WhatsNew, product: &str, render: fn(&mut egui::Ui, &str)) -> bool {
     use egui::RichText;
     let mut open = true;
     let mut close = false;
-    egui::Window::new(format!("🎉 What's new in {product} {}", wn.version))
+    let center = ctx.content_rect().center();
+    egui::Window::new(format!("🎉 What's new in {product}"))
         .id(egui::Id::unique("voxa_whats_new"))
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_size([520.0, 440.0])
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show_fill(ctx, |ui| {
-            let state = wn.state.lock().unwrap().clone();
-            match state {
-                NotesState::Loading => {
-                    ui.horizontal(|ui| {
+        .min_size([420.0, 260.0])
+        .default_size([720.0, 480.0])
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(center)
+        .show(ctx, |ui| {
+            // The body gets exactly the height that is left after the footer; the footer
+            // (and spacing) is measured every frame rather than guessed, since a guess
+            // that is too small makes a window grow by itself.
+            let rest_id = egui::Id::unique("voxa_whats_new_rest");
+            let rest = ui.data(|d| d.get_temp::<f32>(rest_id)).unwrap_or(48.0);
+            let body_h = (ui.available_height() - rest).max(160.0);
+            let body_w = ui.available_width();
+            let mut state = wn.state.lock().unwrap();
+            let body = ui.allocate_ui_with_layout(egui::vec2(body_w, body_h), egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                ui.set_min_size(egui::vec2(body_w, body_h));
+                match &mut *state {
+                    NotesState::Loading => {
                         ui.spinner();
                         ui.label("Loading the change log...");
-                    });
-                }
-                NotesState::Failed(e) => {
-                    ui.label(format!("{product} was updated to {}.", wn.version));
-                    ui.label(RichText::new(format!("The change log could not be loaded: {e}")).weak());
-                }
-                NotesState::Ready { title, notes, url } => {
-                    ui.label(RichText::new(title).heading());
-                    ui.separator();
-                    crate::updater::fill_list(ui, "list7", 70.0, 120.0, |ui| {
-                        render(ui, &notes);
-                    });
-                    ui.separator();
-                    if !url.is_empty() && ui.link("View this release on GitHub").clicked() {
-                        open_url(&url);
+                    }
+                    NotesState::Failed(e) => {
+                        ui.vertical(|ui| {
+                            ui.label(format!("{product} {} is installed.", wn.version));
+                            ui.label(RichText::new(format!("The change log could not be loaded: {e}")).weak());
+                        });
+                    }
+                    NotesState::Ready { releases, selected } => {
+                        // Version list ("tabs").
+                        ui.vertical(|ui| {
+                            ui.set_width(150.0);
+                            ui.label(RichText::new("VERSIONS").small().strong().weak());
+                            egui::ScrollArea::vertical().id_salt("wn_versions").max_height(ui.available_height()).auto_shrink([false, false]).show(ui, |ui| {
+                                for (i, r) in releases.iter().enumerate() {
+                                    let installed = r.version == wn.version;
+                                    let mut text = RichText::new(format!("{}{}", r.version, if installed { "  · installed" } else { "" }));
+                                    if installed {
+                                        text = text.strong();
+                                    }
+                                    let resp = ui.selectable_label(*selected == i, text);
+                                    let resp = if r.date.is_empty() { resp } else { resp.on_hover_text(format!("Released {}", r.date)) };
+                                    if resp.clicked() {
+                                        *selected = i;
+                                    }
+                                }
+                            });
+                        });
+                        ui.separator();
+                        ui.vertical(|ui| {
+                            let r = &releases[(*selected).min(releases.len() - 1)];
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(&r.title).heading());
+                                if !r.date.is_empty() {
+                                    ui.label(RichText::new(&r.date).small().weak());
+                                }
+                            });
+                            ui.separator();
+                            egui::ScrollArea::vertical()
+                                .id_salt(("wn_notes", r.version.as_str()))
+                                .max_height(ui.available_height())
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| render(ui, &r.notes));
+                        });
                     }
                 }
-            }
-            ui.add_space(4.0);
-            if ui.button("Got it").clicked() {
-                close = true;
-            }
-        });
-    open && !close
+            });
+            let body_bottom = body.response.rect.top() + body_h;
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Got it").clicked() {
+                    close = true;
+                }
+                if let NotesState::Ready { releases, selected } = &*state {
+                    let url = &releases[(*selected).min(releases.len() - 1)].url;
+                    if !url.is_empty() && ui.link("View this release on GitHub").clicked() {
+                        open_url(url);
+                    }
+                }
+            });
+            let used = (ui.cursor().top() - body_bottom).max(0.0);
+            ui.data_mut(|d| d.insert_temp(rest_id, used));
+        });    open && !close
 }
 
 pub fn open_url(url: &str) {
@@ -440,6 +514,60 @@ mod tests {
         }
         println!("after dragging up 100: {}", rect.height());
         assert!(rect.height() < later - 80.0, "did not shrink: {later} -> {}", rect.height());
+    }
+
+    /// The "What's new" window keeps its size by itself and follows drags both ways.
+    #[test]
+    fn whats_new_window_is_stable_and_resizable() {
+        let ctx = egui::Context::default();
+        let releases = (0..12)
+            .map(|i| crate::updater::update::ReleaseNote {
+                version: format!("1.{i}.0"),
+                title: format!("Voxa 1.{i}.0"),
+                notes: "### Fixes\n* one\n* two\n* three\n".repeat(8),
+                url: String::new(),
+                date: "2026-11-13".into(),
+            })
+            .collect();
+        let wn = super::WhatsNew { version: "1.11.0".into(), state: std::sync::Arc::new(std::sync::Mutex::new(super::NotesState::Ready { releases, selected: 0 })) };
+        let id = egui::Id::unique("voxa_whats_new");
+        let frame = |events: Vec<Event>| {
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1400.0, 1000.0))), events, ..Default::default() };
+            let out = ctx.run_ui(input, |ui| {
+                super::whats_new_window(ui.ctx(), &wn, "Voxa", super::render_notes);
+            });
+            out.drop_without_applying_deltas();
+            ctx.memory(|m| m.area_rect(id)).unwrap()
+        };
+        for _ in 0..5 {
+            frame(vec![]);
+        }
+        let first = frame(vec![]);
+        let mut rect = first;
+        for _ in 0..60 {
+            rect = frame(vec![]);
+        }
+        println!("what's new: {} -> {} after 60 frames", first.height(), rect.height());
+        assert!((rect.height() - first.height()).abs() < 1.0, "grew by itself: {} -> {}", first.height(), rect.height());
+        let drag = |dy: f32, rect: Rect| -> Rect {
+            let p = pos2(rect.center().x, rect.bottom() - 1.0);
+            frame(vec![Event::PointerMoved(p)]);
+            frame(vec![Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Default::default() }]);
+            for i in 1..=10 {
+                frame(vec![Event::PointerMoved(p + vec2(0.0, dy * i as f32 / 10.0))]);
+            }
+            frame(vec![Event::PointerButton { pos: p + vec2(0.0, dy), button: PointerButton::Primary, pressed: false, modifiers: Default::default() }]);
+            let mut r = rect;
+            for _ in 0..20 {
+                r = frame(vec![Event::PointerMoved(pos2(5.0, 5.0))]);
+            }
+            r
+        };
+        let bigger = drag(150.0, rect);
+        let smaller = drag(-250.0, bigger);
+        println!("drag down: {} -> {}, drag up: {}", rect.height(), bigger.height(), smaller.height());
+        assert!(bigger.height() > rect.height() + 100.0, "did not grow: {} -> {}", rect.height(), bigger.height());
+        assert!(smaller.height() < bigger.height() - 150.0, "did not shrink: {} -> {}", bigger.height(), smaller.height());
     }
 
     #[test]

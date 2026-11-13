@@ -61,6 +61,24 @@ try {
     $bin = Join-Path $env:CARGO_TARGET_DIR 'release'
     $version = (Select-String -Path (Join-Path $Root 'Cargo.toml') -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
 
+    # --- WebView2Loader.dll (video player) ----------------------------------------------
+    # build.rs copies it too, but Cargo skips build scripts whose inputs did not change,
+    # so take it from the exact package folder Cargo reports.
+    $loader = Join-Path $bin 'WebView2Loader.dll'
+    if (-not (Test-Path $loader)) {
+        $m = (& cargo "+$Toolchain" metadata --format-version 1 --filter-platform $Target) | Out-String | ConvertFrom-Json
+        $pkg = $m.packages | Where-Object { $_.name -eq 'webview2-com-sys' } | Select-Object -First 1
+        if ($pkg) {
+            $src = Join-Path (Split-Path $pkg.manifest_path) 'x64\WebView2Loader.dll'
+            if (Test-Path $src) { Copy-Item $src $loader -Force; Write-Host "Copied WebView2Loader.dll from $src" }
+        }
+    }
+
+    # --- Pre-flight: every file the installer packages must exist ---------------------
+    foreach ($f in @('voxa.exe', 'WebView2Loader.dll')) {
+        if (-not (Test-Path (Join-Path $bin $f))) { throw "Missing $f in $bin - the installer would be incomplete" }
+    }
+
     # --- Documentation & third-party notices ------------------------------------------
     $stage = Join-Path $env:TEMP "voxa-msi-stage-$(Split-Path $Root -Leaf)"
     Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
