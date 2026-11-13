@@ -536,6 +536,13 @@ impl VoxaApp {
                     crate::dialogs::start_share(self, &ctx, src, settings);
                 }
             }
+            // Options on the Application tab (theme picker).
+            "options" => {
+                crate::ui::apply(self, crate::ui::Action::Dialog(crate::dialogs::Open::Options));
+                if let Some(d) = &mut self.dlg.options {
+                    d.tab = 4;
+                }
+            }
             "pins" => {
                 if let Some(s) = &mut self.sess {
                     s.pins_open = true;

@@ -58,7 +58,7 @@ pub struct OptionsDlg {
     pub audio: AudioSettings,
     pub stream: StreamSettings,
     pub nickname: String,
-    pub dark: bool,
+    pub theme: crate::config::ThemeKind,
     pub scale: f32,
     pub max_fps: u32,
     pub timestamps: bool,
@@ -398,7 +398,7 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         audio: s.audio.clone(),
         stream: s.stream.clone(),
         nickname: s.nickname.clone(),
-        dark: s.dark_theme,
+        theme: s.theme_kind(),
         scale: s.ui_scale,
         max_fps: s.max_fps,
         timestamps: s.show_timestamps,
@@ -827,8 +827,11 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         ui.text_edit_singleline(&mut d.nickname);
                     });
                     form_row(ui, "Theme:", |ui| {
-                        ui.radio_value(&mut d.dark, true, "Dark");
-                        ui.radio_value(&mut d.dark, false, "Light");
+                        ui.horizontal_wrapped(|ui| {
+                            for k in crate::config::ThemeKind::ALL {
+                                theme_choice(ui, &mut d.theme, k);
+                            }
+                        });
                     });
                     form_row(ui, "UI scale:", |ui| {
                         ui.add(egui::Slider::new(&mut d.scale, 0.75..=2.0));
@@ -893,7 +896,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         if !d.nickname.trim().is_empty() {
             app.settings.nickname = d.nickname.trim().to_string();
         }
-        app.settings.dark_theme = d.dark;
+        app.settings.set_theme(d.theme);
         app.settings.ui_scale = d.scale;
         app.settings.max_fps = d.max_fps;
         app.settings.show_timestamps = d.timestamps;
@@ -2350,4 +2353,17 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             app.dlg.error = Some(e);
         }
     }
+}
+
+/// A theme radio button with a small preview of its colours (background, sidebar, accent).
+fn theme_choice(ui: &mut Ui, current: &mut crate::config::ThemeKind, kind: crate::config::ThemeKind) {
+    let p = crate::ui::palette(kind);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 16.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4, p.main);
+    painter.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(10.0, rect.height())), egui::CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 }, p.side);
+    painter.circle_filled(rect.center() + egui::vec2(6.0, 0.0), 4.5, p.accent);
+    painter.rect_stroke(rect, 4, egui::Stroke::new(1.0, p.control_line), egui::StrokeKind::Inside);
+    ui.radio_value(current, kind, kind.name());
+    ui.add_space(6.0);
 }

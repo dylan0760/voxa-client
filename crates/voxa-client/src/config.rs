@@ -46,6 +46,34 @@ pub enum VoiceMode {
     Continuous,
 }
 
+/// Colour theme of the window.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeKind {
+    Dark,
+    Light,
+    /// Cherry blossom pink.
+    Sakura,
+    /// Baby blue.
+    Layette,
+}
+
+impl ThemeKind {
+    pub const ALL: [ThemeKind; 4] = [ThemeKind::Dark, ThemeKind::Light, ThemeKind::Sakura, ThemeKind::Layette];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ThemeKind::Dark => "Dark",
+            ThemeKind::Light => "Light",
+            ThemeKind::Sakura => "Sakura",
+            ThemeKind::Layette => "Layette",
+        }
+    }
+
+    pub fn is_dark(self) -> bool {
+        self == ThemeKind::Dark
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct AudioSettings {
@@ -109,7 +137,10 @@ pub struct Settings {
     pub recent: Vec<String>,
     pub audio: AudioSettings,
     pub stream: StreamSettings,
+    /// Kept in step with `theme` so older versions still pick dark or light.
     pub dark_theme: bool,
+    /// None in settings from before 1.13 (then `dark_theme` decides).
+    pub theme: Option<ThemeKind>,
     pub ui_scale: f32,
     pub show_timestamps: bool,
     pub download_dir: Option<String>,
@@ -146,6 +177,7 @@ impl Default for Settings {
             audio: AudioSettings::default(),
             stream: StreamSettings::default(),
             dark_theme: true,
+            theme: None,
             ui_scale: 1.0,
             show_timestamps: true,
             download_dir: None,
@@ -205,6 +237,15 @@ impl Settings {
                 let _ = std::fs::rename(&tmp, dir.join("settings.json"));
             }
         }
+    }
+
+    pub fn theme_kind(&self) -> ThemeKind {
+        self.theme.unwrap_or(if self.dark_theme { ThemeKind::Dark } else { ThemeKind::Light })
+    }
+
+    pub fn set_theme(&mut self, t: ThemeKind) {
+        self.theme = Some(t);
+        self.dark_theme = t.is_dark();
     }
 
     pub fn identity(&self, idx: usize) -> &Identity {

@@ -19,7 +19,7 @@ use egui::{Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, 
 use voxa_proto::*;
 
 use crate::app::*;
-use crate::config::Settings;
+use crate::config::{Settings, ThemeKind};
 use crate::dialogs;
 
 pub enum Action {
@@ -64,32 +64,95 @@ pub struct Theme {
     pub card: Color32,
     pub hover: Color32,
     pub dim: Color32,
+    /// Selection, buttons, links (white text must stay readable on it).
+    pub accent: Color32,
+    /// Normal text.
+    pub text: Color32,
+    /// Text fields, code and scroll backgrounds.
+    pub field: Color32,
+    /// Checkbox / slider tracks and their outline.
+    pub control: Color32,
+    pub control_line: Color32,
 }
 
-pub const ACCENT: Color32 = Color32::from_rgb(0x25, 0x80, 0xC3);
 pub const GREEN: Color32 = Color32::from_rgb(0x3B, 0xA5, 0x5D);
 pub const RED: Color32 = Color32::from_rgb(0xED, 0x42, 0x45);
 pub const YELLOW: Color32 = Color32::from_rgb(0xFA, 0xA6, 0x1A);
 
-pub fn theme(dark: bool) -> Theme {
-    if dark {
-        Theme {
-            rail: Color32::from_rgb(0x10, 0x11, 0x14),
-            side: Color32::from_rgb(0x18, 0x19, 0x1D),
-            main: Color32::from_rgb(0x1F, 0x20, 0x25),
-            card: Color32::from_rgb(0x27, 0x29, 0x30),
-            hover: Color32::from_rgb(0x2E, 0x31, 0x39),
-            dim: Color32::from_rgb(0x9A, 0xA0, 0xA8),
-        }
-    } else {
-        Theme {
-            rail: Color32::from_rgb(0xE3, 0xE5, 0xE8),
-            side: Color32::from_rgb(0xF2, 0xF3, 0xF5),
-            main: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-            card: Color32::from_rgb(0xEB, 0xED, 0xF0),
-            hover: Color32::from_rgb(0xDD, 0xE0, 0xE5),
-            dim: Color32::from_rgb(0x5C, 0x63, 0x6E),
-        }
+/// The theme in use (set by `apply_style`).
+static CURRENT_THEME: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn current_theme() -> ThemeKind {
+    ThemeKind::ALL[CURRENT_THEME.load(std::sync::atomic::Ordering::Relaxed) as usize % ThemeKind::ALL.len()]
+}
+
+/// Accent colour of the current theme.
+pub fn accent() -> Color32 {
+    theme().accent
+}
+
+/// Colours of the current theme.
+pub fn theme() -> Theme {
+    palette(current_theme())
+}
+
+pub fn palette(kind: ThemeKind) -> Theme {
+    let c = Color32::from_rgb;
+    match kind {
+        ThemeKind::Dark => Theme {
+            rail: c(0x10, 0x11, 0x14),
+            side: c(0x18, 0x19, 0x1D),
+            main: c(0x1F, 0x20, 0x25),
+            card: c(0x27, 0x29, 0x30),
+            hover: c(0x2E, 0x31, 0x39),
+            dim: c(0x9A, 0xA0, 0xA8),
+            accent: c(0x25, 0x80, 0xC3),
+            text: c(0xDC, 0xDD, 0xE0),
+            field: c(0x15, 0x16, 0x1A),
+            control: c(0x3A, 0x3D, 0x46),
+            control_line: c(0x55, 0x5A, 0x66),
+        },
+        ThemeKind::Light => Theme {
+            rail: c(0xE3, 0xE5, 0xE8),
+            side: c(0xF2, 0xF3, 0xF5),
+            main: c(0xFF, 0xFF, 0xFF),
+            card: c(0xEB, 0xED, 0xF0),
+            hover: c(0xDD, 0xE0, 0xE5),
+            dim: c(0x5C, 0x63, 0x6E),
+            accent: c(0x25, 0x80, 0xC3),
+            text: c(0x3C, 0x3C, 0x3C),
+            field: c(0xF7, 0xF8, 0xFA),
+            control: c(0xD5, 0xD9, 0xE0),
+            control_line: c(0xA8, 0xAE, 0xB8),
+        },
+        // Cherry blossom: petal pinks with a deep blossom accent and plum text.
+        ThemeKind::Sakura => Theme {
+            rail: c(0xF3, 0xD3, 0xDF),
+            side: c(0xFB, 0xE9, 0xEF),
+            main: c(0xFF, 0xF7, 0xFA),
+            card: c(0xF8, 0xE1, 0xE9),
+            hover: c(0xF1, 0xCF, 0xDC),
+            dim: c(0x8C, 0x5E, 0x70),
+            accent: c(0xD2, 0x4F, 0x82),
+            text: c(0x4A, 0x2A, 0x38),
+            field: c(0xFF, 0xFB, 0xFD),
+            control: c(0xEE, 0xC6, 0xD5),
+            control_line: c(0xD3, 0x9C, 0xB1),
+        },
+        // Baby blue: soft sky blues with a clear blue accent and navy text.
+        ThemeKind::Layette => Theme {
+            rail: c(0xD2, 0xE6, 0xF7),
+            side: c(0xE6, 0xF2, 0xFC),
+            main: c(0xF6, 0xFB, 0xFF),
+            card: c(0xDE, 0xEE, 0xFA),
+            hover: c(0xCB, 0xE2, 0xF6),
+            dim: c(0x56, 0x70, 0x88),
+            accent: c(0x3A, 0x8E, 0xD4),
+            text: c(0x21, 0x37, 0x4C),
+            field: c(0xFB, 0xFD, 0xFF),
+            control: c(0xC3, 0xDC, 0xF2),
+            control_line: c(0x93, 0xBA, 0xDC),
+        },
     }
 }
 
@@ -142,30 +205,36 @@ pub fn chat_font(size: f32) -> FontId {
 }
 
 pub fn apply_style(ctx: &egui::Context, s: &Settings) {
-    let t = theme(s.dark_theme);
-    let mut v = if s.dark_theme { egui::Visuals::dark() } else { egui::Visuals::light() };
+    let kind = s.theme_kind();
+    CURRENT_THEME.store(ThemeKind::ALL.iter().position(|k| *k == kind).unwrap_or(0) as u8, std::sync::atomic::Ordering::Relaxed);
+    let t = palette(kind);
+    let mut v = if kind.is_dark() { egui::Visuals::dark() } else { egui::Visuals::light() };
     v.panel_fill = t.main;
     v.window_fill = t.card;
-    v.extreme_bg_color = if s.dark_theme { Color32::from_rgb(0x15, 0x16, 0x1A) } else { Color32::from_rgb(0xF7, 0xF8, 0xFA) };
+    v.extreme_bg_color = t.field;
+    v.code_bg_color = t.card;
     v.faint_bg_color = t.card;
+    v.widgets.noninteractive.fg_stroke.color = t.text;
+    v.widgets.inactive.fg_stroke.color = t.text;
+    v.widgets.noninteractive.bg_stroke.color = t.hover;
     v.window_corner_radius = CornerRadius::same(10);
     v.menu_corner_radius = CornerRadius::same(8);
     v.window_stroke = Stroke::new(1.0, t.hover);
-    v.selection.bg_fill = ACCENT;
+    v.selection.bg_fill = accent();
     v.selection.stroke = Stroke::new(1.0, Color32::WHITE);
-    v.hyperlink_color = ACCENT;
+    v.hyperlink_color = accent();
     for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.noninteractive, &mut v.widgets.open] {
         w.corner_radius = CornerRadius::same(6);
     }
     // Buttons use the "weak" fill; radio buttons, checkboxes and slider tracks use
     // `bg_fill`, which must differ from the window background to stay visible.
     v.widgets.inactive.weak_bg_fill = t.card;
-    v.widgets.inactive.bg_fill = if s.dark_theme { Color32::from_rgb(0x3A, 0x3D, 0x46) } else { Color32::from_rgb(0xD5, 0xD9, 0xE0) };
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, if s.dark_theme { Color32::from_rgb(0x55, 0x5A, 0x66) } else { Color32::from_rgb(0xA8, 0xAE, 0xB8) });
+    v.widgets.inactive.bg_fill = t.control;
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, t.control_line);
     v.widgets.hovered.weak_bg_fill = t.hover;
     v.widgets.hovered.bg_fill = t.hover;
-    v.widgets.active.weak_bg_fill = ACCENT;
-    v.widgets.active.bg_fill = ACCENT;
+    v.widgets.active.weak_bg_fill = accent();
+    v.widgets.active.bg_fill = accent();
     ctx.set_visuals(v);
     ctx.global_style_mut(|st| {
         st.spacing.item_spacing = egui::vec2(8.0, 5.0);
@@ -216,7 +285,7 @@ fn avatar(ui: &mut Ui, size: f32, name: &str, uid: &str, ring: Option<Color32>) 
 
 /// Flat icon button as used throughout the TS6 style UI.
 fn icon_button(ui: &mut Ui, icon: &str, tip: &str, active_color: Option<Color32>) -> egui::Response {
-    let t = theme(ui.visuals().dark_mode);
+    let t = theme();
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
     let bg = if resp.hovered() { t.hover } else { Color32::TRANSPARENT };
     ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
@@ -275,7 +344,7 @@ pub fn fmt_size(b: u64) -> String {
 
 pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
-    let t = theme(app.settings.dark_theme);
+    let t = theme();
     let title = match &app.sess {
         Some(s) => match &s.server {
             Some(info) => format!("Voxa - {}", info.name),
@@ -360,7 +429,7 @@ fn rail_button(ui: &mut Ui, label: &str, tip: &str, selected: bool, fill: Color3
     let sq = egui::Rect::from_center_size(rect.center(), Vec2::splat(44.0));
     let hovered = resp.hovered();
     let radius = if selected || hovered { 12 } else { 22 };
-    let bg = if selected { ACCENT } else if hovered { ACCENT.linear_multiply(0.75) } else { fill };
+    let bg = if selected { accent() } else if hovered { accent().linear_multiply(0.75) } else { fill };
     let p = ui.painter();
     p.rect_filled(sq, CornerRadius::same(radius), bg);
     if selected || hovered {
@@ -374,7 +443,7 @@ fn rail_button(ui: &mut Ui, label: &str, tip: &str, selected: bool, fill: Color3
 }
 
 fn rail(app: &mut VoxaApp, ui: &mut Ui) {
-    let t = theme(app.settings.dark_theme);
+    let t = theme();
     let a = &mut app.actions;
     let connected_addr = app.sess.as_ref().map(|s| s.req.address.clone());
     ui.vertical_centered(|ui| {
@@ -430,7 +499,7 @@ fn rail(app: &mut VoxaApp, ui: &mut Ui) {
 // ---------------------------------------------------------------- home
 
 fn home_column(app: &mut VoxaApp, ui: &mut Ui) {
-    let t = theme(app.settings.dark_theme);
+    let t = theme();
     Frame::new().inner_margin(Margin::same(14)).show(ui, |ui| {
         ui.label(RichText::new("Bookmarks").strong().size(16.0));
         ui.add_space(6.0);
@@ -482,11 +551,11 @@ fn home_column(app: &mut VoxaApp, ui: &mut Ui) {
 }
 
 fn home_view(app: &mut VoxaApp, ui: &mut Ui) {
-    let t = theme(app.settings.dark_theme);
+    let t = theme();
     ui.add_space(ui.available_height() * 0.16);
     ui.vertical_centered(|ui| {
         let (r, _) = ui.allocate_exact_size(Vec2::splat(84.0), Sense::hover());
-        ui.painter().rect_filled(r, CornerRadius::same(22), ACCENT);
+        ui.painter().rect_filled(r, CornerRadius::same(22), accent());
         ui.painter().text(r.center(), Align2::CENTER_CENTER, "🎧", FontId::proportional(42.0), Color32::WHITE);
         ui.add_space(12.0);
         ui.label(RichText::new("Welcome to Voxa").size(26.0).strong());
@@ -495,7 +564,7 @@ fn home_view(app: &mut VoxaApp, ui: &mut Ui) {
         ui.horizontal(|ui| {
             let w = 340.0;
             ui.add_space((ui.available_width() - w).max(0.0) / 2.0);
-            let b = egui::Button::new(RichText::new("🔌  Connect to a server").color(Color32::WHITE).size(15.0)).fill(ACCENT).min_size(egui::vec2(170.0, 36.0));
+            let b = egui::Button::new(RichText::new("🔌  Connect to a server").color(Color32::WHITE).size(15.0)).fill(accent()).min_size(egui::vec2(170.0, 36.0));
             if ui.add(b).clicked() {
                 app.actions.push(Action::Dialog(dialogs::Open::Connect));
             }
@@ -559,7 +628,7 @@ fn server_menu(s: &Session, ui: &mut Ui, a: &mut Vec<Action>) {
 }
 
 fn server_column(app: &mut VoxaApp, ui: &mut Ui) {
-    let t = theme(app.settings.dark_theme);
+    let t = theme();
     let Some(s) = &app.sess else { return };
     let a = &mut app.actions;
     // Header with the server menu.
@@ -595,7 +664,7 @@ fn server_column(app: &mut VoxaApp, ui: &mut Ui) {
 }
 
 fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settings, ui: &mut Ui, a: &mut Vec<Action>) {
-    let t = theme(settings.dark_theme);
+    let t = theme();
     let me = s.me().cloned();
     if s.welcomed {
         // Voice connected card.
@@ -708,13 +777,13 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
 // ---------------------------------------------------------------- channel tree
 
 fn row_frame(ui: &mut Ui, selected: bool, indent: f32, add: impl FnOnce(&mut Ui)) -> egui::Response {
-    let t = theme(ui.visuals().dark_mode);
+    let t = theme();
     let r = Frame::new().inner_margin(Margin { left: (6.0 + indent) as i8, right: 6, top: 3, bottom: 3 }).corner_radius(6).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(add);
     });
     let resp = ui.interact(r.response.rect, ui.next_auto_id().with("row"), Sense::click_and_drag());
-    let fill = if selected { ACCENT.linear_multiply(0.35) } else if resp.hovered() { t.hover } else { Color32::TRANSPARENT };
+    let fill = if selected { accent().linear_multiply(0.35) } else if resp.hovered() { t.hover } else { Color32::TRANSPARENT };
     if fill != Color32::TRANSPARENT {
         ui.painter().rect_filled(r.response.rect, CornerRadius::same(6), fill.linear_multiply(0.6));
     }
@@ -726,7 +795,7 @@ fn channel_rows(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, pa
     if depth > 64 {
         return;
     }
-    let t = theme(ui.visuals().dark_mode);
+    let t = theme();
     for c in s.children(parent) {
         let clients = s.clients_in(c.id);
         let has_children = !s.children(Some(c.id)).is_empty();
@@ -841,13 +910,13 @@ fn channel_dnd(s: &Session, ui: &Ui, r: &egui::Response, c: &ChannelInfo, a: &mu
         let rect = r.rect;
         match zone {
             Some(DropZone::Before) => {
-                painter.hline(rect.x_range(), rect.top(), Stroke::new(2.5, ACCENT));
+                painter.hline(rect.x_range(), rect.top(), Stroke::new(2.5, accent()));
             }
             Some(DropZone::After) => {
-                painter.hline(rect.x_range(), rect.bottom(), Stroke::new(2.5, ACCENT));
+                painter.hline(rect.x_range(), rect.bottom(), Stroke::new(2.5, accent()));
             }
             Some(DropZone::Into) => {
-                painter.rect_stroke(rect, CornerRadius::same(6), Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
+                painter.rect_stroke(rect, CornerRadius::same(6), Stroke::new(2.0, accent()), egui::StrokeKind::Inside);
             }
             None => {}
         }
@@ -919,7 +988,7 @@ fn drag_ghost(app: &VoxaApp, ctx: &egui::Context) {
         .fixed_pos(pos + egui::vec2(14.0, 6.0))
         .interactable(false)
         .show(ctx, |ui| {
-            Frame::new().fill(ACCENT).corner_radius(6).inner_margin(Margin::symmetric(8, 3)).show(ui, |ui| {
+            Frame::new().fill(accent()).corner_radius(6).inner_margin(Margin::symmetric(8, 3)).show(ui, |ui| {
                 ui.label(RichText::new(label).color(Color32::WHITE));
             });
         });
@@ -1010,7 +1079,7 @@ fn move_channel(s: &Session, c: &ChannelInfo, dir: i64, a: &mut Vec<Action>) {
 }
 
 fn client_row(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, c: &ClientInfo, depth: usize, a: &mut Vec<Action>) {
-    let t = theme(ui.visuals().dark_mode);
+    let t = theme();
     let talking = if c.id == s.me { shared.self_talking.load(Ordering::Relaxed) } else { shared.is_talking(c.id) };
     let r = row_frame(ui, s.selected == Selection::Client(c.id), depth as f32 * 14.0 + 8.0, |ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -1032,7 +1101,7 @@ fn client_row(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, c: &
             ui.spacing_mut().item_spacing.x = 3.0;
             if let Some(st) = &c.streaming {
                 let watching = s.watching.contains(&c.id);
-                let b = Frame::new().fill(if watching { ACCENT } else { RED }).corner_radius(4).inner_margin(Margin::symmetric(5, 1)).show(ui, |ui| {
+                let b = Frame::new().fill(if watching { accent() } else { RED }).corner_radius(4).inner_margin(Margin::symmetric(5, 1)).show(ui, |ui| {
                     ui.label(RichText::new(if watching { "WATCHING" } else { "LIVE" }).small().strong().color(Color32::WHITE));
                 });
                 let b = b.response.interact(Sense::click()).on_hover_text(format!("{} ({}x{}) - click to {}", st.title, st.width, st.height, if watching { "stop watching" } else { "watch" }));
@@ -1071,7 +1140,7 @@ fn client_row(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, c: &
     r.dnd_set_drag_payload(Drag::Client(c.id));
     if let Some(p) = r.dnd_hover_payload::<Drag>() {
         if matches!(*p, Drag::Client(id) if id != c.id) {
-            ui.painter().rect_stroke(r.rect, CornerRadius::same(6), Stroke::new(2.0, ACCENT), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(r.rect, CornerRadius::same(6), Stroke::new(2.0, accent()), egui::StrokeKind::Inside);
         }
     }
     if let Some(p) = r.dnd_release_payload::<Drag>() {
@@ -1201,14 +1270,14 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
 // ---------------------------------------------------------------- info panel
 
 fn grid_row(ui: &mut Ui, k: &str, v: impl Into<egui::WidgetText>) {
-    let t = theme(ui.visuals().dark_mode);
+    let t = theme();
     ui.label(RichText::new(k).color(t.dim));
     ui.label(v);
     ui.end_row();
 }
 
 fn section(ui: &mut Ui, title: &str) {
-    let t = theme(ui.visuals().dark_mode);
+    let t = theme();
     ui.add_space(8.0);
     ui.label(RichText::new(title.to_uppercase()).small().strong().color(t.dim));
     ui.add_space(2.0);
@@ -1242,14 +1311,14 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
     if !s.welcomed {
         return;
     }
-    let t = theme(app.settings.dark_theme);
+    let t = theme();
     let a = &mut app.actions;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match s.selected {
         Selection::Server => {
             let Some(info) = &s.server else { return };
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
-                ui.painter().rect_filled(r, CornerRadius::same(12), ACCENT);
+                ui.painter().rect_filled(r, CornerRadius::same(12), accent());
                 ui.painter().text(r.center(), Align2::CENTER_CENTER, initials(&info.name), FontId::proportional(18.0), Color32::WHITE);
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&info.name).strong().size(17.0));
@@ -1292,7 +1361,7 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
             }
             ui.add_space(6.0);
             if s.my_channel() != id {
-                let b = egui::Button::new(RichText::new("➡ Join Channel").color(Color32::WHITE)).fill(ACCENT).min_size(egui::vec2(ui.available_width(), 30.0));
+                let b = egui::Button::new(RichText::new("➡ Join Channel").color(Color32::WHITE)).fill(accent()).min_size(egui::vec2(ui.available_width(), 30.0));
                 if ui.add(b).clicked() {
                     a.push(Action::Join(id));
                 }
@@ -1386,7 +1455,7 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
 // ---------------------------------------------------------------- main view: stage + chat
 
 fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
-    let t = theme(app.settings.dark_theme);
+    let t = theme();
     let Some(s) = &app.sess else { return };
     if !s.welcomed {
         ui.centered_and_justified(|ui| {
@@ -1413,7 +1482,7 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 ui.label(RichText::new(topic).color(t.dim));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, "👥", "Show / hide info panel", app.show_members.then_some(ACCENT)).clicked() {
+                if icon_button(ui, "👥", "Show / hide info panel", app.show_members.then_some(accent())).clicked() {
                     a.push(Action::ToggleMembers);
                 }
                 if icon_button(ui, "📁", "Channel files", None).clicked() {
@@ -1445,7 +1514,7 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 } else if unread > 0 {
                     rt = rt.strong().color(YELLOW);
                 }
-                let b = egui::Button::new(rt).fill(if sel { ACCENT } else { t.card }).corner_radius(12);
+                let b = egui::Button::new(rt).fill(if sel { accent() } else { t.card }).corner_radius(12);
                 if ui.add(b).clicked() {
                     a.push(Action::SetTab(key));
                 }
@@ -1543,7 +1612,7 @@ fn insert_emoji(input: &mut String, ch: &str) {
 /// offers the context menu without stealing clicks from images in the message.
 /// pin: Some(is pinned) when the user may pin / unpin this message.
 fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx, m: &ChatMessage, target: TextTarget, can_del: bool, pin: Option<bool>, a: &mut Vec<Action>) {
-    let t = theme(ui.visuals().dark_mode);
+    let t = theme();
     let rect = row.rect.expand2(egui::vec2(0.0, 2.0));
     let click = row;
     // Image messages copy / show their file name rather than the raw image tag.
@@ -1592,7 +1661,7 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
             a.push(Action::CopyText(shown.clone()));
         }
         if let Some(pinned) = pin {
-            if button(ui, "📌", if pinned { "Unpin message" } else { "Pin message to the top of this chat" }, if pinned { ACCENT } else { t.dim }) {
+            if button(ui, "📌", if pinned { "Unpin message" } else { "Pin message to the top of this chat" }, if pinned { accent() } else { t.dim }) {
                 a.push(Action::Send(C2S::PinMessage { target, id: m.id, pin: !pinned }));
             }
         }
@@ -1608,7 +1677,7 @@ fn pinned_bar(ui: &mut Ui, pins: &[PinnedMessage], open: &mut bool, can_pin: boo
     if pins.is_empty() {
         return;
     }
-    let t = theme(ui.visuals().dark_mode);
+    let t = theme();
     let preview = |text: &str| -> String {
         match ImageRef::parse(text) {
             Some(r) => format!("📷 {}", r.name),
@@ -1687,7 +1756,7 @@ fn message_text(ui: &mut Ui, text: &str, salt: (u64, u64)) {
 /// Discord-style card for a YouTube link: channel, title and thumbnail. Clicking the
 /// thumbnail plays the video inside Voxa.
 fn youtube_card(ui: &mut Ui, previews: &crate::links::Previews, v: &crate::links::Video, a: &mut Vec<Action>) {
-    let t = theme(ui.visuals().dark_mode);
+    let t = theme();
     let yt_red = Color32::from_rgb(0xFF, 0x00, 0x33);
     let pv = previews.get(ui.ctx(), &v.id);
     let w = ui.available_width().min(440.0);
@@ -1737,7 +1806,7 @@ fn youtube_card(ui: &mut Ui, previews: &crate::links::Previews, v: &crate::links
 }
 
 fn emoji_picker(ui: &mut Ui, anchor: egui::Rect, picker: &mut EmojiPicker, input: &mut String, recent: &[String], a: &mut Vec<Action>, toggled: bool) {
-    let t = theme(ui.visuals().dark_mode);
+    let t = theme();
     let size = egui::vec2(352.0, 340.0);
     let pos = egui::pos2((anchor.left() - 40.0).max(4.0), anchor.top() - size.y - 8.0);
     let area = egui::Area::new(egui::Id::unique("voxa_emoji_picker")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
@@ -1753,7 +1822,7 @@ fn emoji_picker(ui: &mut Ui, anchor: egui::Rect, picker: &mut EmojiPicker, input
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let mut tab = |ui: &mut Ui, idx: usize, icon: &str, name: &str| {
                     let sel = picker.category == idx && picker.search.is_empty();
-                    let b = egui::Button::new(RichText::new(icon).font(chat_font(18.0))).fill(if sel { ACCENT.linear_multiply(0.5) } else { Color32::TRANSPARENT });
+                    let b = egui::Button::new(RichText::new(icon).font(chat_font(18.0))).fill(if sel { accent().linear_multiply(0.5) } else { Color32::TRANSPARENT });
                     if ui.add(b).on_hover_text(name).clicked() {
                         picker.category = idx;
                         picker.search.clear();
@@ -1847,7 +1916,7 @@ fn message_body(
 }
 fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings: &Settings, picker: &mut EmojiPicker, previews: &crate::links::Previews, ui: &mut Ui) {
     let previews = settings.link_previews.then_some(previews);
-    let t = theme(settings.dark_theme);
+    let t = theme();
     let my_uid = s.my_uid.clone();
     let my_channel = s.my_channel();
     let target = chat_target(s);
@@ -1876,7 +1945,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                 ui.horizontal_wrapped(|ui| {
                     for (i, e) in suggestions.iter().enumerate() {
                         let text = RichText::new(format!("{}  :{}:", e.ch, e.code)).font(chat_font(body_size(ui)));
-                        let b = egui::Button::new(text).fill(if i == 0 { ACCENT.linear_multiply(0.35) } else { Color32::TRANSPARENT });
+                        let b = egui::Button::new(text).fill(if i == 0 { accent().linear_multiply(0.35) } else { Color32::TRANSPARENT });
                         if ui.add(b).on_hover_text(if i == 0 { "Tab to insert" } else { "Click to insert" }).clicked() {
                             accept = Some(e.ch);
                         }
@@ -1938,7 +2007,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                 if toggled {
                     picker.open = !picker.open;
                 }
-                let send = icon_button(ui, "➤", "Send", Some(ACCENT)).clicked();
+                let send = icon_button(ui, "➤", "Send", Some(accent())).clicked();
                 if (send || enter) && !input.trim().is_empty() {
                     // Shortcodes like :fire: become emoji, but never inside code.
                     let text = crate::markdown::map_outside_code(input.trim_end(), crate::emoji::replace_shortcodes);

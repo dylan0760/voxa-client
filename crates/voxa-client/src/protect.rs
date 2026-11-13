@@ -89,6 +89,23 @@ mod tests {
         assert_eq!(seal(&open(foreign)), foreign);
     }
 
+    /// Settings from before themes keep dark / light; new themes round-trip and still
+    /// tell older versions dark or light.
+    #[test]
+    fn theme_setting_is_compatible() {
+        use crate::config::{Settings, ThemeKind};
+        let old: Settings = serde_json::from_str(r#"{"dark_theme":false}"#).unwrap();
+        assert_eq!(old.theme_kind(), ThemeKind::Light);
+        let old: Settings = serde_json::from_str(r#"{"dark_theme":true}"#).unwrap();
+        assert_eq!(old.theme_kind(), ThemeKind::Dark);
+        for k in ThemeKind::ALL {
+            let mut s = Settings::default();
+            s.set_theme(k);
+            let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+            assert_eq!((back.theme_kind(), back.dark_theme), (k, k == ThemeKind::Dark));
+        }
+    }
+
     #[test]
     fn settings_file_has_no_plain_secrets() {
         let mut st = crate::config::Settings::default();
