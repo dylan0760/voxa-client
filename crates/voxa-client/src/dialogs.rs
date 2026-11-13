@@ -834,16 +834,21 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             }
             3 => {
                 use crate::hotkeys::{Binding, HotkeyAction, HotkeyEntry};
-                ui.label(RichText::new("Global hotkeys work even while Voxa is in the background, minimised or in the system tray. Combine any key or mouse button with Ctrl / Alt / Shift.").weak());
+                ui.label(
+                    RichText::new("Global hotkeys work even while Voxa is in the background, minimised or in the system tray. Use any key or mouse button (with Ctrl / Alt / Shift), or a button on an Xbox or PlayStation controller, flight stick or other game controller. An action can have several bindings.")
+                        .weak(),
+                );
+                let pads = crate::gamepad::connected();
+                ui.label(RichText::new(if pads.is_empty() { "🎮 No game controller found.".to_string() } else { format!("🎮 Found: {}", pads.join(", ")) }).small().weak());
                 ui.add_space(4.0);
-                // Recording a new combination.
+                // Recording a new binding (key combination or controller button).
                 if let Some(action) = d.capturing_hotkey {
                     app.hotkeys.paused.store(true, std::sync::atomic::Ordering::Relaxed);
                     if crate::audio::key_down(0x1B) {
                         d.capturing_hotkey = None;
                     } else if let Some(b) = Binding::capture() {
-                        // Unbind the same combination from any other action.
-                        d.hotkeys.retain(|e| e.binding != b && e.action != action);
+                        // The same key / button does one thing: it moves here from any other action.
+                        d.hotkeys.retain(|e| e.binding != b);
                         d.hotkeys.push(HotkeyEntry { action, binding: b });
                         d.capturing_hotkey = None;
                     }
@@ -851,29 +856,34 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 } else {
                     app.hotkeys.paused.store(false, std::sync::atomic::Ordering::Relaxed);
                 }
-                egui::Grid::new("hotkeys").num_columns(3).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
+                egui::Grid::new("hotkeys").num_columns(2).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
                     ui.label(RichText::new("Action").strong());
-                    ui.label(RichText::new("Hotkey").strong());
-                    ui.label("");
-                    ui.end_row();
-                    ui.label("Push-to-talk");
-                    ui.label(crate::audio::key_name(d.audio.ptt_key));
-                    ui.label(RichText::new("set under Capture").small().weak());
+                    ui.label(RichText::new("Bindings").strong());
                     ui.end_row();
                     for action in HotkeyAction::ALL {
-                        let binding = d.hotkeys.iter().find(|e| e.action == action).map(|e| e.binding).unwrap_or_default();
                         ui.label(action.label());
-                        if d.capturing_hotkey == Some(action) {
-                            ui.label(RichText::new("Press a key combination... (Esc cancels)").color(Color32::YELLOW));
-                        } else {
-                            ui.label(RichText::new(binding.label()).monospace().color(if binding.is_set() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() }));
-                        }
-                        ui.horizontal(|ui| {
-                            if ui.add_enabled(d.capturing_hotkey.is_none(), egui::Button::new("Set...")).clicked() {
-                                d.capturing_hotkey = Some(action);
+                        ui.horizontal_wrapped(|ui| {
+                            if action == HotkeyAction::PushToTalk && d.audio.ptt_key != 0 {
+                                ui.label(RichText::new(crate::audio::key_name(d.audio.ptt_key)).monospace()).on_hover_text("The push-to-talk key set under Capture");
                             }
-                            if ui.add_enabled(binding.is_set(), egui::Button::new("Clear")).clicked() {
-                                d.hotkeys.retain(|e| e.action != action);
+                            let mut remove = None;
+                            for (i, e) in d.hotkeys.iter().enumerate().filter(|(_, e)| e.action == action && e.binding.is_set()) {
+                                Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(6).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(e.binding.label()).monospace().color(ui.visuals().strong_text_color()));
+                                        if ui.small_button("✖").on_hover_text("Remove this binding").clicked() {
+                                            remove = Some(i);
+                                        }
+                                    });
+                                });
+                            }
+                            if let Some(i) = remove {
+                                d.hotkeys.remove(i);
+                            }
+                            if d.capturing_hotkey == Some(action) {
+                                ui.label(RichText::new("Press a key or controller button... (Esc cancels)").color(Color32::YELLOW));
+                            } else if ui.add_enabled(d.capturing_hotkey.is_none(), egui::Button::new("+ Add")).clicked() {
+                                d.capturing_hotkey = Some(action);
                             }
                         });
                         ui.end_row();

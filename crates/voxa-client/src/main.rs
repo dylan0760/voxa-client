@@ -13,6 +13,7 @@ mod dda;
 mod dialogs;
 mod dm_store;
 mod emoji;
+mod gamepad;
 mod highlight;
 mod hotkeys;
 mod icon;

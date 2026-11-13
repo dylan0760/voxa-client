@@ -84,6 +84,8 @@ pub struct VoiceShared {
     pub lossless: AtomicBool,
     /// A microphone test is recording: nothing is transmitted meanwhile.
     pub testing: AtomicBool,
+    /// A push-to-talk hotkey (extra key or controller button) is held.
+    pub ptt_hotkey: AtomicBool,
 }
 
 impl VoiceShared {
@@ -114,6 +116,7 @@ impl VoiceShared {
             music: AtomicBool::new(false),
             lossless: AtomicBool::new(false),
             testing: AtomicBool::new(false),
+            ptt_hotkey: AtomicBool::new(false),
         })
     }
 
@@ -859,7 +862,7 @@ fn encoder_loop(
                     Instant::now() < vad_hold_until
                 }
                 VoiceMode::PushToTalk => {
-                    if key_down(settings.ptt_key) {
+                    if key_down(settings.ptt_key) || shared.ptt_hotkey.load(Ordering::Relaxed) {
                         ptt_release_at = None;
                         true
                     } else if transmitting {
@@ -875,7 +878,7 @@ fn encoder_loop(
             // TeamSpeak) after ~0.3 s of speech, at most every 8 s while it continues.
             if settings.muted_warning && settings.source == CaptureSource::Microphone && shared.input_muted.load(Ordering::Relaxed) {
                 let speaking = match settings.mode {
-                    VoiceMode::PushToTalk => key_down(settings.ptt_key),
+                    VoiceMode::PushToTalk => key_down(settings.ptt_key) || shared.ptt_hotkey.load(Ordering::Relaxed),
                     _ => db >= settings.vad_threshold_db,
                 };
                 if muted_talk.frame(speaking, Instant::now()) {

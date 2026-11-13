@@ -810,7 +810,7 @@ impl VoxaApp {
                     crate::ui::apply(self, Action::ShareScreen);
                 }
                 H::ShowWindow => self.show_window(),
-                H::PushToMute => {}
+                H::PushToMute | H::PushToTalk => {}
             }
         }
     }
