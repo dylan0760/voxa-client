@@ -2076,7 +2076,7 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             ui.label(RichText::new("Tip: hold Shift while clicking 🗑 to delete without this question.").small().weak());
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new(RichText::new("Delete").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
-                    app.send(C2S::DeleteMessage { target, id });
+                    app.send_mut(C2S::DeleteMessage { target, id });
                     close = true;
                 }
                 if ui.button("Cancel").clicked() {
@@ -2103,10 +2103,14 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         window("Clear Chat History").open(&mut open).show_fill(ctx, |ui| {
             ui.set_max_width(420.0);
             ui.label(RichText::new(format!("Delete every message in {what}?")).strong());
-            ui.label("This removes all messages for everyone and permanently deletes them from the server's chat history. It cannot be undone.");
+            ui.label(if matches!(target, TextTarget::Private(_)) {
+                "This deletes your copy of the conversation from this PC. The other person keeps their own copy. It cannot be undone."
+            } else {
+                "This removes all messages for everyone and permanently deletes them from the server's chat history. It cannot be undone."
+            });
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new(RichText::new("Clear history").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
-                    app.send(C2S::ClearChat(target));
+                    app.send_mut(C2S::ClearChat(target));
                     close = true;
                 }
                 if ui.button("Cancel").clicked() {

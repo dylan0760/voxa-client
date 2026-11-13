@@ -4928,10 +4928,11 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voxa-client"
-version = "1.17.0"
+version = "1.18.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chacha20poly1305",
  "chrono",
  "cpal",
  "eframe",
@@ -4939,10 +4940,12 @@ dependencies = [
  "epaint",
  "image",
  "parking_lot",
+ "rand",
  "rfd",
  "rusty-opus",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tray-icon",
  "ureq",
@@ -4955,7 +4958,7 @@ dependencies = [
 
 [[package]]
 name = "voxa-proto"
-version = "1.17.0"
+version = "1.18.0"
 dependencies = [
  "base64 0.22.1",
  "bincode",

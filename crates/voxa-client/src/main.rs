@@ -11,6 +11,7 @@ mod config;
 #[cfg(windows)]
 mod dda;
 mod dialogs;
+mod dm_store;
 mod emoji;
 mod highlight;
 mod hotkeys;

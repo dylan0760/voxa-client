@@ -43,7 +43,19 @@ impl ConnectRequest {
 pub enum ChatKey {
     Server,
     Channel,
-    Private(ClientId),
+    /// A direct message conversation (index into `Session::dms`).
+    Dm(DmId),
+}
+
+pub type DmId = usize;
+
+/// A direct message conversation, kept per person (identity), stored only on this PC.
+pub struct Dm {
+    pub uid: String,
+    pub name: String,
+    pub log: ChatLog,
+    /// Shown as a tab.
+    pub open: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,8 +219,15 @@ pub struct Session {
     pub groups: BTreeMap<GroupId, GroupInfo>,
     pub server_log: ChatLog,
     pub channel_logs: HashMap<ChannelId, ChatLog>,
-    pub private_logs: BTreeMap<ClientId, ChatLog>,
-    pub private_names: HashMap<ClientId, String>,
+    /// Direct message conversations of this session (see `Dm`).
+    pub dms: Vec<Dm>,
+    /// The verified fingerprint of this server: direct messages are stored per server.
+    pub server_key: String,
+    /// Everyone who has been on the server (servers 1.13.0+), and when it was asked.
+    pub people: Vec<Person>,
+    pub people_asked: Option<Instant>,
+    /// Conversations stored on this PC for this server: (uid, name, last message time).
+    pub stored_dms: Vec<(String, String, u64)>,
     pub tab: ChatKey,
     pub selected: Selection,
     pub watching: HashSet<ClientId>,
@@ -324,6 +343,56 @@ impl Session {
         v
     }
 
+    /// The conversation with `uid` (loading its stored history), opened as a tab.
+    pub fn dm_open(&mut self, uid: &str, name: &str) -> DmId {
+        if let Some(i) = self.dms.iter().position(|d| d.uid == uid) {
+            let d = &mut self.dms[i];
+            if !name.is_empty() {
+                d.name = name.to_string();
+            }
+            d.open = true;
+            return i;
+        }
+        let stored = crate::dm_store::load(&self.server_key, uid);
+        let mut log = ChatLog { complete: true, ..Default::default() };
+        let mut known = String::new();
+        if let Some(st) = stored {
+            known = st.name;
+            log.lines = st.messages.into_iter().map(ChatLine::Msg).collect();
+        }
+        let name = if name.is_empty() { known } else { name.to_string() };
+        self.dms.push(Dm { uid: uid.to_string(), name, log, open: true });
+        self.dms.len() - 1
+    }
+
+    /// The session id of the person in a conversation, if they are online.
+    pub fn dm_online(&self, id: DmId) -> Option<ClientId> {
+        let uid = &self.dms.get(id)?.uid;
+        self.clients.values().find(|c| &c.uid == uid).map(|c| c.id)
+    }
+
+    pub fn dm_name(&self, id: DmId) -> String {
+        match self.dm_online(id) {
+            Some(c) => self.client_name(c),
+            None => self.dms.get(id).map(|d| d.name.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// Adds a message to a conversation (with a local id, for deleting) and saves it.
+    pub fn dm_push(&mut self, id: DmId, mut m: ChatMessage) {
+        let Some(d) = self.dms.get_mut(id) else { return };
+        m.id = d.log.lines.iter().filter_map(|l| if let ChatLine::Msg(x) = l { Some(x.id) } else { None }).max().unwrap_or(0) + 1;
+        d.log.lines.push(ChatLine::Msg(m));
+        self.dm_save(id);
+    }
+
+    /// Writes a conversation to this PC (encrypted).
+    pub fn dm_save(&self, id: DmId) {
+        let Some(d) = self.dms.get(id) else { return };
+        let messages = d.log.lines.iter().filter_map(|l| if let ChatLine::Msg(m) = l { Some(m.clone()) } else { None }).collect();
+        crate::dm_store::save(&self.server_key, &crate::dm_store::StoredDm { uid: d.uid.clone(), name: d.name.clone(), messages });
+    }
+
     /// Asks for the pinned messages of a chat (servers 1.8.0+).
     pub fn fetch_pins(&self, target: TextTarget) {
         if self.supports("1.8.0") && !matches!(target, TextTarget::Private(_)) {
@@ -415,7 +484,6 @@ impl Session {
         self.clients
             .get(&id)
             .map(|c| c.nickname.clone())
-            .or_else(|| self.private_names.get(&id).cloned())
             .unwrap_or_else(|| format!("Client {id}"))
     }
 
@@ -446,6 +514,9 @@ pub struct VoxaApp {
     debug_done: bool,
     pub home: bool,
     pub show_members: bool,
+    /// The right panel shows the People list instead of the info.
+    pub people_view: bool,
+    pub people_search: String,
     pub tray: Option<Tray>,
     pub tray_rx: Receiver<RawTray>,
     /// Set by "Quit" so the close request is not turned into hide-to-tray.
@@ -523,6 +594,8 @@ impl VoxaApp {
             debug_done: false,
             home: false,
             show_members: true,
+            people_view: false,
+            people_search: String::new(),
             tray: None,
             tray_rx,
             quitting: false,
@@ -585,6 +658,16 @@ impl VoxaApp {
                 if let Some(d) = &mut self.dlg.channel {
                     d.edit.name = "Music".into();
                     d.edit.codec_quality = voxa_proto::pack_codec(voxa_proto::VoiceCodec::Lossless, 6);
+                }
+            }
+            // The People panel and the first direct message conversation.
+            "people-dm" => {
+                self.show_members = true;
+                self.people_view = true;
+                if let Some(s) = &mut self.sess {
+                    if !s.dms.is_empty() {
+                        s.tab = ChatKey::Dm(0);
+                    }
                 }
             }
             // The Create Channel dialog as a separator.
@@ -778,6 +861,56 @@ impl VoxaApp {
         }
     }
 
+    /// Like `send`, but direct messages are handled here: they are stored only on this
+    /// PC, so deleting and clearing them is local, and a message to someone offline is
+    /// left on the server for later delivery (servers 1.13.0+).
+    pub fn send_mut(&mut self, m: C2S) {
+        let Some(s) = &mut self.sess else { return };
+        let ChatKey::Dm(id) = s.tab else {
+            s.conn.send(m);
+            return;
+        };
+        match m {
+            C2S::SendText { target: TextTarget::Private(_), text } => match s.dm_online(id) {
+                Some(client) => s.conn.send(C2S::SendText { target: TextTarget::Private(client), text }),
+                None if s.supports("1.13.0") => {
+                    let uid = s.dms[id].uid.clone();
+                    let me = s.me().cloned();
+                    let msg = ChatMessage {
+                        id: 0,
+                        target: TextTarget::Private(0),
+                        from: Some(s.me),
+                        from_uid: s.my_uid.clone(),
+                        from_name: me.map(|c| c.nickname).unwrap_or_default(),
+                        ts: now_unix(),
+                        text: text.clone(),
+                    };
+                    s.dm_push(id, msg);
+                    s.conn.send(C2S::SendOffline { to_uid: uid, text });
+                }
+                None => {
+                    let name = s.dm_name(id);
+                    s.dms[id].log.lines.push(ChatLine::Event {
+                        ts: now_unix(),
+                        text: format!("{name} is offline. This server cannot keep messages for later (it needs Voxa Server 1.13.0)."),
+                        kind: EventKind::Warn,
+                    });
+                }
+            },
+            C2S::DeleteMessage { target: TextTarget::Private(_), id: msg } => {
+                s.dms[id].log.lines.retain(|l| !matches!(l, ChatLine::Msg(x) if x.id == msg));
+                s.dm_save(id);
+            }
+            C2S::ClearChat(TextTarget::Private(_)) => {
+                let name = s.dm_name(id);
+                s.dms[id].log.lines.clear();
+                crate::dm_store::delete(&s.server_key, &s.dms[id].uid);
+                s.dms[id].log.lines.push(ChatLine::Event { ts: now_unix(), text: format!("Your conversation with {name} was deleted from this PC"), kind: EventKind::Info });
+            }
+            other => s.conn.send(other),
+        }
+    }
+
     pub fn connect(&mut self, req: ConnectRequest) {
         self.disconnect("Connecting elsewhere");
         let identity = self.settings.identity(req.identity).keypair().unwrap_or_else(voxa_proto::identity::KeyPair::generate);
@@ -815,8 +948,11 @@ impl VoxaApp {
             groups: BTreeMap::new(),
             server_log: ChatLog::default(),
             channel_logs: HashMap::new(),
-            private_logs: BTreeMap::new(),
-            private_names: HashMap::new(),
+            dms: Vec::new(),
+            server_key: String::new(),
+            people: Vec::new(),
+            people_asked: None,
+            stored_dms: Vec::new(),
             tab: ChatKey::Channel,
             selected: Selection::Server,
             watching: HashSet::new(),
@@ -1197,6 +1333,8 @@ impl VoxaApp {
                 s.welcomed = true;
                 s.me = your_id;
                 s.my_uid = your_uid;
+                // Direct messages are kept per server, under its verified fingerprint.
+                s.server_key = self.settings.known_servers.get(&s.req.address).cloned().unwrap_or_default();
                 s.channels = channels.into_iter().map(|c| (c.id, c)).collect();
                 s.clients = clients.into_iter().map(|c| (c.id, c)).collect();
                 s.groups = groups.into_iter().map(|g| (g.id, g)).collect();
@@ -1284,7 +1422,6 @@ impl VoxaApp {
                         LeaveReason::TimedOut => format!("\"{}\" timed out", c.nickname),
                     };
                     s.log(EventKind::Info, text);
-                    s.private_names.insert(id, c.nickname);
                 }
                 s.watching.remove(&id);
                 s.viewer.clear(id);
@@ -1350,26 +1487,55 @@ impl VoxaApp {
                 s.clients.insert(c.id, c);
             }
             S2C::Text(msg) => {
-                let key = match msg.target {
-                    TextTarget::Server => ChatKey::Server,
-                    TextTarget::Channel(_) => ChatKey::Channel,
-                    TextTarget::Private(other) => ChatKey::Private(other),
-                };
                 let from_me = msg.from == Some(s.me);
-                let log = match msg.target {
-                    TextTarget::Server => &mut s.server_log,
-                    TextTarget::Channel(ch) => s.channel_logs.entry(ch).or_default(),
-                    TextTarget::Private(other) => {
-                        s.private_names.insert(other, if from_me { s.client_name(other) } else { msg.from_name.clone() });
-                        s.private_logs.entry(other).or_default()
+                if let TextTarget::Private(other) = msg.target {
+                    // Direct message: kept by the other person's identity, saved on this PC.
+                    let (uid, name) = if from_me {
+                        (s.clients.get(&other).map(|c| c.uid.clone()).unwrap_or_default(), s.client_name(other))
+                    } else {
+                        (msg.from_uid.clone(), msg.from_name.clone())
+                    };
+                    if uid.is_empty() {
+                        return;
                     }
+                    let id = s.dm_open(&uid, &name);
+                    s.dm_push(id, msg);
+                    if s.tab != ChatKey::Dm(id) {
+                        s.dms[id].log.unread += 1;
+                    }
+                    if !from_me {
+                        shared.play_tones(&[(880.0, 60), (1175.0, 80)]);
+                    }
+                    return;
+                }
+                let key = if matches!(msg.target, TextTarget::Server) { ChatKey::Server } else { ChatKey::Channel };
+                let log = match msg.target {
+                    TextTarget::Channel(ch) => s.channel_logs.entry(ch).or_default(),
+                    _ => &mut s.server_log,
                 };
                 log.lines.push(ChatLine::Msg(msg));
                 if s.tab != key {
                     log.unread += 1;
                 }
-                if !from_me && matches!(key, ChatKey::Private(_)) {
-                    shared.play_tones(&[(880.0, 60), (1175.0, 80)]);
+            }
+            S2C::People(people) => {
+                s.people = people;
+            }
+            S2C::OfflineMessages(msgs) => {
+                let n = msgs.len();
+                for m in msgs {
+                    let id = s.dm_open(&m.from_uid, &m.from_name);
+                    let msg = ChatMessage { id: 0, target: TextTarget::Private(0), from: None, from_uid: m.from_uid, from_name: m.from_name, ts: m.ts, text: m.text };
+                    s.dm_push(id, msg);
+                    s.dms[id].log.unread += 1;
+                }
+                s.log(EventKind::Good, format!("{n} direct message(s) arrived while you were away"));
+                shared.play_tones(&[(880.0, 60), (1175.0, 80)]);
+            }
+            S2C::OfflineQueued { to_uid, ts } => {
+                if let Some(d) = s.dms.iter_mut().find(|d| d.uid == to_uid) {
+                    let text = format!("{} is offline: your message will be delivered when they come online", d.name);
+                    d.log.lines.push(ChatLine::Event { ts, text, kind: EventKind::Info });
                 }
             }
             S2C::History { target, messages, complete } => {
