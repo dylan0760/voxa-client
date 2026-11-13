@@ -89,6 +89,19 @@ server needs a newer version, Voxa tells you and opens the update window.
 * **Pinned messages** (Voxa Server 1.8.0+): pin messages with 📌 (hover or right-click).
   A **📌 Pinned** bar at the top of the chat lists them. Needs the **Pin messages**
   permission.
+* **Direct messages** are kept **only on your PC**, never on the server, encrypted for
+  your Windows account.
+  * Delete single messages or a whole conversation (🗑 in its header). That removes your
+    copy only; the other person keeps theirs.
+  * Closing a conversation tab keeps its history; open it again from the People list.
+* **👥 People** (top right, Voxa Server 1.13.0+): everyone who has been on the server.
+  * Online people first, with their channel; then offline people with when they were
+    last seen. 💬 marks people you have a saved conversation with.
+  * Click anyone to message them.
+* **Offline messages** (Voxa Server 1.13.0+): message someone who is offline and the
+  server delivers it when they come online.
+  * The server keeps it encrypted until then and deletes it after delivery.
+  * Undelivered messages are dropped after 30 days, and at most 100 can wait per person.
 * **Moderation:**
   * Hover a message for 📋 Copy and 🗑 Delete, or right-click it. Deleted messages
     disappear for everyone and from the stored history.
@@ -154,13 +167,22 @@ server needs a newer version, Voxa tells you and opens the update window.
 * **Personal permissions:** right-click a user ▸ **Permissions…** to grant individual
   permissions on top of their groups (needs *Manage groups*).
 * **Traffic statistics** in the server info panel (admins only).
+* **Web admin page** (Voxa Server 1.14.0+): manage the server from a browser with the
+  same layout and themes. Sign in with an identity exported from Voxa (see the server's
+  README).
 
 ### Everyday conveniences
 * Identities (export/import), bookmarks, and trust-on-first-use server fingerprint
   pinning.
 * **Global hotkeys** under **Options ▸ Hotkeys**. They work in the background and from
-  the tray: mute microphone or speakers, push-to-mute, away, channel commander, start or
-  stop screen sharing, bring Voxa to the front.
+  the tray: push-to-talk, mute microphone or speakers, push-to-mute, away, channel
+  commander, start or stop screen sharing, bring Voxa to the front.
+  * Use any key or mouse button (with Ctrl / Alt / Shift), or a **game controller**
+    button: Xbox controllers (every button, the D-pad, LT / RT), PlayStation
+    controllers, flight sticks, throttles, wheels and other game controllers (buttons
+    and the hat switch).
+  * Each action can have **several bindings**: **+ Add** another, ✖ removes one. Any of
+    them triggers the action.
 * **`voxa://host:port` links:** Voxa asks before connecting, because any web page can
   open such a link.
 * **System tray:** closing the window (✕) keeps Voxa running in the notification area.
@@ -185,6 +207,9 @@ Lossless channels need about 0.8–1.5 Mbit/s per listener, sent by the server.
 * **Voice:** ChaCha20-Poly1305 with a per-session key and replay protection.
 * **Your identity and saved passwords** are encrypted in `settings.json` with Windows
   data protection for your user account.
+* **Direct messages** are stored in `%APPDATA%\Voxa\dm`, encrypted with ChaCha20-Poly1305
+  under a random key that Windows data protection guards for your account. Each file is
+  bound to its server, so it can't be read under another server or by another user.
 * **Updates** are only installed from github.com, and only if they match the SHA-256
   checksum GitHub publishes. Windows' own `msiexec` installs them.
 * **Downloads and chat content:**
