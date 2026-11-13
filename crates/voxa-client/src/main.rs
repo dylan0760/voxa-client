@@ -8,6 +8,8 @@ mod audio;
 mod chat_images;
 mod capture;
 mod config;
+#[cfg(windows)]
+mod dda;
 mod dialogs;
 mod emoji;
 mod highlight;

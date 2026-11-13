@@ -165,7 +165,8 @@ mod imp {
         Some(Captured { w: w as u32, h: h as u32, bgra: buf })
     }
 
-    unsafe fn draw_cursor(mem: HDC, ox: i32, oy: i32) {
+    /// Draws the mouse cursor onto `mem` whose top left corner is desktop point (ox, oy).
+    pub unsafe fn draw_cursor(mem: HDC, ox: i32, oy: i32) {
         let mut ci = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
         if GetCursorInfo(&mut ci).is_ok() && ci.flags.0 & CURSOR_SHOWING.0 != 0 {
             let mut ii = ICONINFO::default();
@@ -181,6 +182,84 @@ mod imp {
                 (0, 0)
             };
             let _ = DrawIconEx(mem, ci.ptScreenPos.x - ox - hx, ci.ptScreenPos.y - oy - hy, ci.hCursor.into(), 0, 0, 0, None, DI_NORMAL);
+        }
+    }
+
+    /// Captures one monitor again and again, reusing the same bitmap: the pixels land
+    /// directly in memory Voxa can read (a DIB section), so every frame costs one copy of
+    /// the screen instead of allocating, copying and converting a bitmap each time.
+    pub struct Grabber {
+        screen: HDC,
+        mem: HDC,
+        bmp: HBITMAP,
+        old: HGDIOBJ,
+        bits: *const u8,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        rop: ROP_CODE,
+    }
+
+    // The GDI handles are only used from the thread that owns the grabber.
+    unsafe impl Send for Grabber {}
+
+    impl Grabber {
+        /// None for application windows (they use `capture`).
+        pub fn new(src: &Source, capture_blt: bool) -> Option<Grabber> {
+            let Source::Monitor { x, y, w, h, .. } = *src else { return None };
+            if w <= 0 || h <= 0 {
+                return None;
+            }
+            unsafe {
+                let screen = GetDC(None);
+                let mem = CreateCompatibleDC(Some(screen));
+                let mut bi = BITMAPINFO::default();
+                bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+                bi.bmiHeader.biWidth = w;
+                bi.bmiHeader.biHeight = -h; // top-down
+                bi.bmiHeader.biPlanes = 1;
+                bi.bmiHeader.biBitCount = 32;
+                bi.bmiHeader.biCompression = BI_RGB.0;
+                let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+                let Ok(bmp) = CreateDIBSection(Some(mem), &bi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+                    let _ = DeleteDC(mem);
+                    ReleaseDC(None, screen);
+                    return None;
+                };
+                if bits.is_null() {
+                    let _ = DeleteObject(bmp.into());
+                    let _ = DeleteDC(mem);
+                    ReleaseDC(None, screen);
+                    return None;
+                }
+                let old = SelectObject(mem, bmp.into());
+                let rop = if capture_blt { SRCCOPY | CAPTUREBLT } else { SRCCOPY };
+                Some(Grabber { screen, mem, bmp, old, bits: bits as *const u8, x, y, w, h, rop })
+            }
+        }
+
+        pub fn grab(&mut self) -> Option<Captured> {
+            unsafe {
+                BitBlt(self.mem, 0, 0, self.w, self.h, Some(self.screen), self.x, self.y, self.rop).ok()?;
+                draw_cursor(self.mem, self.x, self.y);
+                // GDI may batch drawing: make sure the pixels are in memory before reading.
+                let _ = GdiFlush();
+                let len = (self.w as usize) * (self.h as usize) * 4;
+                let bgra = std::slice::from_raw_parts(self.bits, len).to_vec();
+                Some(Captured { w: self.w as u32, h: self.h as u32, bgra })
+            }
+        }
+    }
+
+    impl Drop for Grabber {
+        fn drop(&mut self) {
+            unsafe {
+                SelectObject(self.mem, self.old);
+                let _ = DeleteObject(self.bmp.into());
+                let _ = DeleteDC(self.mem);
+                ReleaseDC(None, self.screen);
+            }
         }
     }
 
@@ -236,7 +315,97 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{capture, sources};
+pub use imp::{capture, draw_cursor as draw_cursor_at, sources, Grabber};
+
+/// Capture for screen sharing. Monitors use desktop duplication (fast, GPU based) and fall
+/// back to GDI while that is unavailable (UAC prompt, remote desktop, some full-screen
+/// games); application windows are captured with `capture`.
+#[cfg(windows)]
+pub struct Capturer {
+    src: Source,
+    dda: Option<crate::dda::Duplicator>,
+    gdi: Option<Grabber>,
+    /// When to try desktop duplication again after it failed.
+    retry: std::time::Instant,
+    /// How often desktop duplication was lost, and why the last time (diagnostics).
+    pub lost: u64,
+    pub lost_reason: String,
+}
+
+#[cfg(windows)]
+impl Capturer {
+    pub fn new(src: Source) -> Capturer {
+        Capturer { src, dda: None, gdi: None, retry: std::time::Instant::now(), lost: 0, lost_reason: String::new() }
+    }
+
+    /// Monitor device name (`DISPLAY1`) of a monitor source.
+    fn device(&self) -> Option<&str> {
+        match &self.src {
+            Source::Monitor { name, .. } => name.split(" (").next(),
+            Source::Window { .. } => None,
+        }
+    }
+
+    /// True while the fast path is in use (for tests and diagnostics).
+    #[allow(dead_code)]
+    pub fn fast(&self) -> bool {
+        self.dda.is_some()
+    }
+
+    /// New desktop images delivered by desktop duplication so far (diagnostics).
+    #[allow(dead_code)]
+    pub fn new_images(&self) -> u64 {
+        self.dda.as_ref().map(|d| d.new_images).unwrap_or(0)
+    }
+
+    pub fn grab(&mut self) -> Option<Captured> {
+        let Some(device) = self.device().map(str::to_string) else { return capture(&self.src) };
+        if self.dda.is_none() && std::time::Instant::now() >= self.retry {
+            match crate::dda::Duplicator::new(&device) {
+                Ok(d) => self.dda = Some(d),
+                Err(e) => {
+                    if self.gdi.is_none() {
+                        eprintln!("desktop duplication unavailable ({e}), using GDI");
+                    }
+                    self.retry = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                }
+            }
+        }
+        if let Some(d) = &mut self.dda {
+            match d.grab(0) {
+                crate::dda::Grab::Frame(c) => return Some(c),
+                crate::dda::Grab::Lost => {
+                    self.lost += 1;
+                    if let Some(d) = &self.dda {
+                        self.lost_reason = d.last_error.clone();
+                    }
+                    self.dda = None;
+                    self.retry = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                }
+            }
+        }
+        if self.gdi.is_none() {
+            self.gdi = Grabber::new(&self.src, true);
+        }
+        match &mut self.gdi {
+            Some(g) => g.grab(),
+            None => capture(&self.src),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub struct Capturer(Source);
+
+#[cfg(not(windows))]
+impl Capturer {
+    pub fn new(src: Source) -> Capturer {
+        Capturer(src)
+    }
+    pub fn grab(&mut self) -> Option<Captured> {
+        capture(&self.0)
+    }
+}
 
 #[cfg(not(windows))]
 pub fn sources() -> Vec<Source> {

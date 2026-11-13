@@ -756,7 +756,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             2 => {
                 egui::Grid::new("ss").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                     form_row(ui, "Frame rate:", |ui| {
-                        ui.add(egui::Slider::new(&mut d.stream.fps, 1..=30).suffix(" fps"));
+                        ui.add(egui::Slider::new(&mut d.stream.fps, 1..=60).suffix(" fps"));
                     });
                     form_row(ui, "Maximum width:", |ui| {
                         egui::ComboBox::from_id_salt("ssw").selected_text(format!("{} px", d.stream.max_width)).show_ui(ui, |ui| {
@@ -1840,7 +1840,7 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             ui.separator();
             ui.horizontal_wrapped(|ui| {
                 ui.label("Frame rate:");
-                ui.add(egui::Slider::new(&mut d.settings.fps, 1..=30).suffix(" fps"));
+                ui.add(egui::Slider::new(&mut d.settings.fps, 1..=60).suffix(" fps"));
                 ui.add_space(8.0);
                 ui.label("Quality:");
                 ui.add(egui::Slider::new(&mut d.settings.quality, 20..=95));

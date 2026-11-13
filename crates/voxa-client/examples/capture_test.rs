@@ -5,6 +5,9 @@
 #[path = "../src/capture.rs"]
 #[allow(dead_code)]
 mod capture;
+#[path = "../src/dda.rs"]
+#[allow(dead_code)]
+mod dda;
 
 fn main() {
     let title = std::env::args().nth(1).unwrap_or("Voxa".into());
