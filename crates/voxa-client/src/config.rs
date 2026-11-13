@@ -91,9 +91,21 @@ impl ThemeKind {
     }
 }
 
+/// Where the sound I transmit comes from.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub enum CaptureSource {
+    #[default]
+    Microphone,
+    /// Everything the PC plays, except Voxa itself (no echo of the voice chat).
+    SystemSound,
+    /// One application (by program file name, e.g. `Spotify.exe`) and its child processes.
+    Application(String),
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct AudioSettings {
+    pub source: CaptureSource,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
     pub mode: VoiceMode,
@@ -112,6 +124,7 @@ pub struct AudioSettings {
 impl Default for AudioSettings {
     fn default() -> Self {
         AudioSettings {
+            source: CaptureSource::Microphone,
             input_device: None,
             output_device: None,
             mode: VoiceMode::VoiceActivation,
@@ -171,6 +184,8 @@ pub struct Settings {
     pub recent_emoji: Vec<String>,
     /// Show previews (and the in-app player) for YouTube links in chat.
     pub link_previews: bool,
+    /// Open screen shares in my channel automatically.
+    pub auto_watch_streams: bool,
     /// Most redraws per second (0 = as fast as the monitor refreshes).
     pub max_fps: u32,
     /// Global hotkeys (Options > Hotkeys).
@@ -203,6 +218,7 @@ impl Default for Settings {
             auto_update: true,
             recent_emoji: Vec::new(),
             link_previews: true,
+            auto_watch_streams: true,
             max_fps: 60,
             hotkeys: Vec::new(),
             last_seen_version: String::new(),

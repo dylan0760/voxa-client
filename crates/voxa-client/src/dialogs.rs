@@ -70,6 +70,25 @@ pub struct OptionsDlg {
     pub capturing_key: bool,
     pub hotkeys: Vec<crate::hotkeys::HotkeyEntry>,
     pub capturing_hotkey: Option<crate::hotkeys::HotkeyAction>,
+    /// Running applications that can be captured: (program file, window title).
+    pub apps: Vec<(String, String)>,
+    pub mic_test: crate::audio::MicTest,
+    pub mic_test_error: Option<String>,
+    pub auto_watch: bool,
+}
+
+/// Running applications for "Capture from": one entry per program (first window title).
+fn capture_apps() -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = Vec::new();
+    for s in crate::capture::sources() {
+        if let crate::capture::Source::Window { app, title, .. } = s {
+            if !app.is_empty() && !v.iter().any(|(a, _)| a.eq_ignore_ascii_case(&app)) {
+                v.push((app, title));
+            }
+        }
+    }
+    v.sort_by_key(|(a, _)| a.to_lowercase());
+    v
 }
 
 pub struct IdentitiesDlg {
@@ -410,6 +429,10 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         capturing_key: false,
         hotkeys: s.hotkeys.clone(),
         capturing_hotkey: None,
+        apps: capture_apps(),
+        mic_test: Default::default(),
+        mic_test_error: None,
+        auto_watch: s.auto_watch_streams,
     }
 }
 
@@ -664,17 +687,48 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         match d.tab {
             0 => {
                 egui::Grid::new("cap").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                    form_row(ui, "Capture device:", |ui| {
-                        egui::ComboBox::from_id_salt("indev")
-                            .width(300.0)
-                            .selected_text(d.audio.input_device.clone().unwrap_or("Default".into()))
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut d.audio.input_device, None, "Default");
-                                for n in &d.inputs {
-                                    ui.selectable_value(&mut d.audio.input_device, Some(n.clone()), n);
-                                }
-                            });
+                    form_row(ui, "Capture from:", |ui| {
+                        let label = |s: &CaptureSource| match s {
+                            CaptureSource::Microphone => "🎙 Microphone".to_string(),
+                            CaptureSource::SystemSound => "🔊 System sound (everything except Voxa)".to_string(),
+                            CaptureSource::Application(a) => format!("🎵 {a}"),
+                        };
+                        egui::ComboBox::from_id_salt("capsrc").width(300.0).selected_text(label(&d.audio.source)).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut d.audio.source, CaptureSource::Microphone, label(&CaptureSource::Microphone));
+                            ui.selectable_value(&mut d.audio.source, CaptureSource::SystemSound, label(&CaptureSource::SystemSound));
+                            ui.separator();
+                            ui.label(RichText::new("Only this application:").small().weak());
+                            for (app_name, title) in &d.apps {
+                                let src = CaptureSource::Application(app_name.clone());
+                                ui.selectable_value(&mut d.audio.source, src, format!("🎵 {app_name}")).on_hover_text(title);
+                            }
+                        });
+                        if ui.small_button("⟳").on_hover_text("Refresh the list of applications").clicked() {
+                            d.apps = capture_apps();
+                        }
                     });
+                    if d.audio.source != CaptureSource::Microphone {
+                        form_row(ui, "", |ui| {
+                            ui.label(
+                                RichText::new("You transmit this sound instead of your microphone (for example music). Use a channel with the Opus Music codec for the best quality, and Continuous Transmission so quiet parts are not cut off.")
+                                    .small()
+                                    .weak(),
+                            );
+                        });
+                    }
+                    if d.audio.source == CaptureSource::Microphone {
+                        form_row(ui, "Capture device:", |ui| {
+                            egui::ComboBox::from_id_salt("indev")
+                                .width(300.0)
+                                .selected_text(d.audio.input_device.clone().unwrap_or("Default".into()))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut d.audio.input_device, None, "Default");
+                                    for n in &d.inputs {
+                                        ui.selectable_value(&mut d.audio.input_device, Some(n.clone()), n);
+                                    }
+                                });
+                        });
+                    }
                     form_row(ui, "Transmission:", |ui| {
                         ui.vertical(|ui| {
                             ui.radio_value(&mut d.audio.mode, VoiceMode::PushToTalk, "Push-To-Talk");
@@ -704,7 +758,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             ui.add(egui::Slider::new(&mut d.audio.vad_threshold_db, -70.0..=0.0).suffix(" dB"));
                         });
                     }
-                    form_row(ui, "Microphone boost:", |ui| {
+                    form_row(ui, if d.audio.source == CaptureSource::Microphone { "Microphone boost:" } else { "Volume:" }, |ui| {
                         ui.add(egui::Slider::new(&mut d.audio.input_gain, 0.1..=4.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
                     });
                     form_row(ui, "Input level:", |ui| {
@@ -715,8 +769,11 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             ui.add(egui::ProgressBar::new(frac).desired_width(260.0).text(format!("{db:.0} dB")).fill(if over { Color32::from_rgb(0x4C, 0xC0, 0x5A) } else { Color32::GRAY }));
                             ctx.request_repaint();
                         } else {
-                            ui.label(RichText::new("Connect to a server to see the live level").weak());
+                            ui.label(RichText::new("Connect to a server to see the live level (or record a test below)").weak());
                         }
+                    });
+                    form_row(ui, "Test:", |ui| {
+                        mic_test_ui(ui, &mut d, &app.voice_shared);
                     });
                 });
             }
@@ -755,6 +812,10 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             }
             2 => {
                 egui::Grid::new("ss").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                    form_row(ui, "Watching:", |ui| {
+                        ui.checkbox(&mut d.auto_watch, "Open screen shares in my channel automatically")
+                            .on_hover_text("When someone in your channel starts sharing, their screen opens above the chat. With several streams, use the tabs to switch.");
+                    });
                     form_row(ui, "Frame rate:", |ui| {
                         ui.add(egui::Slider::new(&mut d.stream.fps, 1..=60).suffix(" fps"));
                     });
@@ -893,7 +954,10 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         });
     });
     if apply {
-        let devices_changed = d.audio.input_device != app.settings.audio.input_device || d.audio.output_device != app.settings.audio.output_device;
+        let devices_changed = d.audio.input_device != app.settings.audio.input_device
+            || d.audio.output_device != app.settings.audio.output_device
+            || d.audio.source != app.settings.audio.source;
+        app.settings.auto_watch_streams = d.auto_watch;
         app.settings.audio = d.audio.clone();
         app.settings.stream = d.stream.clone();
         if !d.nickname.trim().is_empty() {
@@ -920,6 +984,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         app.dlg.options = Some(d);
     } else {
         app.hotkeys.paused.store(false, std::sync::atomic::Ordering::Relaxed);
+        app.voice_shared.testing.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1054,10 +1119,26 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     ui.add(egui::DragValue::new(&mut d.max).range(1..=1000));
                 }
             });
+            // Opus Music needs servers 1.10.0+ (older ones would drop the codec choice).
+            let music_ok = s.supports("1.10.0");
+            let mut codec = voxa_proto::codec_of(d.edit.codec_quality);
+            let mut quality = voxa_proto::quality_of(d.edit.codec_quality);
+            if music_ok {
+                form_row(ui, "Codec:", |ui| {
+                    ui.vertical(|ui| {
+                        ui.radio_value(&mut codec, voxa_proto::VoiceCodec::OpusVoice, "Opus Voice").on_hover_text("Mono, tuned for speech. Best for talking.");
+                        ui.radio_value(&mut codec, voxa_proto::VoiceCodec::OpusMusic, "Opus Music").on_hover_text("Stereo, full sound quality, higher bitrate. For playing music; use Continuous transmission or push-to-talk so quiet passages are not cut off.");
+                    });
+                });
+            } else {
+                codec = voxa_proto::VoiceCodec::OpusVoice;
+            }
             form_row(ui, "Codec quality:", |ui| {
-                ui.add(egui::Slider::new(&mut d.edit.codec_quality, 0..=10));
-                ui.label(format!("~{} kbit/s", quality_to_bitrate(d.edit.codec_quality) / 1000));
+                ui.add(egui::Slider::new(&mut quality, 0..=10));
+                let packed = voxa_proto::pack_codec(codec, quality);
+                ui.label(format!("~{} kbit/s{}", voxa_proto::channel_bitrate(packed) / 1000, if codec.stereo() { " stereo" } else { "" }));
             });
+            d.edit.codec_quality = voxa_proto::pack_codec(codec, quality);
             form_row(ui, "Needed talk power:", |ui| {
                 ui.add(egui::DragValue::new(&mut d.edit.needed_talk_power).range(0..=100));
             });
@@ -2372,4 +2453,45 @@ fn theme_choice(ui: &mut Ui, current: &mut crate::config::ThemeKind, kind: crate
         ui.radio_value(current, kind, kind.name());
         ui.add_space(6.0);
     });
+}
+
+/// Record a short test with the capture settings shown (not yet applied) and play it
+/// back. Nothing is transmitted while recording.
+fn mic_test_ui(ui: &mut Ui, d: &mut OptionsDlg, shared: &crate::audio::VoiceShared) {
+    use std::sync::atomic::Ordering;
+    let OptionsDlg { mic_test: t, mic_test_error: err, audio, .. } = d;
+    t.poll();
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            if t.recording() {
+                if ui.button(format!("⏹ Stop recording ({:.1} s)", t.seconds())).clicked() {
+                    t.stop();
+                }
+                let frac = ((t.level_db() + 70.0) / 70.0).clamp(0.0, 1.0);
+                ui.add(egui::ProgressBar::new(frac).desired_width(140.0).text(format!("{:.0} dB", t.level_db())));
+                ui.ctx().request_repaint();
+            } else {
+                let label = if t.has_clip() { "⏺ Record again" } else { "⏺ Record a test" };
+                if ui.button(label).on_hover_text(format!("Records up to {} seconds so you can hear how you sound", crate::audio::MIC_TEST_SECONDS as u32)).clicked() {
+                    *err = t.start(audio).err();
+                }
+                if t.has_clip() {
+                    if t.playing() {
+                        if ui.button(format!("⏹ Stop ({:.1} / {:.1} s)", t.played(), t.seconds())).clicked() {
+                            t.stop_playing();
+                        }
+                        ui.ctx().request_repaint();
+                    } else if ui.button(format!("▶ Play back ({:.1} s)", t.seconds())).clicked() {
+                        *err = t.play(audio).err();
+                    }
+                }
+            }
+        });
+        if let Some(e) = err.as_ref() {
+            ui.label(RichText::new(e).small().color(Color32::from_rgb(0xED, 0x42, 0x45)));
+        } else if t.recording() {
+            ui.label(RichText::new("Recording... you are not transmitting meanwhile.").small().weak());
+        }
+    });
+    shared.testing.store(t.recording(), Ordering::Relaxed);
 }

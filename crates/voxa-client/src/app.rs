@@ -230,6 +230,29 @@ pub struct Session {
     pub pins: HashMap<TextTarget, Vec<PinnedMessage>>,
     /// The pinned messages list above the chat is expanded.
     pub pins_open: bool,
+    /// Screen shares (and the video player) shown above the chat.
+    pub stage: Stage,
+}
+
+/// Something shown on the stage above the chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageItem {
+    Stream(ClientId),
+    Player,
+}
+
+/// Which screen shares are open. Streams in my channel open by themselves (unless that
+/// is turned off); one is shown at a time with tabs to switch, or all side by side.
+#[derive(Default)]
+pub struct Stage {
+    pub selected: Option<StageItem>,
+    pub side_by_side: bool,
+    /// Streams I closed (they stay closed until they end or I open them again).
+    pub dismissed: HashSet<ClientId>,
+    /// Streams I opened myself (needed when automatic opening is off).
+    pub opened: HashSet<ClientId>,
+    /// Streams seen last frame (a new one is brought to the front).
+    known: HashSet<ClientId>,
 }
 
 impl Session {
@@ -279,6 +302,26 @@ impl Session {
         let id = self.next_transfer;
         self.next_transfer += 1;
         self.transfers.insert(id, t);
+    }
+
+    /// Screen shares on the stage: my own preview first, then the streams of my channel
+    /// that are open (automatically, or because I opened them).
+    pub fn stage_streams(&self, auto: bool) -> Vec<ClientId> {
+        let mut v = Vec::new();
+        if self.streamer.as_ref().map(|st| st.preview_on.load(Ordering::Relaxed)).unwrap_or(false) {
+            v.push(self.me);
+        }
+        let ch = self.my_channel();
+        let mut others: Vec<ClientId> = self
+            .clients
+            .values()
+            .filter(|c| c.id != self.me && c.channel == ch && c.streaming.is_some())
+            .filter(|c| if auto { !self.stage.dismissed.contains(&c.id) } else { self.stage.opened.contains(&c.id) })
+            .map(|c| c.id)
+            .collect();
+        others.sort();
+        v.extend(others);
+        v
     }
 
     /// Asks for the pinned messages of a chat (servers 1.8.0+).
@@ -536,11 +579,12 @@ impl VoxaApp {
                     crate::dialogs::start_share(self, &ctx, src, settings);
                 }
             }
-            // Options on the Application tab (theme picker).
-            "options" => {
+            // Options, on the Application tab (theme picker) or `options:<tab>`.
+            w if w.starts_with("options") => {
+                let tab = w.strip_prefix("options:").and_then(|t| t.parse().ok()).unwrap_or(4);
                 crate::ui::apply(self, crate::ui::Action::Dialog(crate::dialogs::Open::Options));
                 if let Some(d) = &mut self.dlg.options {
-                    d.tab = 4;
+                    d.tab = tab;
                 }
             }
             "pins" => {
@@ -773,6 +817,7 @@ impl VoxaApp {
             images: Default::default(),
             pins: HashMap::new(),
             pins_open: false,
+            stage: Stage::default(),
         };
         sess.log(EventKind::Info, format!("Trying to connect to {} ({})...", req.label, req.address));
         self.sess = Some(sess);
@@ -792,6 +837,77 @@ impl VoxaApp {
         self.dlg.close_session_dialogs();
     }
 
+    /// Opens / closes screen shares to match the stage: the stream shown (or all of
+    /// them side by side) is watched, the others are not (no data, no sound). Runs every
+    /// frame; a stream that just started in my channel is brought to the front.
+    pub fn sync_stage(&mut self) {
+        let auto = self.settings.auto_watch_streams;
+        let player_on = self.player.video.is_some() && !self.player.full;
+        let Some(s) = &mut self.sess else { return };
+        if !s.welcomed {
+            return;
+        }
+        // Forget closed / opened streams that ended or left my channel.
+        let ch = s.my_channel();
+        let live: HashSet<ClientId> = s.clients.values().filter(|c| c.channel == ch && c.streaming.is_some() && c.id != s.me).map(|c| c.id).collect();
+        s.stage.dismissed.retain(|id| live.contains(id));
+        s.stage.opened.retain(|id| live.contains(id));
+        let streams = s.stage_streams(auto);
+        let mut items: Vec<StageItem> = streams.iter().map(|id| StageItem::Stream(*id)).collect();
+        if player_on {
+            items.push(StageItem::Player);
+        }
+        let me = s.me;
+        let new: Vec<ClientId> = streams.iter().copied().filter(|id| *id != me && !s.stage.known.contains(id)).collect();
+        s.stage.known = streams.iter().copied().collect();
+        let showing_other = matches!(s.stage.selected, Some(StageItem::Stream(id)) if id != me && items.contains(&StageItem::Stream(id)));
+        if let Some(id) = new.first().filter(|_| !showing_other) {
+            s.stage.selected = Some(StageItem::Stream(*id));
+        }
+        if !s.stage.selected.map(|i| items.contains(&i)).unwrap_or(false) {
+            s.stage.selected = items.iter().copied().find(|i| matches!(i, StageItem::Stream(id) if *id != me)).or(items.first().copied());
+        }
+        if items.len() < 2 {
+            s.stage.side_by_side = false;
+        }
+        let want: HashSet<ClientId> = if s.stage.side_by_side {
+            streams.iter().copied().filter(|id| *id != me).collect()
+        } else {
+            match s.stage.selected {
+                Some(StageItem::Stream(id)) if id != me => HashSet::from([id]),
+                _ => HashSet::new(),
+            }
+        };
+        if !s.bulk_ready {
+            return;
+        }
+        let start: Vec<ClientId> = want.difference(&s.watching).copied().collect();
+        let stop: Vec<ClientId> = s.watching.difference(&want).copied().collect();
+        for id in stop {
+            self.set_watching(id, false);
+        }
+        for id in start {
+            self.set_watching(id, true);
+        }
+    }
+
+    /// Starts / stops receiving a screen share (frames and sound).
+    pub fn set_watching(&mut self, id: ClientId, watch: bool) {
+        let Some(s) = &mut self.sess else { return };
+        if watch {
+            s.watching.insert(id);
+        } else {
+            s.watching.remove(&id);
+            s.viewer.clear(id);
+            self.voice_shared.stop_stream_audio(id);
+            self.textures.remove(&id);
+            if self.fullscreen_stream == Some(id) {
+                self.fullscreen_stream = None;
+            }
+        }
+        s.conn.send(C2S::WatchStream { streamer: id, watch });
+    }
+
     pub fn update_voice_flags(&mut self) {
         let Some(s) = &self.sess else { return };
         let Some(me) = s.me() else { return };
@@ -800,7 +916,8 @@ impl VoxaApp {
         self.voice_shared.input_muted.store(me.input_muted, Ordering::Relaxed);
         self.voice_shared.output_muted.store(me.output_muted, Ordering::Relaxed);
         let q = s.channels.get(&me.channel).map(|c| c.codec_quality).unwrap_or(6);
-        self.voice_shared.bitrate.store(quality_to_bitrate(q), Ordering::Relaxed);
+        self.voice_shared.bitrate.store(voxa_proto::channel_bitrate(q), Ordering::Relaxed);
+        self.voice_shared.music.store(voxa_proto::codec_of(q).stereo(), Ordering::Relaxed);
     }
 
     pub fn restart_voice(&mut self) {
@@ -830,6 +947,7 @@ impl VoxaApp {
         }
         #[cfg(debug_assertions)]
         self.debug_hooks();
+        self.sync_stage();
         // Streamer errors.
         if let Some(s) = &mut self.sess {
             let err = s.streamer.as_ref().and_then(|st| st.error.lock().take());
@@ -897,7 +1015,12 @@ impl VoxaApp {
                     self.offline_log = ChatLog::default();
                     let text = if was_welcomed { format!("Disconnected: {reason}") } else { format!("Failed to connect: {reason}") };
                     self.offline_log.lines.push(ChatLine::Event { ts: now_unix(), text: text.clone(), kind: EventKind::Error });
-                    if !reason.starts_with("Disconnected") && reason != "Server identity changed" {
+                    if reason.starts_with(voxa_proto::UPDATE_REQUIRED) {
+                        // The server needs a newer Voxa: offer the update right away.
+                        self.dlg.update = true;
+                        self.updater.check();
+                        self.dlg.error = Some(format!("{}\n\nThe update window is open: install the update, then connect again.", reason.trim_start_matches(voxa_proto::UPDATE_REQUIRED)));
+                    } else if !reason.starts_with("Disconnected") && reason != "Server identity changed" {
                         self.dlg.error = Some(text);
                     }
                     self.voice_shared.play_tones(&[(440.0, 90), (330.0, 120)]);

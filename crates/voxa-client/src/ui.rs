@@ -1415,7 +1415,7 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
                     Some(m) => format!("{} / {m}", s.clients_in(id).len()),
                     None => format!("{} / unlimited", s.clients_in(id).len()),
                 });
-                grid_row(ui, "Codec", format!("Opus, quality {} (~{} kbit/s)", c.codec_quality, quality_to_bitrate(c.codec_quality) / 1000));
+                grid_row(ui, "Codec", format!("{}, quality {} (~{} kbit/s)", voxa_proto::codec_of(c.codec_quality).name(), voxa_proto::quality_of(c.codec_quality), voxa_proto::channel_bitrate(c.codec_quality) / 1000));
                 grid_row(ui, "Encryption", "Encrypted voice");
                 grid_row(ui, "Talk power", c.needed_talk_power.to_string());
                 grid_row(ui, "Join power", if c.needed_join_power > 0 { c.needed_join_power.to_string() } else { "Anyone".into() });
@@ -1575,48 +1575,79 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
         });
     });
 
-    // Stage with watched screen shares (and the preview of my own stream first).
-    let mut watching: Vec<ClientId> = s.watching.iter().copied().collect();
-    if s.streamer.as_ref().map(|st| st.preview_on.load(Ordering::Relaxed)).unwrap_or(false) {
-        watching.retain(|id| *id != s.me);
-        watching.insert(0, s.me);
-    }
+    // Stage above the chat: screen shares (my own preview first) and the video player.
+    // One is shown at a time with tabs to switch, or all side by side.
+    use crate::app::StageItem;
+    let streams = s.stage_streams(app.settings.auto_watch_streams);
     let player_on = app.player.video.is_some() && !app.player.full;
-    if !watching.is_empty() || player_on {
+    let mut items: Vec<StageItem> = streams.iter().map(|id| StageItem::Stream(*id)).collect();
+    if player_on {
+        items.push(StageItem::Player);
+    }
+    let me = s.me;
+    let selected = s.stage.selected;
+    let side_by_side = s.stage.side_by_side;
+    let tab_label = |item: StageItem| match item {
+        StageItem::Stream(id) if id == me => "📺 Your stream".to_string(),
+        StageItem::Stream(id) => format!("🔴 {}", s.client_name(id)),
+        StageItem::Player => "▶ Video".to_string(),
+    };
+    let labels: Vec<(StageItem, String)> = items.iter().map(|i| (*i, tab_label(*i))).collect();
+    if !items.is_empty() {
         egui::Panel::top("stage")
             .resizable(true)
-            .default_size(340.0)
-            .min_size(160.0)
+            .default_size(360.0)
+            .min_size(180.0)
             .frame(Frame::new().fill(t.rail).inner_margin(Margin::same(8)))
             .show(ui, |ui| {
-                let n = watching.len() as f32 + if player_on { 1.0 } else { 0.0 };
+                if items.len() > 1 {
+                    ui.horizontal(|ui| {
+                        for (item, label) in &labels {
+                            let on = !side_by_side && selected == Some(*item);
+                            let b = egui::Button::new(RichText::new(label).color(if on { Color32::WHITE } else { t.dim }))
+                                .fill(if on { accent() } else { t.card })
+                                .corner_radius(12);
+                            if ui.add(b).on_hover_text("Show this stream").clicked() {
+                                if let Some(s) = &mut app.sess {
+                                    s.stage.selected = Some(*item);
+                                    s.stage.side_by_side = false;
+                                }
+                            }
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let b = egui::Button::new(RichText::new("⊞ Side by side").color(if side_by_side { Color32::WHITE } else { t.dim }))
+                                .fill(if side_by_side { accent() } else { t.card })
+                                .corner_radius(12);
+                            if ui.add(b).on_hover_text("Show all streams next to each other").clicked() {
+                                if let Some(s) = &mut app.sess {
+                                    s.stage.side_by_side = !side_by_side;
+                                }
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                }
+                let shown: Vec<StageItem> = if side_by_side { items.clone() } else { selected.into_iter().filter(|i| items.contains(i)).collect() };
+                let n = shown.len().max(1) as f32;
                 let w = (ui.available_width() - (n - 1.0) * 8.0) / n;
                 let h = ui.available_height();
                 ui.horizontal(|ui| {
-                    if player_on {
+                    for item in shown {
+                        // Top-down inside each tile: header bar above the picture.
                         ui.allocate_ui_with_layout(egui::vec2(w, h), Layout::top_down(Align::Min), |ui| {
                             Frame::new().fill(Color32::BLACK).corner_radius(8).show(ui, |ui| {
                                 ui.set_min_size(egui::vec2(w, h));
                                 ui.set_max_size(egui::vec2(w, h));
-                                player_view(app, ui);
-                            });
-                        });
-                    }
-                    for id in watching {
-                        // Top-down inside each tile: header bar above the picture (the row
-                        // itself is horizontal).
-                        ui.allocate_ui_with_layout(egui::vec2(w, h), Layout::top_down(Align::Min), |ui| {
-                            Frame::new().fill(Color32::BLACK).corner_radius(8).show(ui, |ui| {
-                                ui.set_min_size(egui::vec2(w, h));
-                                ui.set_max_size(egui::vec2(w, h));
-                                stream_view(app, ui, id, false);
+                                match item {
+                                    StageItem::Player => player_view(app, ui),
+                                    StageItem::Stream(id) => stream_view(app, ui, id, false),
+                                }
                             });
                         });
                     }
                 });
             });
-    }
-    let Some(s) = &mut app.sess else { return };
+    }    let Some(s) = &mut app.sess else { return };
     // Images dragged in from Explorer are sent to the open chat (unless the file browser
     // is open, which takes the drop as an upload).
     if app.dlg.files.is_none() {
@@ -2340,22 +2371,19 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
                     }
                     return;
                 }
+                // Others' streams: open it as a tab and show it, or close it. The stage
+                // (sync_stage) starts / stops receiving it.
                 if watch {
-                    if !s.bulk_ready {
-                        s.log(EventKind::Warn, "Stream connection not ready yet, try again in a moment");
-                        return;
-                    }
-                    s.watching.insert(id);
+                    s.stage.dismissed.remove(&id);
+                    s.stage.opened.insert(id);
+                    s.stage.selected = Some(crate::app::StageItem::Stream(id));
                 } else {
-                    s.watching.remove(&id);
-                    s.viewer.clear(id);
-                    app.voice_shared.stop_stream_audio(id);
-                    app.textures.remove(&id);
-                    if app.fullscreen_stream == Some(id) {
-                        app.fullscreen_stream = None;
+                    s.stage.dismissed.insert(id);
+                    s.stage.opened.remove(&id);
+                    if s.stage.selected == Some(crate::app::StageItem::Stream(id)) {
+                        s.stage.selected = None;
                     }
                 }
-                s.conn.send(C2S::WatchStream { streamer: id, watch });
             }
         }
         Action::ToggleLocalMute(id) => {

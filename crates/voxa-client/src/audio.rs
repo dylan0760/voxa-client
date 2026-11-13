@@ -14,7 +14,7 @@ use rusty_opus::{Application, OpusDecoder, OpusEncoder};
 use voxa_proto::voice::{self, Direction, Kind, ReplayWindow, VoiceCipher};
 use voxa_proto::{ClientId, FRAME_SAMPLES, SAMPLE_RATE};
 
-use crate::config::{AudioSettings, VoiceMode};
+use crate::config::{AudioSettings, CaptureSource, VoiceMode};
 
 /// Three falling tones: "you are talking while muted".
 pub const MUTED_WARNING: &[(f32, u32)] = &[(880.0, 90), (0.0, 40), (660.0, 90), (0.0, 40), (440.0, 160)];
@@ -78,6 +78,10 @@ pub struct VoiceShared {
     /// voice key stays the same when the audio devices change, and reusing a nonce
     /// with the same key would break the encryption.
     tx_seq: Arc<AtomicU64>,
+    /// My channel uses Opus Music (stereo, full band) instead of Opus Voice.
+    pub music: AtomicBool,
+    /// A microphone test is recording: nothing is transmitted meanwhile.
+    pub testing: AtomicBool,
 }
 
 impl VoiceShared {
@@ -105,6 +109,8 @@ impl VoiceShared {
             settings: Mutex::new(settings),
             effects: Mutex::new(VecDeque::new()),
             tx_seq: Arc::new(AtomicU64::new(1)),
+            music: AtomicBool::new(false),
+            testing: AtomicBool::new(false),
         })
     }
 
@@ -278,11 +284,67 @@ impl Resampler {
     }
 }
 
+/// Resamples interleaved stereo with one Resampler per side.
+struct StereoResampler {
+    l: Resampler,
+    r: Resampler,
+    tmp: [Vec<f32>; 4],
+}
+
+impl StereoResampler {
+    fn new(from: u32, to: u32) -> Self {
+        StereoResampler { l: Resampler::new(from, to), r: Resampler::new(from, to), tmp: Default::default() }
+    }
+
+    fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        let [li, ri, lo, ro] = &mut self.tmp;
+        li.clear();
+        ri.clear();
+        lo.clear();
+        ro.clear();
+        for p in input.chunks_exact(2) {
+            li.push(p[0]);
+            ri.push(p[1]);
+        }
+        self.l.process(li, lo);
+        self.r.process(ri, ro);
+        for (a, b) in lo.iter().zip(ro.iter()) {
+            out.push(*a);
+            out.push(*b);
+        }
+    }
+}
+
+/// Someone talking: decoder and an interleaved stereo queue (mono voice on both sides).
 struct Talker {
     queue: VecDeque<f32>,
     buffering: bool,
     decoder: OpusDecoder,
+    /// The decoder outputs stereo (the talker uses Opus Music).
+    stereo: bool,
     last_seq: Option<u16>,
+}
+
+impl Talker {
+    fn new(stereo: bool) -> Option<Talker> {
+        let decoder = OpusDecoder::new(SAMPLE_RATE as i32, if stereo { 2 } else { 1 }).ok()?;
+        Some(Talker { queue: VecDeque::new(), buffering: true, decoder, stereo, last_seq: None })
+    }
+
+    /// Decodes a packet (or conceals a lost one when opus is empty) into the queue.
+    fn decode(&mut self, opus: &[u8], pcm: &mut [f32]) {
+        let max = if opus.is_empty() { FRAME_SAMPLES } else { FRAME_SAMPLES * 6 };
+        if let Ok(k) = self.decoder.decode(opus, max, pcm) {
+            if self.stereo {
+                self.queue.extend(pcm[..k * 2].iter().copied());
+            } else {
+                for s in &pcm[..k] {
+                    self.queue.push_back(*s);
+                    self.queue.push_back(*s);
+                }
+            }
+        }
+    }
 }
 
 /// A watched stream's sound: decoder and interleaved stereo queue.
@@ -305,7 +367,7 @@ impl Mixer {
         let frames = out.len() / 2;
         let volumes = shared.volumes.lock().clone();
         for (id, t) in self.talkers.iter_mut() {
-            if t.buffering && t.queue.len() >= FRAME_SAMPLES * 2 {
+            if t.buffering && t.queue.len() >= FRAME_SAMPLES * 2 * 2 {
                 t.buffering = false;
             }
             if t.buffering {
@@ -313,12 +375,12 @@ impl Mixer {
             }
             let vol = volumes.get(id).copied().unwrap_or(1.0);
             for f in 0..frames {
-                match t.queue.pop_front() {
-                    Some(s) => {
-                        out[2 * f] += s * vol;
-                        out[2 * f + 1] += s * vol;
+                match (t.queue.pop_front(), t.queue.pop_front()) {
+                    (Some(l), Some(r)) => {
+                        out[2 * f] += l * vol;
+                        out[2 * f + 1] += r * vol;
                     }
-                    None => {
+                    _ => {
                         t.buffering = true;
                         break;
                     }
@@ -368,6 +430,8 @@ impl Mixer {
 pub struct Voice {
     pub shared: Arc<VoiceShared>,
     _input: Option<cpal::Stream>,
+    /// System / application sound capture (instead of the microphone).
+    _loopback: Option<crate::loopback::Capture>,
     _output: Option<cpal::Stream>,
     pub warnings: Vec<String>,
 }
@@ -393,13 +457,23 @@ impl Voice {
 
         let settings = shared.settings.lock().clone();
         let mut in_rate = SAMPLE_RATE;
-        let input = match build_input(&settings, capture.clone()) {
-            Ok((s, rate)) => {
-                in_rate = rate;
-                Some(s)
-            }
-            Err(e) => {
-                warnings.push(format!("Microphone unavailable: {e}"));
+        let mut loopback = None;
+        let input = match &settings.source {
+            CaptureSource::Microphone => match build_input(&settings, capture.clone()) {
+                Ok((s, rate)) => {
+                    in_rate = rate;
+                    Some(s)
+                }
+                Err(e) => {
+                    warnings.push(format!("Microphone unavailable: {e}"));
+                    None
+                }
+            },
+            source => {
+                match start_loopback(source, capture.clone()) {
+                    Ok(c) => loopback = Some(c),
+                    Err(e) => warnings.push(e),
+                }
                 None
             }
         };
@@ -428,8 +502,34 @@ impl Voice {
                 receiver_loop(sock, cipher, shared, mixer);
             })?;
         }
-        Ok(Voice { shared, _input: input, _output: output, warnings })
+        Ok(Voice { shared, _input: input, _loopback: loopback, _output: output, warnings })
     }
+}
+
+/// Captures system sound or one application's sound (48 kHz stereo) instead of the
+/// microphone.
+fn start_loopback(source: &CaptureSource, capture: Arc<Mutex<VecDeque<f32>>>) -> Result<crate::loopback::Capture, String> {
+    let target = match source {
+        CaptureSource::Microphone => return Err("not a loopback source".into()),
+        CaptureSource::SystemSound => crate::loopback::Target::AllExceptVoxa,
+        CaptureSource::Application(exe) => {
+            let pid = crate::capture::sources().into_iter().find_map(|s| match s {
+                crate::capture::Source::Window { app, hwnd, .. } if app.eq_ignore_ascii_case(exe) => crate::loopback::window_process(hwnd),
+                _ => None,
+            });
+            let pid = pid.ok_or_else(|| format!("{exe} is not running: start it, then press Apply in Options > Capture"))?;
+            crate::loopback::Target::Process(pid)
+        }
+    };
+    let max = crate::loopback::RATE as usize * 2;
+    crate::loopback::start(target, move |pcm| {
+        let mut q = capture.lock();
+        q.extend(pcm.iter().copied());
+        while q.len() > max {
+            q.pop_front();
+        }
+    })
+    .map_err(|e| format!("Sound capture unavailable: {e}"))
 }
 
 fn build_input(settings: &AudioSettings, capture: Arc<Mutex<VecDeque<f32>>>) -> anyhow::Result<(cpal::Stream, u32)> {
@@ -448,14 +548,17 @@ fn build_input(settings: &AudioSettings, capture: Arc<Mutex<VecDeque<f32>>>) -> 
     where
         f32: FromSample<T>,
     {
-        let max = rate as usize;
+        // Interleaved stereo (left, right); a mono microphone fills both sides.
+        let max = rate as usize * 2;
         Ok(dev.build_input_stream::<T, _, _>(
             cfg,
             move |data: &[T], _| {
                 let mut q = capture.lock();
                 for frame in data.chunks(channels.max(1)) {
-                    let s: f32 = frame.iter().map(|s| f32::from_sample(*s)).sum::<f32>() / frame.len() as f32;
-                    q.push_back(s);
+                    let l = f32::from_sample(frame[0]);
+                    let r = frame.get(1).map(|s| f32::from_sample(*s)).unwrap_or(l);
+                    q.push_back(l);
+                    q.push_back(r);
                 }
                 while q.len() > max {
                     q.pop_front();
@@ -544,6 +647,117 @@ fn build_output(settings: &AudioSettings, mixer: Arc<Mutex<Mixer>>, shared: Arc<
     Ok(stream)
 }
 
+/// Longest microphone test recording.
+pub const MIC_TEST_SECONDS: f32 = 15.0;
+
+/// Microphone test (Options > Capture): records a few seconds from the chosen capture
+/// source, with the boost applied, and plays them back. Works without a server.
+#[derive(Default)]
+pub struct MicTest {
+    rec: Option<Recorder>,
+    /// The recording: mono, 48 kHz.
+    clip: Vec<f32>,
+    play: Option<(cpal::Stream, Arc<VoiceShared>)>,
+    level_db: f32,
+}
+
+struct Recorder {
+    _input: Option<cpal::Stream>,
+    _loopback: Option<crate::loopback::Capture>,
+    capture: Arc<Mutex<VecDeque<f32>>>,
+    rs: StereoResampler,
+    gain: f32,
+    tmp: Vec<f32>,
+    stereo: Vec<f32>,
+}
+
+impl MicTest {
+    /// Starts a new recording (stops any playback).
+    pub fn start(&mut self, settings: &AudioSettings) -> Result<(), String> {
+        self.play = None;
+        self.rec = None;
+        self.clip.clear();
+        let capture: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let (input, lb, rate) = match &settings.source {
+            CaptureSource::Microphone => {
+                let (s, rate) = build_input(settings, capture.clone()).map_err(|e| format!("Microphone unavailable: {e}"))?;
+                (Some(s), None, rate)
+            }
+            source => (None, Some(start_loopback(source, capture.clone())?), crate::loopback::RATE),
+        };
+        self.rec = Some(Recorder { _input: input, _loopback: lb, capture, rs: StereoResampler::new(rate, SAMPLE_RATE), gain: settings.input_gain, tmp: Vec::new(), stereo: Vec::new() });
+        Ok(())
+    }
+
+    /// Collects what was captured since the last call (call every frame while recording).
+    /// Stops by itself after `MIC_TEST_SECONDS`.
+    pub fn poll(&mut self) {
+        let Some(r) = &mut self.rec else { return };
+        r.tmp.clear();
+        r.tmp.extend(r.capture.lock().drain(..));
+        r.stereo.clear();
+        r.rs.process(&r.tmp, &mut r.stereo);
+        let start = self.clip.len();
+        self.clip.extend(r.stereo.chunks_exact(2).map(|p| ((p[0] + p[1]) * 0.5 * r.gain).clamp(-1.0, 1.0)));
+        // Level of the last ~50 ms, for the meter.
+        let tail = &self.clip[self.clip.len().saturating_sub(2400)..];
+        if self.clip.len() > start {
+            let rms = (tail.iter().map(|s| s * s).sum::<f32>() / tail.len() as f32).sqrt();
+            self.level_db = if rms > 0.0 { (20.0 * rms.log10()).max(-90.0) } else { -90.0 };
+        }
+        if self.seconds() >= MIC_TEST_SECONDS {
+            self.clip.truncate((MIC_TEST_SECONDS * SAMPLE_RATE as f32) as usize);
+            self.rec = None;
+        }
+    }
+
+    pub fn stop(&mut self) {
+        self.poll();
+        self.rec = None;
+    }
+
+    pub fn recording(&self) -> bool {
+        self.rec.is_some()
+    }
+
+    /// Length of the recording in seconds.
+    pub fn seconds(&self) -> f32 {
+        self.clip.len() as f32 / SAMPLE_RATE as f32
+    }
+
+    pub fn level_db(&self) -> f32 {
+        self.level_db
+    }
+
+    pub fn has_clip(&self) -> bool {
+        !self.clip.is_empty() && self.rec.is_none()
+    }
+
+    /// Plays the recording on the chosen playback device, at the chosen volume.
+    pub fn play(&mut self, settings: &AudioSettings) -> Result<(), String> {
+        self.stop();
+        let shared = VoiceShared::new(settings.clone());
+        shared.effects.lock().extend(self.clip.iter().map(|s| (s * settings.output_volume).clamp(-1.0, 1.0)));
+        let stream = build_output(settings, Arc::new(Mutex::new(Mixer::default())), shared.clone()).map_err(|e| format!("Playback device unavailable: {e}"))?;
+        self.play = Some((stream, shared));
+        Ok(())
+    }
+
+    pub fn playing(&self) -> bool {
+        self.play.as_ref().map(|(_, s)| !s.effects.lock().is_empty()).unwrap_or(false)
+    }
+
+    /// Seconds of the recording already played.
+    pub fn played(&self) -> f32 {
+        let left = self.play.as_ref().map(|(_, s)| s.effects.lock().len()).unwrap_or(0);
+        (self.clip.len().saturating_sub(left)) as f32 / SAMPLE_RATE as f32
+    }
+
+    pub fn stop_playing(&mut self) {
+        self.play = None;
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -557,13 +771,22 @@ fn encoder_loop(
     capture: Arc<Mutex<VecDeque<f32>>>,
     in_rate: u32,
 ) {
-    let mut enc = match OpusEncoder::new(SAMPLE_RATE as i32, 1, Application::Voip) {
-        Ok(e) => e,
-        Err(_) => return,
+    // Opus Voice: mono, speech tuned. Opus Music: stereo, full band. Rebuilt when the
+    // channel's codec changes.
+    let new_encoder = |music: bool| -> Option<OpusEncoder> {
+        let mut e = if music {
+            OpusEncoder::new(SAMPLE_RATE as i32, 2, Application::Audio).ok()?
+        } else {
+            OpusEncoder::new(SAMPLE_RATE as i32, 1, Application::Voip).ok()?
+        };
+        e.use_inband_fec = true;
+        e.packet_loss_perc = 5;
+        Some(e)
     };
-    enc.use_inband_fec = true;
-    enc.packet_loss_perc = 5;
-    let mut rs = Resampler::new(in_rate, SAMPLE_RATE);
+    let mut music = shared.music.load(Ordering::Relaxed);
+    let Some(mut enc) = new_encoder(music) else { return };
+    let mut rs = StereoResampler::new(in_rate, SAMPLE_RATE);
+    let mut mono: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES);
     let mut pcm48: Vec<f32> = Vec::new();
     let mut tmp: Vec<f32> = Vec::new();
     let mut packet = [0u8; 1275];
@@ -590,12 +813,24 @@ fn encoder_loop(
         tmp.extend(capture.lock().drain(..));
         rs.process(&tmp, &mut pcm48);
         let settings = shared.settings.lock().clone();
-        while pcm48.len() >= FRAME_SAMPLES {
-            let mut frame: Vec<f32> = pcm48.drain(..FRAME_SAMPLES).collect();
+        let want_music = shared.music.load(Ordering::Relaxed);
+        if want_music != music {
+            if let Some(e) = new_encoder(want_music) {
+                enc = e;
+                music = want_music;
+            }
+        }
+        // 20 ms of interleaved stereo.
+        while pcm48.len() >= FRAME_SAMPLES * 2 {
+            let mut frame: Vec<f32> = pcm48.drain(..FRAME_SAMPLES * 2).collect();
+            mono.clear();
             let mut sum = 0.0f32;
-            for s in frame.iter_mut() {
-                *s = (*s * settings.input_gain).clamp(-1.0, 1.0);
-                sum += *s * *s;
+            for p in frame.chunks_exact_mut(2) {
+                p[0] = (p[0] * settings.input_gain).clamp(-1.0, 1.0);
+                p[1] = (p[1] * settings.input_gain).clamp(-1.0, 1.0);
+                let m = (p[0] + p[1]) * 0.5;
+                mono.push(m);
+                sum += m * m;
             }
             let rms = (sum / FRAME_SAMPLES as f32).sqrt();
             let db = if rms > 0.0 { 20.0 * rms.log10() } else { -90.0 };
@@ -624,7 +859,7 @@ fn encoder_loop(
             };
             // Talking while the microphone is muted: warn with a sound and a banner (like
             // TeamSpeak) after ~0.3 s of speech, at most every 8 s while it continues.
-            if settings.muted_warning && shared.input_muted.load(Ordering::Relaxed) {
+            if settings.muted_warning && settings.source == CaptureSource::Microphone && shared.input_muted.load(Ordering::Relaxed) {
                 let speaking = match settings.mode {
                     VoiceMode::PushToTalk => key_down(settings.ptt_key),
                     _ => db >= settings.vad_threshold_db,
@@ -639,15 +874,19 @@ fn encoder_loop(
             } else {
                 muted_talk = MutedTalk::default();
             }
-            let active = wants && shared.transmit_allowed.load(Ordering::Relaxed) && !shared.push_to_mute.load(Ordering::Relaxed);
+            let active = wants
+                && shared.transmit_allowed.load(Ordering::Relaxed)
+                && !shared.push_to_mute.load(Ordering::Relaxed)
+                && !shared.testing.load(Ordering::Relaxed);
             if active {
                 let br = shared.bitrate.load(Ordering::Relaxed);
                 if enc.bitrate_bps != br {
                     enc.bitrate_bps = br;
                 }
-                if let Ok(n) = enc.encode(&frame, FRAME_SAMPLES, &mut packet) {
+                let (pcm, flags) = if music { (&frame, voice::FLAG_STEREO) } else { (&mono, 0) };
+                if let Ok(n) = enc.encode(pcm, FRAME_SAMPLES, &mut packet) {
                     frame_seq = frame_seq.wrapping_add(1);
-                    send(Kind::Voice, &voice::encode_voice(frame_seq, 0, &packet[..n]));
+                    send(Kind::Voice, &voice::encode_voice(frame_seq, flags, &packet[..n]));
                     shared.packets_out.fetch_add(1, Ordering::Relaxed);
                 }
                 transmitting = true;
@@ -665,7 +904,7 @@ fn encoder_loop(
 fn receiver_loop(sock: UdpSocket, cipher: Arc<VoiceCipher>, shared: Arc<VoiceShared>, mixer: Arc<Mutex<Mixer>>) {
     let mut buf = [0u8; 2048];
     let mut replay = ReplayWindow::default();
-    let mut pcm = vec![0f32; FRAME_SAMPLES * 6];
+    let mut pcm = vec![0f32; FRAME_SAMPLES * 6 * 2];
     while !shared.stop.load(Ordering::Relaxed) {
         let n = match sock.recv(&mut buf) {
             Ok(n) => n,
@@ -698,14 +937,18 @@ fn receiver_loop(sock: UdpSocket, cipher: Arc<VoiceCipher>, shared: Arc<VoiceSha
                     continue;
                 }
                 shared.talking.lock().insert(talker, Instant::now());
+                let stereo = flags & voice::FLAG_STEREO != 0;
                 let mut m = mixer.lock();
-                let t = match m.talkers.entry(talker) {
-                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                    std::collections::hash_map::Entry::Vacant(v) => match OpusDecoder::new(SAMPLE_RATE as i32, 1) {
-                        Ok(d) => v.insert(Talker { queue: VecDeque::new(), buffering: true, decoder: d, last_seq: None }),
-                        Err(_) => continue,
-                    },
-                };
+                // A new talker, or one whose channel switched between Opus Voice and Music.
+                if m.talkers.get(&talker).map(|t| t.stereo != stereo).unwrap_or(true) {
+                    let queued = m.talkers.remove(&talker).map(|t| t.queue);
+                    let Some(mut t) = Talker::new(stereo) else { continue };
+                    if let Some(q) = queued {
+                        t.queue = q;
+                    }
+                    m.talkers.insert(talker, t);
+                }
+                let Some(t) = m.talkers.get_mut(&talker) else { continue };
                 if let Some(last) = t.last_seq {
                     let gap = fseq.wrapping_sub(last);
                     if gap == 0 || gap > 0x8000 {
@@ -714,17 +957,13 @@ fn receiver_loop(sock: UdpSocket, cipher: Arc<VoiceCipher>, shared: Arc<VoiceSha
                     let lost = (gap - 1).min(3);
                     for _ in 0..lost {
                         shared.packets_lost.fetch_add(1, Ordering::Relaxed);
-                        if let Ok(k) = t.decoder.decode(&[], FRAME_SAMPLES, &mut pcm) {
-                            t.queue.extend(pcm[..k].iter().copied());
-                        }
+                        t.decode(&[], &mut pcm);
                     }
                 }
                 t.last_seq = Some(fseq);
-                if let Ok(k) = t.decoder.decode(opus, FRAME_SAMPLES * 6, &mut pcm) {
-                    t.queue.extend(pcm[..k].iter().copied());
-                }
+                t.decode(opus, &mut pcm);
                 // Bound latency: never keep more than ~200 ms per speaker.
-                let max = FRAME_SAMPLES * 10;
+                let max = FRAME_SAMPLES * 10 * 2;
                 while t.queue.len() > max {
                     t.queue.pop_front();
                 }
@@ -774,6 +1013,58 @@ mod muted_talk_tests {
 #[cfg(test)]
 mod stream_sound_tests {
     use super::*;
+
+    fn tone(frames: usize, left: f32, right: f32, f: usize) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|i| {
+                let t = (f * frames + i) as f32 / 48_000.0;
+                let s = (t * 440.0 * std::f32::consts::TAU).sin();
+                [s * left, s * right]
+            })
+            .collect()
+    }
+
+    fn energy(out: &[f32]) -> (f32, f32) {
+        out.chunks_exact(2).skip(FRAME_SAMPLES).fold((0.0, 0.0), |(l, r), p| (l + p[0] * p[0], r + p[1] * p[1]))
+    }
+
+    /// Opus Music: a stereo talker keeps left and right apart; an Opus Voice talker plays
+    /// on both sides; a mono decoder can still play a music packet.
+    #[test]
+    fn music_codec_is_stereo_and_voice_is_mono() {
+        let shared = VoiceShared::new(AudioSettings::default());
+        let mut music = OpusEncoder::new(48_000, 2, Application::Audio).unwrap();
+        music.bitrate_bps = voxa_proto::channel_bitrate(voxa_proto::pack_codec(voxa_proto::VoiceCodec::OpusMusic, 10));
+        let mut voice = OpusEncoder::new(48_000, 1, Application::Voip).unwrap();
+        let mut packet = [0u8; 1275];
+        let mut pcm = vec![0f32; FRAME_SAMPLES * 6 * 2];
+        let (mut mt, mut vt, mut mono_dec) = (Talker::new(true).unwrap(), Talker::new(false).unwrap(), Talker::new(false).unwrap());
+        let mut sizes = Vec::new();
+        for f in 0..10 {
+            let n = music.encode(&tone(FRAME_SAMPLES, 0.5, 0.0, f), FRAME_SAMPLES, &mut packet).unwrap();
+            sizes.push(n);
+            mt.decode(&packet[..n], &mut pcm);
+            mono_dec.decode(&packet[..n], &mut pcm);
+            let mono: Vec<f32> = tone(FRAME_SAMPLES, 0.5, 0.5, f).chunks_exact(2).map(|p| p[0]).collect();
+            let n = voice.encode(&mono, FRAME_SAMPLES, &mut packet).unwrap();
+            vt.decode(&packet[..n], &mut pcm);
+        }
+        assert!(sizes.iter().all(|n| *n <= voxa_proto::voice::MAX_PACKET - 64), "{sizes:?}");
+        let mut out = vec![0f32; FRAME_SAMPLES * 2 * 8];
+        for (t, check) in [(mt, "music"), (vt, "voice"), (mono_dec, "music on a mono decoder")] {
+            let mut mixer = Mixer::default();
+            mixer.talkers.insert(1, t);
+            mixer.pull(&shared, &mut out);
+            let (l, r) = energy(&out);
+            println!("{check}: left {l:.1} right {r:.1}");
+            assert!(l > 10.0, "{check}: silent");
+            if check == "music" {
+                assert!(l > 100.0 * r.max(1e-6), "{check}: left {l} right {r}");
+            } else {
+                assert!((l - r).abs() < l * 0.01, "{check}: left {l} right {r}");
+            }
+        }
+    }
 
     /// Stream sound: stereo Opus in, through the jitter buffer and the stereo mixer.
     #[test]
