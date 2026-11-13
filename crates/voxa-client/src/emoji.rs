@@ -189,7 +189,14 @@ pub fn replace_shortcodes(text: &str) -> String {
 
 /// Autocomplete: if the text ends with `:partial` (2+ chars), returns matching emoji.
 pub fn suggestions(text: &str, max: usize) -> (Option<usize>, Vec<&'static Emoji>) {
-    let token_start = text.rfind(|c: char| c.is_whitespace()).map(|i| i + 1).unwrap_or(0);
+    // Skip the whole whitespace character: some (no-break space, ideographic space) are
+    // more than one byte, and slicing inside them would panic.
+    let token_start = text
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
     let token = &text[token_start..];
     let Some(q) = token.strip_prefix(':') else { return (None, Vec::new()) };
     if q.chars().count() < 2 || q.contains(':') {
@@ -235,6 +242,18 @@ pub fn is_only_emoji(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Multi-byte whitespace before a shortcode used to crash the client.
+    #[test]
+    fn suggestions_after_wide_whitespace() {
+        for ws in ['\u{a0}', '\u{3000}', '\u{2003}', ' ', '\n'] {
+            let text = format!("hi{ws}:fi");
+            let (start, found) = suggestions(&text, 5);
+            assert_eq!(start, Some(text.len() - 3), "{ws:?}");
+            assert!(!found.is_empty());
+        }
+        assert_eq!(suggestions("\u{3000}", 5).0, None);
+    }
 
     #[test]
     fn shortcodes() {

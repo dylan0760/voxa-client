@@ -143,8 +143,9 @@ async fn run(
         let ctx = ctx.clone();
         let identity = p.identity.clone();
         let alive = alive.clone();
+        let server_key = sec.remote_static.clone();
         tokio::spawn(async move {
-            bulk_loop(addr, identity, token, bulk_rx, bulk_ctl_rx, events, ctx, alive).await;
+            bulk_loop(addr, identity, server_key, token, bulk_rx, bulk_ctl_rx, events, ctx, alive).await;
         });
     }
 
@@ -196,6 +197,7 @@ async fn run(
 async fn bulk_loop(
     addr: SocketAddr,
     identity: KeyPair,
+    server_key: Vec<u8>,
     token: [u8; 32],
     mut out: mpsc::Receiver<BulkC2S>,
     mut ctl: mpsc::UnboundedReceiver<BulkC2S>,
@@ -215,7 +217,7 @@ async fn bulk_loop(
             }
         }
         first = false;
-        let res = bulk_session(addr, &identity, token, &mut out, &mut ctl, &events, &ctx, &alive).await;
+        let res = bulk_session(addr, &identity, &server_key, token, &mut out, &mut ctl, &events, &ctx, &alive).await;
         if !alive.load(Ordering::Relaxed) {
             break;
         }
@@ -231,6 +233,7 @@ async fn bulk_loop(
 async fn bulk_session(
     addr: SocketAddr,
     identity: &KeyPair,
+    server_key: &[u8],
     token: [u8; 32],
     out: &mut mpsc::Receiver<BulkC2S>,
     ctl: &mut mpsc::UnboundedReceiver<BulkC2S>,
@@ -242,6 +245,11 @@ async fn bulk_session(
     stream.set_nodelay(true)?;
     let (r, w) = stream.into_split();
     let sec = timeout(Duration::from_secs(10), transport::connect(r, w, &identity.private)).await??;
+    // Must be the same server as the (pinned) control connection; otherwise someone in
+    // between could take the token and read or change files and screen shares.
+    if sec.remote_static != server_key {
+        anyhow::bail!("server identity changed on the second connection");
+    }
     let mut reader = sec.reader;
     let mut writer = sec.writer;
     writer.send(&C2S::AttachBulk(token)).await?;

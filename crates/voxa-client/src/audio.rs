@@ -74,6 +74,10 @@ pub struct VoiceShared {
     pub local_muted: Mutex<HashSet<ClientId>>,
     pub settings: Mutex<AudioSettings>,
     effects: Mutex<VecDeque<f32>>,
+    /// Sequence number (and nonce) of the next sent voice packet. Never reset: the
+    /// voice key stays the same when the audio devices change, and reusing a nonce
+    /// with the same key would break the encryption.
+    tx_seq: Arc<AtomicU64>,
 }
 
 impl VoiceShared {
@@ -100,6 +104,7 @@ impl VoiceShared {
             local_muted: Mutex::new(HashSet::new()),
             settings: Mutex::new(settings),
             effects: Mutex::new(VecDeque::new()),
+            tx_seq: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -381,7 +386,7 @@ impl Voice {
         sock.connect(server)?;
         sock.set_read_timeout(Some(Duration::from_millis(200)))?;
         let cipher = Arc::new(VoiceCipher::new(&key));
-        let seq = Arc::new(AtomicU64::new(1));
+        let seq = shared.tx_seq.clone();
         let mixer = Arc::new(Mutex::new(Mixer::default()));
         let capture: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
         let mut warnings = Vec::new();

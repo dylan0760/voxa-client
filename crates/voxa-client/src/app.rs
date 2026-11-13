@@ -163,6 +163,28 @@ pub fn server_at_least(server_version: &str, min: &str) -> bool {
     !voxa_proto::update::is_newer(min, server_version)
 }
 
+/// A file or folder name from the server that is safe to create inside a local folder:
+/// one plain name, nothing that climbs out (`..`, `\`, `/`, drive letters, streams) and
+/// no Windows device names. None if the name must not be used.
+pub fn safe_local_name(name: &str) -> Option<&str> {
+    let bad_char = |c: char| c.is_control() || "<>:\"/\\|?*".contains(c);
+    if name.is_empty() || name == "." || name == ".." || name.chars().any(bad_char) || name.ends_with(['.', ' ']) {
+        return None;
+    }
+    let stem = name.split('.').next().unwrap_or(name).trim_end().to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.len() == 4
+            && stem[3..].chars().all(|c| c.is_ascii_digit() || "¹²³".contains(c)));
+    let mut parts = std::path::Path::new(name).components();
+    let single = matches!((parts.next(), parts.next()), (Some(std::path::Component::Normal(_)), None));
+    (!device && single).then_some(name)
+}
+
+/// Deepest folder level a folder download descends into (a server could otherwise
+/// answer with endless sub-folders).
+const MAX_DOWNLOAD_DEPTH: usize = 32;
+
 /// Transfers running at the same time; the rest wait in the queue.
 pub const MAX_PARALLEL_TRANSFERS: usize = 3;
 
@@ -884,7 +906,8 @@ impl VoxaApp {
                 }
             }
             BulkS2C::UploadReady { id } => {
-                if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.is_running()) {
+                // Only for an upload that is waiting for the server (never twice).
+                if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.upload && matches!(t.state, TransferState::Waiting)) {
                     t.state = TransferState::Active;
                     t.last_change = Instant::now();
                     let path = t.local.clone();
@@ -938,7 +961,9 @@ impl VoxaApp {
             }
             BulkS2C::DownloadBegin { id, size } => {
                 let mut cancel = false;
-                if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.is_running()) {
+                // Only for a download that has not started yet: a server must never be
+                // able to write into a file that is being uploaded.
+                if let Some(t) = s.transfers.get_mut(&id).filter(|t| !t.upload && matches!(t.state, TransferState::Waiting)) {
                     t.size = size;
                     t.last_change = Instant::now();
                     match std::fs::File::create(&t.local) {
@@ -958,7 +983,7 @@ impl VoxaApp {
             }
             BulkS2C::DownloadChunk { id, data } => {
                 let mut cancel = false;
-                if let Some(t) = s.transfers.get_mut(&id) {
+                if let Some(t) = s.transfers.get_mut(&id).filter(|t| !t.upload) {
                     use std::io::Write;
                     if let Some(f) = &mut t.file {
                         if let Err(e) = f.write_all(&data) {
@@ -974,7 +999,7 @@ impl VoxaApp {
                 }
             }
             BulkS2C::DownloadEnd { id } => {
-                if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.is_running()) {
+                if let Some(t) = s.transfers.get_mut(&id).filter(|t| !t.upload && t.is_running()) {
                     if let Some(f) = t.file.take() {
                         let _ = f.sync_all();
                     }
@@ -1285,15 +1310,24 @@ impl VoxaApp {
             S2C::FileList { channel, path, entries } => {
                 // Recursive folder download: queue the files, descend into sub-folders.
                 if let Some(local) = s.pending_downloads.remove(&(channel, path.clone())) {
+                    let depth = path.split('/').filter(|p| !p.is_empty()).count();
                     for e in &entries {
-                        let remote = format!("{path}/{}", e.name);
+                        let Some(name) = safe_local_name(&e.name) else {
+                            s.log(EventKind::Warn, format!("Skipped a file with an unsafe name: \"{}\"", e.name.escape_debug()));
+                            continue;
+                        };
+                        let remote = format!("{path}/{name}");
                         if e.is_dir {
-                            let sub = local.join(&e.name);
+                            if depth >= MAX_DOWNLOAD_DEPTH {
+                                s.log(EventKind::Warn, format!("Skipped \"{remote}\": folders are nested too deeply"));
+                                continue;
+                            }
+                            let sub = local.join(name);
                             let _ = std::fs::create_dir_all(&sub);
                             s.pending_downloads.insert((channel, remote.clone()), sub);
                             s.conn.send(C2S::FileList { channel, path: remote });
                         } else {
-                            s.queue_download(channel, remote, local.join(&e.name));
+                            s.queue_download(channel, remote, local.join(name));
                         }
                     }
                 }
@@ -1358,7 +1392,11 @@ impl VoxaApp {
         let Some(s) = &mut self.sess else { return };
         for (remote, is_dir) in items {
             let name = remote.rsplit('/').next().unwrap_or(&remote).to_string();
-            let local = dest.join(&name);
+            let Some(name) = safe_local_name(&name) else {
+                s.log(EventKind::Warn, format!("Skipped a file with an unsafe name: \"{}\"", name.escape_debug()));
+                continue;
+            };
+            let local = dest.join(name);
             if is_dir {
                 let _ = std::fs::create_dir_all(&local);
                 s.pending_downloads.insert((channel, remote.clone()), local);
@@ -1510,5 +1548,21 @@ impl eframe::App for VoxaApp {
         self.disconnect("Leaving");
         self.settings.save();
         std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_local_name;
+
+    /// Server-provided names must never leave the chosen download folder.
+    #[test]
+    fn unsafe_download_names_are_rejected() {
+        for bad in ["..", ".", "", "..\\x", "../x", "a/b", "a\\b", "C:\\Windows", "C:x", "\\\\server\\share", "x:stream", "con", "CON.txt", "nul", "com1", "LPT9.log", "trailing.", "trailing ", "tab\tname", "a|b", "a?b"] {
+            assert_eq!(safe_local_name(bad), None, "{bad:?}");
+        }
+        for ok in ["report.pdf", "..hidden", "unicode \u{e9}\u{6587}.txt", "console.log", "com10", "a.b.c"] {
+            assert_eq!(safe_local_name(ok), Some(ok), "{ok:?}");
+        }
     }
 }
