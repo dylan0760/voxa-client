@@ -248,8 +248,13 @@ pub struct ViewerFrame {
     pub version: u64,
 }
 
+/// Largest shared screen shown (5K); bigger frames are ignored.
+const MAX_VIEW_PIXELS: u64 = 5120 * 2880;
+/// Frames waiting for the decoder; more are dropped (the streamer sends a keyframe).
+const VIEWER_QUEUE: usize = 32;
+
 pub struct Viewer {
-    tx: std::sync::mpsc::Sender<ViewerCmd>,
+    tx: std::sync::mpsc::SyncSender<ViewerCmd>,
     pub frames: Arc<Mutex<HashMap<ClientId, ViewerFrame>>>,
 }
 
@@ -260,7 +265,7 @@ enum ViewerCmd {
 
 impl Viewer {
     pub fn new(ctx: egui::Context) -> Viewer {
-        let (tx, rx) = std::sync::mpsc::channel::<ViewerCmd>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<ViewerCmd>(VIEWER_QUEUE);
         let frames: Arc<Mutex<HashMap<ClientId, ViewerFrame>>> = Arc::new(Mutex::new(HashMap::new()));
         let out = frames.clone();
         std::thread::Builder::new()
@@ -278,7 +283,7 @@ impl Viewer {
                                 out.lock().remove(&id);
                             }
                             ViewerCmd::Frame(id, f) => {
-                                if f.width == 0 || f.height == 0 || f.width > 8192 || f.height > 8192 {
+                                if f.width == 0 || f.height == 0 || f.width > 8192 || f.height > 8192 || f.width as u64 * f.height as u64 > MAX_VIEW_PIXELS {
                                     continue;
                                 }
                                 let c = canvases.entry(id).or_insert((0, 0, Vec::new(), 0));
@@ -289,7 +294,7 @@ impl Viewer {
                                     }
                                 }
                                 for t in &f.tiles {
-                                    let Ok(img) = image::load_from_memory_with_format(&t.jpeg, image::ImageFormat::Jpeg) else { continue };
+                                    let Some(img) = decode_tile(&t.jpeg, t.w as u32, t.h as u32) else { continue };
                                     let rgb = img.to_rgb8();
                                     let (tw, th) = (rgb.width().min(t.w as u32), rgb.height().min(t.h as u32));
                                     for row in 0..th {
@@ -328,11 +333,23 @@ impl Viewer {
         Viewer { tx, frames }
     }
 
+    /// Queues a frame; dropped when the decoder is behind.
     pub fn push(&self, from: ClientId, frame: StreamFrame) {
-        let _ = self.tx.send(ViewerCmd::Frame(from, frame));
+        let _ = self.tx.try_send(ViewerCmd::Frame(from, frame));
     }
 
     pub fn clear(&self, id: ClientId) {
         let _ = self.tx.send(ViewerCmd::Clear(id));
     }
+}
+
+/// Decodes one JPEG tile, refusing tiles larger than the area they claim to cover.
+fn decode_tile(jpeg: &[u8], w: u32, h: u32) -> Option<image::DynamicImage> {
+    let mut r = image::ImageReader::with_format(std::io::Cursor::new(jpeg), image::ImageFormat::Jpeg);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(w.clamp(1, 8192));
+    limits.max_image_height = Some(h.clamp(1, 8192));
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    r.limits(limits);
+    r.decode().ok()
 }

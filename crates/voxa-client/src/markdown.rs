@@ -109,10 +109,53 @@ fn line_block(line: &str) -> Block {
     Block::Line(LineKind::Normal, line.to_string())
 }
 
+/// Messages longer than this are shown without formatting (parsing is not linear).
+const MAX_MARKUP_LEN: usize = 16_000;
+/// Deepest nesting of formatting (e.g. bold inside italic inside a link).
+const MAX_NESTING: usize = 6;
+
+/// A message split into blocks with its inline formatting parsed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Parsed {
+    Line(LineKind, Vec<Span>),
+    Code { lang: String, code: String },
+}
+
+/// Parses a message, cached: the chat is redrawn every frame, and parsing a long message
+/// full of markers every time would freeze the window.
+pub fn parse(text: &str) -> std::rc::Rc<Vec<Parsed>> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, Rc<Vec<Parsed>>>> = RefCell::new(HashMap::new());
+    }
+    if let Some(p) = CACHE.with(|c| c.borrow().get(text).cloned()) {
+        return p;
+    }
+    let parsed: Vec<Parsed> = blocks(text)
+        .into_iter()
+        .map(|b| match b {
+            Block::Code { lang, code } => Parsed::Code { lang, code },
+            Block::Line(kind, t) if text.len() > MAX_MARKUP_LEN => Parsed::Line(kind, vec![Span { text: t, style: Style::default(), link: None }]),
+            Block::Line(kind, t) => Parsed::Line(kind, spans(&t)),
+        })
+        .collect();
+    let parsed = Rc::new(parsed);
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 2000 {
+            c.clear();
+        }
+        c.insert(text.to_string(), parsed.clone());
+    });
+    parsed
+}
+
 /// Parses inline formatting.
 pub fn spans(s: &str) -> Vec<Span> {
     let mut out = Vec::new();
-    inline(s, Style::default(), &mut out);
+    inline(s, Style::default(), &mut out, 0);
     // Merge neighbours with the same style.
     let mut merged: Vec<Span> = Vec::new();
     for sp in out {
@@ -195,7 +238,11 @@ fn masked_link(s: &str) -> Option<(&str, &str, usize)> {
     Some((text, url, close + 2 + end + 1))
 }
 
-fn inline(s: &str, st: Style, out: &mut Vec<Span>) {
+fn inline(s: &str, st: Style, out: &mut Vec<Span>, depth: usize) {
+    if depth > MAX_NESTING {
+        out.push(Span { text: s.to_string(), style: st, link: None });
+        return;
+    }
     let b = s.as_bytes();
     let mut plain = String::new();
     let flush = |plain: &mut String, out: &mut Vec<Span>| {
@@ -239,7 +286,7 @@ fn inline(s: &str, st: Style, out: &mut Vec<Span>) {
             if let Some((text, url, len)) = masked_link(rest) {
                 flush(&mut plain, out);
                 let mut inner = Vec::new();
-                inline(text, st, &mut inner);
+                inline(text, st, &mut inner, depth + 1);
                 for mut sp in inner {
                     sp.link = Some(url.to_string());
                     out.push(sp);
@@ -258,7 +305,7 @@ fn inline(s: &str, st: Style, out: &mut Vec<Span>) {
                         1 => s2.underline = true,
                         _ => s2.strike = true,
                     }
-                    inline(&rest[2..2 + end], s2, out);
+                    inline(&rest[2..2 + end], s2, out, depth + 1);
                     i += 2 + end + 2;
                     continue 'outer;
                 }
@@ -270,7 +317,7 @@ fn inline(s: &str, st: Style, out: &mut Vec<Span>) {
             if c == b'*' || !is_word(prev) {
                 if let Some(end) = find_close(&rest[1..], marker) {
                     flush(&mut plain, out);
-                    inline(&rest[1..1 + end], Style { italic: true, ..st }, out);
+                    inline(&rest[1..1 + end], Style { italic: true, ..st }, out, depth + 1);
                     i += 1 + end + 1;
                     continue;
                 }
@@ -310,14 +357,12 @@ pub fn map_outside_code(text: &str, f: impl Fn(&str) -> String) -> String {
 
 /// All http(s) links in a message, outside code.
 pub fn links(text: &str) -> Vec<String> {
-    let mut v = Vec::new();
-    for b in blocks(text) {
-        if let Block::Line(_, t) = b {
-            for sp in spans(&t) {
-                if let Some(l) = sp.link {
-                    if !v.contains(&l) {
-                        v.push(l);
-                    }
+    let mut v: Vec<String> = Vec::new();
+    for b in parse(text).iter() {
+        if let Parsed::Line(_, spans) = b {
+            for l in spans.iter().filter_map(|sp| sp.link.as_ref()) {
+                if !v.contains(l) {
+                    v.push(l.clone());
                 }
             }
         }
@@ -343,7 +388,15 @@ pub fn open_link(url: &str) {
         use windows::core::{w, HSTRING};
         use windows::Win32::UI::Shell::ShellExecuteW;
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-        let target = HSTRING::from(url);
+        // Characters a browser's command line could misread are percent-encoded.
+        let mut safe = String::with_capacity(url.len());
+        for ch in url.chars() {
+            match ch {
+                '"' | '<' | '>' | '^' | '`' | '{' | '}' | '|' | '\\' | ' ' => safe.push_str(&format!("%{:02X}", ch as u32)),
+                c => safe.push(c),
+            }
+        }
+        let target = HSTRING::from(safe);
         // SAFETY: plain Win32 call with valid, null-terminated strings.
         unsafe {
             ShellExecuteW(None, w!("open"), &target, None, None, SW_SHOWNORMAL);
@@ -413,17 +466,17 @@ pub fn render(ui: &mut Ui, text: &str, size: f32, salt: impl std::hash::Hash + s
     let dim = ui.visuals().weak_text_color();
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        for (n, b) in blocks(text).into_iter().enumerate() {
+        for (n, b) in parse(text).iter().enumerate() {
             match b {
-                Block::Code { lang, code } => code_block(ui, &lang, &code, size, egui::Id::unique((salt, n, "code"))),
-                Block::Line(kind, t) => match kind {
-                    LineKind::Normal if t.trim().is_empty() => {
+                Parsed::Code { lang, code } => code_block(ui, lang, code, size, egui::Id::unique((salt, n, "code"))),
+                Parsed::Line(kind, sp) => match kind {
+                    LineKind::Normal if sp.iter().all(|s| s.text.trim().is_empty()) => {
                         ui.add_space(size * 0.5);
                     }
-                    LineKind::Normal => render_spans(ui, &spans(&t), size, base),
+                    LineKind::Normal => render_spans(ui, sp, size, base),
                     LineKind::Heading(l) => {
-                        let s = size * [1.0, 1.5, 1.3, 1.15][l as usize];
-                        let mut sp = spans(&t);
+                        let s = size * [1.0, 1.5, 1.3, 1.15][*l as usize];
+                        let mut sp = sp.clone();
                         for x in &mut sp {
                             x.style.bold = true;
                         }
@@ -432,16 +485,16 @@ pub fn render(ui: &mut Ui, text: &str, size: f32, salt: impl std::hash::Hash + s
                     }
                     LineKind::Quote => {
                         let r = Frame::new().inner_margin(Margin { left: 12, right: 0, top: 1, bottom: 1 }).show(ui, |ui| {
-                            render_spans(ui, &spans(&t), size, base);
+                            render_spans(ui, sp, size, base);
                         });
                         let rect = r.response.rect;
                         ui.painter().vline(rect.left() + 2.0, rect.y_range(), Stroke::new(3.0, dim.linear_multiply(0.7)));
                     }
                     LineKind::Item(marker, indent) => {
                         ui.horizontal(|ui| {
-                            ui.add_space(6.0 + indent as f32 * 16.0);
-                            ui.label(RichText::new(marker).font(chat_font(size)).color(dim));
-                            render_spans(ui, &spans(&t), size, base);
+                            ui.add_space(6.0 + *indent as f32 * 16.0);
+                            ui.label(RichText::new(marker.as_str()).font(chat_font(size)).color(dim));
+                            render_spans(ui, sp, size, base);
                         });
                     }
                 },
@@ -486,6 +539,37 @@ mod tests {
 
     fn st(text: &str) -> Vec<(String, Style, Option<String>)> {
         spans(text).into_iter().map(|s| (s.text, s.style, s.link)).collect()
+    }
+
+    /// Messages built to make the parser slow are parsed once (cached), within a short
+    /// time, and very long ones are not formatted at all.
+    #[test]
+    fn hostile_messages_stay_fast() {
+        let evil = [
+            "*a ".repeat(2700),
+            "**a ".repeat(2000),
+            "_a ".repeat(2700),
+            "[x](https://a.b/".repeat(500),
+            "~~*_**__".repeat(1000),
+            "*".repeat(8000),
+            "*a ".repeat(30_000),
+        ];
+        for m in &evil {
+            let t = std::time::Instant::now();
+            let p = parse(m);
+            let first = t.elapsed();
+            let t = std::time::Instant::now();
+            for _ in 0..100 {
+                assert!(std::rc::Rc::ptr_eq(&parse(m), &p));
+            }
+            let cached = t.elapsed() / 100;
+            println!("{} chars: first parse {first:?}, cached {cached:?}", m.len());
+            assert!(first < std::time::Duration::from_millis(1500), "too slow: {first:?}");
+            assert!(cached < std::time::Duration::from_millis(5), "cache too slow: {cached:?}");
+        }
+        // Deep nesting stops at MAX_NESTING levels instead of recursing further.
+        let deep = format!("{}x{}", "**_".repeat(40), "_**".repeat(40));
+        assert!(!spans(&deep).is_empty());
     }
 
     #[test]

@@ -357,6 +357,10 @@ impl Session {
         let mut parts = Vec::new();
         let mut cur = self.channels.get(&id);
         while let Some(c) = cur {
+            // A server could send channels that are each other's parent.
+            if parts.len() >= 64 {
+                break;
+            }
             parts.push(c.name.clone());
             cur = c.parent.and_then(|p| self.channels.get(&p));
         }
@@ -507,8 +511,8 @@ impl VoxaApp {
             kind: EventKind::Info,
         });
         app.ensure_tray();
-        if let Some(t) = crate::link_arg() {
-            app.connect_link(&t);
+        if let Some(link) = crate::link_arg() {
+            app.open_link_request(link);
         }
         app
     }
@@ -575,7 +579,18 @@ impl VoxaApp {
         self.whats_new = Some(crate::updater::WhatsNew::fetch(UPDATE_REPO, APP_VERSION, Some(crate::config::config_dir()), self.ctx.clone()));
     }
 
-    fn connect_link(&mut self, t: &str) {
+    /// A link from the command line: `--connect` connects at once, a voxa:// link (which
+    /// any web page can open) asks first.
+    fn open_link_request(&mut self, link: crate::Link) {
+        if link.ask {
+            self.dlg.link_prompt = Some(link.target);
+            self.show_window();
+        } else {
+            self.connect_link(&link.target);
+        }
+    }
+
+    pub fn connect_link(&mut self, t: &str) {
         let req = ConnectRequest {
             address: normalize_address(t),
             label: t.to_string(),
@@ -610,10 +625,10 @@ impl VoxaApp {
         self.hidden = false;
         // A second launch may have handed over a voxa:// link.
         let pending = crate::pending_link_file();
-        if let Ok(link) = std::fs::read_to_string(&pending) {
+        if let Ok(text) = std::fs::read_to_string(&pending) {
             let _ = std::fs::remove_file(&pending);
-            if !link.trim().is_empty() {
-                self.connect_link(link.trim());
+            if let Some(link) = crate::Link::from_file(&text) {
+                self.open_link_request(link);
             }
         }
     }
@@ -1333,6 +1348,8 @@ impl VoxaApp {
                 }
                 if let Some(fb) = &mut self.dlg.files {
                     if fb.channel == channel && fb.path == path {
+                        // Row numbers change with a new listing (shift-click ranges use them).
+                        fb.anchor = None;
                         fb.entries = entries;
                         fb.loading = false;
                     }

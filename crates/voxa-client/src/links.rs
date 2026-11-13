@@ -101,12 +101,22 @@ impl Previews {
         if let Some(p) = m.get(id) {
             return p.clone();
         }
+        // A few at a time: a chat full of links must not start hundreds of downloads.
+        // The others are started on a later frame.
+        static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        use std::sync::atomic::Ordering::SeqCst;
+        if RUNNING.fetch_add(1, SeqCst) >= 4 {
+            RUNNING.fetch_sub(1, SeqCst);
+            ctx.request_repaint_after(Duration::from_millis(300));
+            return Preview::Loading;
+        }
         m.insert(id.to_string(), Preview::Loading);
         let (map, ctx, id) = (self.map.clone(), ctx.clone(), id.to_string());
         std::thread::spawn(move || {
             let p = fetch(&ctx, &id).unwrap_or(Preview::Failed);
             // (errors are not shown: the card simply falls back to the plain link)
             map.lock().insert(id, p);
+            RUNNING.fetch_sub(1, SeqCst);
             ctx.request_repaint();
         });
         Preview::Loading

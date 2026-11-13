@@ -108,10 +108,16 @@ impl ChatImages {
         }
     }
 
-    /// Image bytes arrived: decode them in the background and make a texture.
+    /// Image bytes arrived: decode them in the background and make a texture. Images
+    /// nobody asked for are ignored, and decoding runs one at a time.
     pub fn received(&self, ctx: &egui::Context, image: u64, data: Vec<u8>) {
+        if !matches!(self.cache.lock().get(&image), Some(ImgState::Loading)) {
+            return;
+        }
+        static DECODING: Mutex<()> = Mutex::new(());
         let (cache, ctx) = (self.cache.clone(), ctx.clone());
         std::thread::spawn(move || {
+            let _one_at_a_time = DECODING.lock();
             let state = match decode(&data) {
                 Ok((ci, size)) => {
                     let tex = ctx.load_texture(format!("chatimg{image}"), ci, egui::TextureOptions::LINEAR);
@@ -174,8 +180,18 @@ fn dimensions(data: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format().ok()?.into_dimensions().ok()
 }
 
+/// Largest image Voxa decodes (a tiny file can claim a huge size and exhaust memory).
+const MAX_DECODE_SIDE: u32 = 16_384;
+const MAX_DECODE_BYTES: u64 = 512 * 1024 * 1024;
+
 fn decode(data: &[u8]) -> Result<(egui::ColorImage, [u32; 2]), String> {
-    let img = image::load_from_memory(data).map_err(|e| format!("Cannot show this image: {e}"))?;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(data)).with_guessed_format().map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_SIDE);
+    limits.max_image_height = Some(MAX_DECODE_SIDE);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    reader.limits(limits);
+    let img = reader.decode().map_err(|e| format!("Cannot show this image: {e}"))?;
     let size = [img.width(), img.height()];
     let img = if img.width().max(img.height()) > MAX_TEXTURE_SIDE {
         img.resize(MAX_TEXTURE_SIDE, MAX_TEXTURE_SIDE, image::imageops::FilterType::Triangle)

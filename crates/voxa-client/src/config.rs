@@ -7,7 +7,8 @@ use voxa_proto::identity::KeyPair;
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Identity {
     pub name: String,
-    /// Base64 X25519 private key.
+    /// Base64 X25519 private key (encrypted in the settings file).
+    #[serde(with = "crate::protect")]
     pub key: String,
 }
 
@@ -30,8 +31,10 @@ pub struct Bookmark {
     pub name: String,
     pub address: String,
     pub nickname: String,
+    #[serde(with = "crate::protect", default)]
     pub server_password: String,
     pub default_channel: String,
+    #[serde(with = "crate::protect", default)]
     pub channel_password: String,
     pub identity: usize,
 }

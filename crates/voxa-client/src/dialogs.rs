@@ -218,6 +218,8 @@ pub struct Dialogs {
     pub nickname: Option<String>,
     pub description: Option<TextPrompt>,
     pub fingerprint: Option<(ConnectRequest, String, String)>,
+    /// A voxa:// link (from a web page etc.) waiting for the user to confirm.
+    pub link_prompt: Option<String>,
     pub error: Option<String>,
 }
 
@@ -1614,7 +1616,7 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             let m = ui.input(|i| i.modifiers);
                             if m.shift {
                                 // Range from the last clicked row.
-                                let a = d.anchor.unwrap_or(idx);
+                                let a = d.anchor.filter(|a| *a < d.entries.len()).unwrap_or(idx);
                                 if !m.command {
                                     d.selected.clear();
                                 }
@@ -2208,6 +2210,42 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         });
         if open && !close {
             app.dlg.fingerprint = Some((req, expected, got));
+        }
+    }
+    // voxa:// link: any web page can open one, so connecting needs a click.
+    if let Some(link) = app.dlg.link_prompt.take() {
+        let mut open = true;
+        let mut go = false;
+        let mut cancel = false;
+        let address = crate::config::normalize_address(&link);
+        let known = app.settings.known_servers.contains_key(&address);
+        egui::Window::new("Join server?")
+            .id(egui::Id::unique("voxa_link_prompt"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+            ui.set_max_width(380.0);
+            ui.label("A link wants to connect you to this server:");
+            ui.label(RichText::new(&address).strong().monospace());
+            if !known {
+                ui.label(RichText::new("You have not connected to this server before.").color(Color32::from_rgb(0xE0, 0x9B, 0x30)));
+            }
+            if let Some(s) = &app.sess {
+                ui.label(format!("You will be disconnected from {}.", s.req.address));
+            }
+            ui.label(RichText::new("Only continue if you trust where this link came from. The server will see your nickname and IP address.").weak());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                go = ui.button("Connect").clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        });
+        if go {
+            app.connect_link(&link);
+        } else if open && !cancel {
+            app.dlg.link_prompt = Some(link);
         }
     }
     // Connection info.

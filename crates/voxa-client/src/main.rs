@@ -19,20 +19,44 @@ mod loopback;
 mod markdown;
 mod net;
 mod player;
+mod protect;
 mod share_picker;
 mod stream;
 mod tray;
 mod ui;
 mod updater;
 
+/// A server to connect to from the command line.
+pub struct Link {
+    /// `host[:port]`.
+    pub target: String,
+    /// From a voxa:// link (web pages can open those): ask before connecting.
+    pub ask: bool,
+}
+
+impl Link {
+    /// What a second launch hands over in `pending-link.txt`.
+    fn to_file(&self) -> String {
+        format!("{}{}", if self.ask { "voxa://" } else { "" }, self.target)
+    }
+
+    pub fn from_file(text: &str) -> Option<Link> {
+        let t = text.trim();
+        let link = match t.strip_prefix("voxa://") {
+            Some(rest) => Link { target: rest.trim_end_matches('/').to_string(), ask: true },
+            None => Link { target: t.to_string(), ask: false },
+        };
+        (!link.target.is_empty()).then_some(link)
+    }
+}
+
 /// Link passed on the command line (`voxa://host[:port]` or `--connect host`).
-pub fn link_arg() -> Option<String> {
+pub fn link_arg() -> Option<Link> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    args.iter()
-        .position(|a| a == "--connect")
-        .and_then(|i| args.get(i + 1).cloned())
-        .or_else(|| args.iter().find(|a| a.starts_with("voxa://")).map(|a| a.trim_start_matches("voxa://").trim_end_matches('/').to_string()))
-        .filter(|t| !t.is_empty())
+    if let Some(t) = args.iter().position(|a| a == "--connect").and_then(|i| args.get(i + 1)) {
+        return Link::from_file(t).map(|l| Link { ask: false, ..l });
+    }
+    args.iter().find(|a| a.starts_with("voxa://")).and_then(|a| Link::from_file(a))
 }
 
 pub fn pending_link_file() -> std::path::PathBuf {
@@ -54,7 +78,7 @@ fn main() -> eframe::Result<()> {
     if inst.is_none() {
         if let Some(link) = link_arg() {
             let _ = std::fs::create_dir_all(config::config_dir());
-            let _ = std::fs::write(pending_link_file(), link);
+            let _ = std::fs::write(pending_link_file(), link.to_file());
         }
         return Ok(());
     }

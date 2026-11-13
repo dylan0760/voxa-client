@@ -722,6 +722,10 @@ fn row_frame(ui: &mut Ui, selected: bool, indent: f32, add: impl FnOnce(&mut Ui)
 }
 
 fn channel_rows(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, parent: Option<ChannelId>, depth: usize, a: &mut Vec<Action>) {
+    // Servers allow 16 levels; a hostile one must not overflow the stack.
+    if depth > 64 {
+        return;
+    }
     let t = theme(ui.visuals().dark_mode);
     for c in s.children(parent) {
         let clients = s.clients_in(c.id);
@@ -1263,7 +1267,9 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
             });
             section(ui, "Security");
             egui::Grid::new("srvsec").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                grid_row(ui, "Fingerprint", RichText::new(&info.fingerprint).monospace().small());
+                // The fingerprint this client verified, not the one the server claims.
+                let verified = app.settings.known_servers.get(&s.req.address).map(String::as_str).unwrap_or("unknown");
+                grid_row(ui, "Fingerprint", RichText::new(verified).monospace().small());
                 grid_row(ui, "Chat history", if info.chat_retention_days == 0 { "Encrypted on server".to_string() } else { format!("Encrypted, {} days", info.chat_retention_days) });
                 grid_row(ui, "Voice", "Encrypted");
             });
