@@ -102,7 +102,8 @@ mod tests {
             let mut s = Settings::default();
             s.set_theme(k);
             let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
-            assert_eq!((back.theme_kind(), back.dark_theme), (k, k == ThemeKind::Dark));
+            assert_eq!((back.theme_kind(), back.dark_theme), (k, k.is_dark()));
+            assert_eq!(k.is_dark(), matches!(k, ThemeKind::Dark | ThemeKind::Crimson | ThemeKind::Midnight));
         }
     }
 

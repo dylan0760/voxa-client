@@ -827,9 +827,12 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         ui.text_edit_singleline(&mut d.nickname);
                     });
                     form_row(ui, "Theme:", |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            for k in crate::config::ThemeKind::ALL {
+                        egui::Grid::new("themes").spacing([4.0, 4.0]).show(ui, |ui| {
+                            for (i, k) in crate::config::ThemeKind::ALL.into_iter().enumerate() {
                                 theme_choice(ui, &mut d.theme, k);
+                                if i % 4 == 3 {
+                                    ui.end_row();
+                                }
                             }
                         });
                     });
@@ -2356,14 +2359,17 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
 }
 
 /// A theme radio button with a small preview of its colours (background, sidebar, accent).
+/// Preview and name stay together when the row wraps.
 fn theme_choice(ui: &mut Ui, current: &mut crate::config::ThemeKind, kind: crate::config::ThemeKind) {
     let p = crate::ui::palette(kind);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 16.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 4, p.main);
-    painter.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(10.0, rect.height())), egui::CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 }, p.side);
-    painter.circle_filled(rect.center() + egui::vec2(6.0, 0.0), 4.5, p.accent);
-    painter.rect_stroke(rect, 4, egui::Stroke::new(1.0, p.control_line), egui::StrokeKind::Inside);
-    ui.radio_value(current, kind, kind.name());
-    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 16.0), egui::Sense::hover());
+        let painter = ui.painter();
+        painter.rect_filled(rect, 4, p.main);
+        painter.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(10.0, rect.height())), egui::CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 }, p.side);
+        painter.circle_filled(rect.center() + egui::vec2(6.0, 0.0), 4.5, p.accent);
+        painter.rect_stroke(rect, 4, egui::Stroke::new(1.0, p.control_line), egui::StrokeKind::Inside);
+        ui.radio_value(current, kind, kind.name());
+        ui.add_space(6.0);
+    });
 }
