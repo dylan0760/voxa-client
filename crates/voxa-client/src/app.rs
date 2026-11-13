@@ -579,6 +579,14 @@ impl VoxaApp {
                     crate::dialogs::start_share(self, &ctx, src, settings);
                 }
             }
+            // The Create Channel dialog (codec choice), with Lossless selected.
+            "channel" => {
+                crate::ui::apply(self, crate::ui::Action::Dialog(crate::dialogs::Open::CreateChannel(None)));
+                if let Some(d) = &mut self.dlg.channel {
+                    d.edit.name = "Music".into();
+                    d.edit.codec_quality = voxa_proto::pack_codec(voxa_proto::VoiceCodec::Lossless, 6);
+                }
+            }
             // Options, on the Application tab (theme picker) or `options:<tab>`.
             w if w.starts_with("options") => {
                 let tab = w.strip_prefix("options:").and_then(|t| t.parse().ok()).unwrap_or(4);
@@ -917,7 +925,9 @@ impl VoxaApp {
         self.voice_shared.output_muted.store(me.output_muted, Ordering::Relaxed);
         let q = s.channels.get(&me.channel).map(|c| c.codec_quality).unwrap_or(6);
         self.voice_shared.bitrate.store(voxa_proto::channel_bitrate(q), Ordering::Relaxed);
-        self.voice_shared.music.store(voxa_proto::codec_of(q).stereo(), Ordering::Relaxed);
+        let codec = voxa_proto::codec_of(q);
+        self.voice_shared.music.store(codec == voxa_proto::VoiceCodec::OpusMusic, Ordering::Relaxed);
+        self.voice_shared.lossless.store(codec == voxa_proto::VoiceCodec::Lossless, Ordering::Relaxed);
     }
 
     pub fn restart_voice(&mut self) {

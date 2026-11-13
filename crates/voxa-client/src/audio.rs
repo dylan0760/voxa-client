@@ -80,6 +80,8 @@ pub struct VoiceShared {
     tx_seq: Arc<AtomicU64>,
     /// My channel uses Opus Music (stereo, full band) instead of Opus Voice.
     pub music: AtomicBool,
+    /// My channel uses the Lossless codec (16-bit stereo, bit exact).
+    pub lossless: AtomicBool,
     /// A microphone test is recording: nothing is transmitted meanwhile.
     pub testing: AtomicBool,
 }
@@ -110,6 +112,7 @@ impl VoiceShared {
             effects: Mutex::new(VecDeque::new()),
             tx_seq: Arc::new(AtomicU64::new(1)),
             music: AtomicBool::new(false),
+            lossless: AtomicBool::new(false),
             testing: AtomicBool::new(false),
         })
     }
@@ -284,7 +287,7 @@ impl Resampler {
     }
 }
 
-/// Resamples interleaved stereo with one Resampler per side.
+/// Resamples interleaved stereo with one `Resampler` per side.
 struct StereoResampler {
     l: Resampler,
     r: Resampler,
@@ -320,19 +323,30 @@ struct Talker {
     queue: VecDeque<f32>,
     buffering: bool,
     decoder: OpusDecoder,
-    /// The decoder outputs stereo (the talker uses Opus Music).
+    /// The decoder outputs stereo (the talker uses Opus Music or Lossless).
     stereo: bool,
+    /// The talker sends Lossless packets (not Opus).
+    lossless: bool,
     last_seq: Option<u16>,
 }
 
 impl Talker {
-    fn new(stereo: bool) -> Option<Talker> {
+    fn new(stereo: bool, lossless: bool) -> Option<Talker> {
+        let stereo = stereo || lossless;
         let decoder = OpusDecoder::new(SAMPLE_RATE as i32, if stereo { 2 } else { 1 }).ok()?;
-        Some(Talker { queue: VecDeque::new(), buffering: true, decoder, stereo, last_seq: None })
+        Some(Talker { queue: VecDeque::new(), buffering: true, decoder, stereo, lossless, last_seq: None })
     }
 
-    /// Decodes a packet (or conceals a lost one when opus is empty) into the queue.
+    /// Decodes a packet (or conceals a lost one when `opus` is empty) into the queue.
     fn decode(&mut self, opus: &[u8], pcm: &mut [f32]) {
+        if self.lossless {
+            // A lost lossless packet becomes 5 ms of silence.
+            match voxa_proto::lossless::decode(opus) {
+                Some(s) if !opus.is_empty() => self.queue.extend(s.iter().map(|v| *v as f32 / 32768.0)),
+                _ => self.queue.extend(std::iter::repeat_n(0.0, voice::LOSSLESS_FRAMES * 2)),
+            }
+            return;
+        }
         let max = if opus.is_empty() { FRAME_SAMPLES } else { FRAME_SAMPLES * 6 };
         if let Ok(k) = self.decoder.decode(opus, max, pcm) {
             if self.stereo {
@@ -883,6 +897,19 @@ fn encoder_loop(
                 if enc.bitrate_bps != br {
                     enc.bitrate_bps = br;
                 }
+                if shared.lossless.load(Ordering::Relaxed) {
+                    // 16-bit samples, exact for 16-bit sources; four 5 ms packets.
+                    let pcm16: Vec<i16> = frame.iter().map(|s| (s * 32768.0).round().clamp(-32768.0, 32767.0) as i16).collect();
+                    for chunk in pcm16.chunks(voice::LOSSLESS_FRAMES * 2) {
+                        frame_seq = frame_seq.wrapping_add(1);
+                        let data = voxa_proto::lossless::encode(chunk);
+                        send(Kind::Voice, &voice::encode_voice(frame_seq, voice::FLAG_STEREO | voice::FLAG_LOSSLESS, &data));
+                        shared.packets_out.fetch_add(1, Ordering::Relaxed);
+                    }
+                    transmitting = true;
+                    shared.self_talking.store(true, Ordering::Relaxed);
+                    continue;
+                }
                 let (pcm, flags) = if music { (&frame, voice::FLAG_STEREO) } else { (&mono, 0) };
                 if let Ok(n) = enc.encode(pcm, FRAME_SAMPLES, &mut packet) {
                     frame_seq = frame_seq.wrapping_add(1);
@@ -937,12 +964,13 @@ fn receiver_loop(sock: UdpSocket, cipher: Arc<VoiceCipher>, shared: Arc<VoiceSha
                     continue;
                 }
                 shared.talking.lock().insert(talker, Instant::now());
-                let stereo = flags & voice::FLAG_STEREO != 0;
+                let lossless = flags & voice::FLAG_LOSSLESS != 0;
+                let stereo = flags & voice::FLAG_STEREO != 0 || lossless;
                 let mut m = mixer.lock();
-                // A new talker, or one whose channel switched between Opus Voice and Music.
-                if m.talkers.get(&talker).map(|t| t.stereo != stereo).unwrap_or(true) {
+                // A new talker, or one whose channel switched codec.
+                if m.talkers.get(&talker).map(|t| t.stereo != stereo || t.lossless != lossless).unwrap_or(true) {
                     let queued = m.talkers.remove(&talker).map(|t| t.queue);
-                    let Some(mut t) = Talker::new(stereo) else { continue };
+                    let Some(mut t) = Talker::new(stereo, lossless) else { continue };
                     if let Some(q) = queued {
                         t.queue = q;
                     }
@@ -1038,7 +1066,7 @@ mod stream_sound_tests {
         let mut voice = OpusEncoder::new(48_000, 1, Application::Voip).unwrap();
         let mut packet = [0u8; 1275];
         let mut pcm = vec![0f32; FRAME_SAMPLES * 6 * 2];
-        let (mut mt, mut vt, mut mono_dec) = (Talker::new(true).unwrap(), Talker::new(false).unwrap(), Talker::new(false).unwrap());
+        let (mut mt, mut vt, mut mono_dec) = (Talker::new(true, false).unwrap(), Talker::new(false, false).unwrap(), Talker::new(false, false).unwrap());
         let mut sizes = Vec::new();
         for f in 0..10 {
             let n = music.encode(&tone(FRAME_SAMPLES, 0.5, 0.0, f), FRAME_SAMPLES, &mut packet).unwrap();
@@ -1064,6 +1092,48 @@ mod stream_sound_tests {
                 assert!((l - r).abs() < l * 0.01, "{check}: left {l} right {r}");
             }
         }
+    }
+
+    /// Lossless: 16-bit samples (as system sound arrives) through the sender's conversion,
+    /// the codec, the receive queue and the mixer come out bit exact.
+    #[test]
+    fn lossless_path_is_bit_exact() {
+        let shared = VoiceShared::new(AudioSettings::default());
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // 40 ms of "music": tones plus a little noise, different on each side.
+        let src: Vec<i16> = (0..FRAME_SAMPLES * 2)
+            .flat_map(|i| {
+                let t = i as f32 / 48_000.0;
+                let s = (t * 440.0 * std::f32::consts::TAU).sin() * 12000.0;
+                [(s + (next() % 64) as f32) as i16, (s * 0.5 + (next() % 64) as f32) as i16]
+            })
+            .collect();
+        let mut t = Talker::new(true, true).unwrap();
+        let mut pcm = vec![0f32; FRAME_SAMPLES * 6 * 2];
+        let mut bytes = 0;
+        for frame in src.chunks(FRAME_SAMPLES * 2) {
+            // Sender: f32 as captured, back to 16 bit, 5 ms packets.
+            let f: Vec<f32> = frame.iter().map(|s| *s as f32 / 32768.0).collect();
+            let pcm16: Vec<i16> = f.iter().map(|s| (s * 32768.0).round().clamp(-32768.0, 32767.0) as i16).collect();
+            for chunk in pcm16.chunks(voice::LOSSLESS_FRAMES * 2) {
+                let data = voxa_proto::lossless::encode(chunk);
+                bytes += data.len();
+                t.decode(&data, &mut pcm);
+            }
+        }
+        let mut mixer = Mixer::default();
+        mixer.talkers.insert(1, t);
+        let mut out = vec![0f32; FRAME_SAMPLES * 2 * 2];
+        mixer.pull(&shared, &mut out);
+        let back: Vec<i16> = out.iter().map(|s| (s * 32768.0).round() as i16).collect();
+        assert_eq!(back, src, "not bit exact");
+        println!("lossless: {} bytes for 40 ms = {:.0} kbit/s (raw 1536)", bytes, bytes as f64 * 8.0 / 0.04 / 1000.0);
     }
 
     /// Stream sound: stereo Opus in, through the jitter buffer and the stereo mixer.

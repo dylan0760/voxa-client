@@ -1415,7 +1415,12 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
                     Some(m) => format!("{} / {m}", s.clients_in(id).len()),
                     None => format!("{} / unlimited", s.clients_in(id).len()),
                 });
-                grid_row(ui, "Codec", format!("{}, quality {} (~{} kbit/s)", voxa_proto::codec_of(c.codec_quality).name(), voxa_proto::quality_of(c.codec_quality), voxa_proto::channel_bitrate(c.codec_quality) / 1000));
+                let codec = voxa_proto::codec_of(c.codec_quality);
+                if codec == voxa_proto::VoiceCodec::Lossless {
+                    grid_row(ui, "Codec", "Lossless, 16-bit 48 kHz stereo (up to 1.5 Mbit/s)".to_string());
+                } else {
+                    grid_row(ui, "Codec", format!("{}, quality {} (~{} kbit/s)", codec.name(), voxa_proto::quality_of(c.codec_quality), voxa_proto::channel_bitrate(c.codec_quality) / 1000));
+                }
                 grid_row(ui, "Encryption", "Encrypted voice");
                 grid_row(ui, "Talk power", c.needed_talk_power.to_string());
                 grid_row(ui, "Join power", if c.needed_join_power > 0 { c.needed_join_power.to_string() } else { "Anyone".into() });

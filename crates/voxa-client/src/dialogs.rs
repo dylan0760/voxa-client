@@ -1121,6 +1121,8 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             });
             // Opus Music needs servers 1.10.0+ (older ones would drop the codec choice).
             let music_ok = s.supports("1.10.0");
+            // Lossless needs servers 1.11.0+ (they keep the choice and protect old clients).
+            let lossless_ok = s.supports("1.11.0");
             let mut codec = voxa_proto::codec_of(d.edit.codec_quality);
             let mut quality = voxa_proto::quality_of(d.edit.codec_quality);
             if music_ok {
@@ -1128,16 +1130,25 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     ui.vertical(|ui| {
                         ui.radio_value(&mut codec, voxa_proto::VoiceCodec::OpusVoice, "Opus Voice").on_hover_text("Mono, tuned for speech. Best for talking.");
                         ui.radio_value(&mut codec, voxa_proto::VoiceCodec::OpusMusic, "Opus Music").on_hover_text("Stereo, full sound quality, higher bitrate. For playing music; use Continuous transmission or push-to-talk so quiet passages are not cut off.");
+                        if lossless_ok || codec == voxa_proto::VoiceCodec::Lossless {
+                            ui.radio_value(&mut codec, voxa_proto::VoiceCodec::Lossless, "Lossless (16-bit, FLAC quality)").on_hover_text("Uncompressed-quality 16-bit 48 kHz stereo, bit exact. Uses about 0.8-1.5 Mbit/s per listener (the server's upload must carry it for everyone listening).");
+                        }
                     });
                 });
             } else {
                 codec = voxa_proto::VoiceCodec::OpusVoice;
             }
-            form_row(ui, "Codec quality:", |ui| {
-                ui.add(egui::Slider::new(&mut quality, 0..=10));
-                let packed = voxa_proto::pack_codec(codec, quality);
-                ui.label(format!("~{} kbit/s{}", voxa_proto::channel_bitrate(packed) / 1000, if codec.stereo() { " stereo" } else { "" }));
-            });
+            if codec == voxa_proto::VoiceCodec::Lossless {
+                form_row(ui, "Bandwidth:", |ui| {
+                    ui.label(RichText::new("Up to 1.5 Mbit/s per listener (music is usually 0.8-1.1). No quality setting: every sample arrives exactly.").small().weak());
+                });
+            } else {
+                form_row(ui, "Codec quality:", |ui| {
+                    ui.add(egui::Slider::new(&mut quality, 0..=10));
+                    let packed = voxa_proto::pack_codec(codec, quality);
+                    ui.label(format!("~{} kbit/s{}", voxa_proto::channel_bitrate(packed) / 1000, if codec.stereo() { " stereo" } else { "" }));
+                });
+            }
             d.edit.codec_quality = voxa_proto::pack_codec(codec, quality);
             form_row(ui, "Needed talk power:", |ui| {
                 ui.add(egui::DragValue::new(&mut d.edit.needed_talk_power).range(0..=100));
