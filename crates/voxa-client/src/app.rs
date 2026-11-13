@@ -587,6 +587,13 @@ impl VoxaApp {
                     d.edit.codec_quality = voxa_proto::pack_codec(voxa_proto::VoiceCodec::Lossless, 6);
                 }
             }
+            // The Create Channel dialog as a separator.
+            "separator" => {
+                crate::ui::apply(self, crate::ui::Action::Dialog(crate::dialogs::Open::CreateChannel(None)));
+                if let Some(d) = &mut self.dlg.channel {
+                    d.edit.name = "[*spacer]─".into();
+                }
+            }
             // Options, on the Application tab (theme picker) or `options:<tab>`.
             w if w.starts_with("options") => {
                 let tab = w.strip_prefix("options:").and_then(|t| t.parse().ok()).unwrap_or(4);

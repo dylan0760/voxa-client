@@ -1075,6 +1075,72 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let title = if d.id.is_some() { "Edit Channel" } else { "Create Channel" };
     egui::Window::new(title).open(&mut open).collapsible(false).resizable(true).default_width(480.0).show_fill(ctx, |ui| {
         egui::Grid::new("chg").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            // A separator is a channel whose name carries a TeamSpeak-style tag
+            // ("[cspacer]Games"); the controls below edit the parts of that name.
+            let mut sep = voxa_proto::spacer(&d.edit.name);
+            form_row(ui, "Kind:", |ui| {
+                ui.vertical(|ui| {
+                    let was = sep.is_some();
+                    let mut is_sep = was;
+                    ui.radio_value(&mut is_sep, false, "Channel");
+                    ui.radio_value(&mut is_sep, true, "Separator (organises the list, nobody can join it)");
+                    if is_sep && !was {
+                        sep = Some(voxa_proto::Spacer { align: voxa_proto::SpacerAlign::Center, number: None, text: std::mem::take(&mut d.edit.name) });
+                        if d.edit.kind == ChannelKind::Temporary {
+                            d.edit.kind = ChannelKind::Permanent;
+                        }
+                        d.edit.is_default = false;
+                    } else if !is_sep && was {
+                        d.edit.name = sep.take().map(|s| s.text).unwrap_or_default();
+                    }
+                });
+            });
+            if let Some(sp) = &mut sep {
+                use voxa_proto::SpacerAlign;
+                form_row(ui, "Style:", |ui| {
+                    ui.vertical(|ui| {
+                        ui.radio_value(&mut sp.align, SpacerAlign::Center, "Text in the middle");
+                        ui.radio_value(&mut sp.align, SpacerAlign::Left, "Text on the left");
+                        ui.radio_value(&mut sp.align, SpacerAlign::Right, "Text on the right");
+                        ui.radio_value(&mut sp.align, SpacerAlign::Repeat, "Line (the text repeated across the row)");
+                    });
+                });
+                form_row(ui, "Text:", |ui| {
+                    ui.vertical(|ui| {
+                        let hint = if sp.align == SpacerAlign::Repeat { "e.g. ─ or - (empty = a thin line)" } else { "e.g. Games" };
+                        ui.add(egui::TextEdit::singleline(&mut sp.text).hint_text(hint).desired_width(320.0));
+                        if sp.align == SpacerAlign::Repeat {
+                            ui.horizontal(|ui| {
+                                for (label, text) in [("────", "─"), ("════", "═"), ("- - -", "- "), ("· · ·", "· "), ("~~~~", "~")] {
+                                    if ui.small_button(label).clicked() {
+                                        sp.text = text.into();
+                                    }
+                                }
+                            });
+                        }
+                    });
+                });
+                d.edit.name = sp.name();
+                form_row(ui, "Parent:", |ui| {
+                    let label = d.edit.parent.and_then(|p| s.channels.get(&p)).map(|c| s.channel_path(c.id)).unwrap_or("(server root)".into());
+                    egui::ComboBox::from_id_salt("chparent").width(320.0).selected_text(label).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut d.edit.parent, None, "(server root)");
+                        for c in s.channels.values().filter(|c| Some(c.id) != d.id && !voxa_proto::is_spacer(&c.name)) {
+                            ui.selectable_value(&mut d.edit.parent, Some(c.id), s.channel_path(c.id));
+                        }
+                    });
+                });
+                form_row(ui, "Kept:", |ui| {
+                    ui.vertical(|ui| {
+                        ui.radio_value(&mut d.edit.kind, ChannelKind::Permanent, "Permanent");
+                        ui.radio_value(&mut d.edit.kind, ChannelKind::SemiPermanent, "Until the server restarts");
+                    });
+                });
+                form_row(ui, "Sort order:", |ui| {
+                    ui.add(egui::DragValue::new(&mut d.edit.sort));
+                });
+                return;
+            }
             form_row(ui, "Name:", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut d.edit.name).desired_width(320.0));
             });
@@ -1177,6 +1243,19 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             } else {
                 PasswordChange::Keep
             };
+            if let Some(mut sp) = voxa_proto::spacer(&e.name) {
+                // Several separators can sit side by side: names must stay unique among
+                // siblings, so a number goes into the tag when needed ("[*spacer2]─").
+                let taken = |n: &str| s.channels.values().any(|c| Some(c.id) != d.id && c.parent == e.parent && c.name.eq_ignore_ascii_case(n));
+                let mut k = sp.number.unwrap_or(0);
+                while taken(&sp.name()) && k < 99_999 {
+                    k += 1;
+                    sp.number = Some(k);
+                }
+                e.name = sp.name();
+                e.max_clients = None;
+                e.password = if d.id.is_some() { PasswordChange::Clear } else { PasswordChange::Keep };
+            }
             match d.id {
                 Some(id) => s.conn.send(C2S::EditChannel { id, edit: e }),
                 None => s.conn.send(C2S::CreateChannel(e)),

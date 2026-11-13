@@ -839,6 +839,17 @@ fn channel_rows(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, pa
     }
     let t = theme();
     for c in s.children(parent) {
+        if let Some(sp) = voxa_proto::spacer(&c.name) {
+            let indent = depth as f32 * 14.0;
+            let r = row_frame(ui, s.selected == Selection::Channel(c.id), indent, |ui| spacer_row(ui, &sp, t.dim));
+            if r.clicked() {
+                a.push(Action::Select(Selection::Channel(c.id)));
+            }
+            channel_menu(s, &r, c, a);
+            channel_dnd(s, ui, &r, c, a);
+            channel_rows(s, shared, ui, Some(c.id), depth + 1, a);
+            continue;
+        }
         let clients = s.clients_in(c.id);
         let has_children = !s.children(Some(c.id)).is_empty();
         let collapsed = s.collapsed.contains(&c.id);
@@ -901,6 +912,36 @@ fn channel_rows(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, pa
     }
 }
 
+/// A separator in the channel tree: its text on the left, centred or on the right, or
+/// repeated across the row (a plain line when it has no text).
+fn spacer_row(ui: &mut Ui, sp: &voxa_proto::Spacer, color: Color32) {
+    let font = FontId::proportional(13.0);
+    let w = ui.available_width();
+    let h = ui.text_style_height(&egui::TextStyle::Body);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), Sense::hover());
+    let painter = ui.painter_at(rect);
+    let text = sp.text.trim();
+    match sp.align {
+        voxa_proto::SpacerAlign::Repeat if text.is_empty() => {
+            painter.hline(rect.x_range(), rect.center().y, Stroke::new(1.0, color));
+        }
+        voxa_proto::SpacerAlign::Repeat => {
+            let unit = painter.layout_no_wrap(text.to_string(), font.clone(), color).size().x.max(1.0);
+            let n = ((w / unit).floor() as usize).clamp(1, 400);
+            painter.text(egui::pos2(rect.left(), rect.center().y), Align2::LEFT_CENTER, text.repeat(n), font, color);
+        }
+        align => {
+            let galley = painter.layout_no_wrap(text.to_string(), font, color);
+            let x = match align {
+                voxa_proto::SpacerAlign::Center => rect.center().x - galley.size().x / 2.0,
+                voxa_proto::SpacerAlign::Right => rect.right() - galley.size().x,
+                _ => rect.left(),
+            };
+            painter.galley(egui::pos2(x.max(rect.left()), rect.center().y - galley.size().y / 2.0), galley, color);
+        }
+    }
+}
+
 /// What is being dragged in the channel tree.
 #[derive(Clone, Copy, Debug)]
 pub enum Drag {
@@ -927,6 +968,11 @@ fn drop_zone(r: &egui::Response, ctx: &egui::Context) -> DropZone {
     }
 }
 
+/// True when the pointer is in the lower half of the row.
+fn drop_zone_half(r: &egui::Response, ctx: &egui::Context) -> bool {
+    ctx.pointer_interact_pos().map(|p| p.y > r.rect.center().y).unwrap_or(true)
+}
+
 fn is_descendant(s: &Session, ch: ChannelId, ancestor: ChannelId) -> bool {
     let mut cur = s.channels.get(&ch).and_then(|c| c.parent);
     while let Some(p) = cur {
@@ -942,10 +988,14 @@ fn is_descendant(s: &Session, ch: ChannelId, ancestor: ChannelId) -> bool {
 /// (onto the middle of a row); clients dropped on a channel are moved into it.
 fn channel_dnd(s: &Session, ui: &Ui, r: &egui::Response, c: &ChannelInfo, a: &mut Vec<Action>) {
     r.dnd_set_drag_payload(Drag::Channel(c.id));
+    // A separator takes nobody, and channels only go above or below it.
+    let spacer = voxa_proto::is_spacer(&c.name);
+    let zone_for = |z: DropZone| if spacer && z == DropZone::Into { if drop_zone_half(r, ui.ctx()) { DropZone::After } else { DropZone::Before } } else { z };
     if let Some(p) = r.dnd_hover_payload::<Drag>() {
         let zone = match *p {
             Drag::Channel(id) if id == c.id || is_descendant(s, c.id, id) => None,
-            Drag::Channel(_) => Some(drop_zone(r, ui.ctx())),
+            Drag::Channel(_) => Some(zone_for(drop_zone(r, ui.ctx()))),
+            Drag::Client(_) if spacer => None,
             Drag::Client(_) => Some(DropZone::Into),
         };
         let painter = ui.painter();
@@ -965,13 +1015,14 @@ fn channel_dnd(s: &Session, ui: &Ui, r: &egui::Response, c: &ChannelInfo, a: &mu
     }
     let Some(p) = r.dnd_release_payload::<Drag>() else { return };
     match *p {
+        Drag::Client(_) if spacer => {}
         Drag::Client(id) => move_client_to(s, id, c.id, a),
         Drag::Channel(id) => {
             if id == c.id || is_descendant(s, c.id, id) {
                 return;
             }
             let Some(dragged) = s.channels.get(&id) else { return };
-            match drop_zone(r, ui.ctx()) {
+            match zone_for(drop_zone(r, ui.ctx())) {
                 DropZone::Into => {
                     let siblings = s.children(Some(c.id));
                     let sort = siblings.iter().filter(|x| x.id != id).map(|x| x.sort).max().unwrap_or(0) + 1;
@@ -1039,7 +1090,7 @@ fn drag_ghost(app: &VoxaApp, ctx: &egui::Context) {
 fn channel_menu(s: &Session, r: &egui::Response, c: &ChannelInfo, a: &mut Vec<Action>) {
     let perms = s.perms();
     r.context_menu(|ui| {
-        if ui.add_enabled(s.my_channel() != c.id, egui::Button::new("➡  Join Channel")).clicked() {
+        if ui.add_enabled(s.my_channel() != c.id && !voxa_proto::is_spacer(&c.name), egui::Button::new("➡  Join Channel")).clicked() {
             a.push(Action::Join(c.id));
             ui.close();
         }
@@ -1252,7 +1303,7 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
             }
             if perms & perm::CLIENT_MOVE != 0 {
                 ui.menu_button("➡  Move to Channel", |ui| {
-                    for ch in s.channels.values() {
+                    for ch in s.channels.values().filter(|ch| !voxa_proto::is_spacer(&ch.name)) {
                         if ui.add_enabled(ch.id != c.channel, egui::Button::new(s.channel_path(ch.id))).clicked() {
                             a.push(Action::Send(C2S::MoveClient { target: c.id, channel: ch.id }));
                             ui.close();
@@ -1397,6 +1448,15 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
         }
         Selection::Channel(id) => {
             let Some(c) = s.channels.get(&id) else { return };
+            if let Some(sp) = voxa_proto::spacer(&c.name) {
+                ui.label(RichText::new("Separator").strong().size(17.0));
+                if !sp.text.trim().is_empty() {
+                    ui.label(RichText::new(sp.text.trim()).color(t.dim));
+                }
+                ui.add_space(6.0);
+                ui.label("Separators only organise the channel list. Nobody can join them.");
+                return;
+            }
             ui.label(RichText::new(format!("🔊 {}", c.name)).strong().size(17.0));
             if !c.topic.is_empty() {
                 ui.label(RichText::new(&c.topic).italics().color(t.dim));
@@ -2327,6 +2387,9 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         Action::Join(ch) => {
             let Some(s) = &app.sess else { return };
             let Some(c) = s.channels.get(&ch) else { return };
+            if voxa_proto::is_spacer(&c.name) {
+                return;
+            }
             if c.has_password && !s.has(perm::CHANNEL_JOIN_IGNORE_PASSWORD) {
                 app.dlg.open(dialogs::Open::ChannelPassword(ch), &app.settings, s);
             } else {
