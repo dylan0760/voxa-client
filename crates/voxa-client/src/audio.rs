@@ -209,6 +209,23 @@ fn find_device(input: bool, name: &Option<String>) -> Option<cpal::Device> {
     }
 }
 
+/// Seconds since the last keyboard or mouse input anywhere in Windows.
+#[cfg(windows)]
+pub fn idle_secs() -> u64 {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    if !unsafe { GetLastInputInfo(&mut info) }.as_bool() {
+        return 0;
+    }
+    let now = unsafe { windows::Win32::System::SystemInformation::GetTickCount() };
+    (now.wrapping_sub(info.dwTime) / 1000) as u64
+}
+
+#[cfg(not(windows))]
+pub fn idle_secs() -> u64 {
+    0
+}
+
 #[cfg(windows)]
 pub fn key_down(vk: u32) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;

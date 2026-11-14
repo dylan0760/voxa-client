@@ -236,6 +236,12 @@ pub struct Session {
     pub avatars_synced: bool,
     /// Waiting for your own picture from the server, to keep it with your identity.
     pub adopt_avatar: bool,
+    /// Server-wide options (servers 1.16.0+).
+    pub server_options: Option<ServerOptions>,
+    /// Bans of the ban list that include hardware.
+    pub hw_bans: HashSet<u64>,
+    /// You were set away by Voxa (idle), so coming back clears it.
+    pub auto_away: bool,
     pub tab: ChatKey,
     pub selected: Selection,
     pub watching: HashSet<ClientId>,
@@ -509,6 +515,12 @@ impl Session {
     }
 }
 
+/// Someone joins / leaves your channel: a rising and a falling pair of notes.
+const JOIN_TONES: &[(f32, u32)] = &[(523.0, 70), (784.0, 90)];
+const LEAVE_TONES: &[(f32, u32)] = &[(784.0, 70), (523.0, 90)];
+/// The away message Voxa sets when you are idle (cleared when you come back).
+pub const AUTO_AWAY: &str = "Away (idle)";
+
 pub struct VoxaApp {
     pub rt: tokio::runtime::Runtime,
     pub settings: Settings,
@@ -699,6 +711,13 @@ impl VoxaApp {
                 if let Ok(p) = std::env::var("VOXA_DEBUG_PICTURE") {
                     d.load(&self.ctx, std::path::Path::new(&p));
                 }
+                if let Ok(i) = std::env::var("VOXA_DEBUG_ICON") {
+                    if let Some((icon, _)) = crate::avatars::ICONS.iter().find(|(x, _)| *x == i) {
+                        d.color = Some(0x5E60CE);
+                        let uid = self.settings.identity(identity).uid();
+                        d.pick_icon(&self.ctx, icon, &uid);
+                    }
+                }
                 if std::env::var("VOXA_DEBUG_AVATAR_SAVE").is_ok() {
                     let _ = crate::avatar_editor::apply(self, &d);
                 }
@@ -789,6 +808,30 @@ impl VoxaApp {
             self.show_window();
         } else {
             self.connect_link(&link.target);
+        }
+    }
+
+    /// Sets you away after the server's idle time without keyboard / mouse input (anywhere
+    /// in Windows) or talking, and back when you return - only if Voxa set it.
+    fn auto_away(&mut self) {
+        let enabled = self.settings.auto_away;
+        let talking = self.voice_shared.self_talking.load(Ordering::Relaxed);
+        let Some(s) = &mut self.sess else { return };
+        let minutes = s.server_options.map(|o| o.auto_away_minutes).unwrap_or(0);
+        let Some(me) = s.me().cloned() else { return };
+        let idle = if talking { 0 } else { crate::audio::idle_secs() };
+        if s.auto_away {
+            if idle < 3 {
+                if me.away.as_deref() == Some(AUTO_AWAY) {
+                    s.conn.send(C2S::UpdateSelf(SelfUpdate { away: Some(None), ..Default::default() }));
+                }
+                s.auto_away = false;
+            } else if me.away.as_deref() != Some(AUTO_AWAY) {
+                s.auto_away = false; // changed by hand meanwhile
+            }
+        } else if enabled && minutes > 0 && me.away.is_none() && idle >= minutes as u64 * 60 {
+            s.auto_away = true;
+            s.conn.send(C2S::UpdateSelf(SelfUpdate { away: Some(Some(AUTO_AWAY.into())), ..Default::default() }));
         }
     }
 
@@ -1033,6 +1076,9 @@ impl VoxaApp {
             editing: None,
             avatars_synced: false,
             adopt_avatar: false,
+            server_options: None,
+            hw_bans: HashSet::new(),
+            auto_away: false,
             tab: ChatKey::Channel,
             selected: Selection::Server,
             watching: HashSet::new(),
@@ -1491,12 +1537,15 @@ impl VoxaApp {
                     shared.volumes.lock().insert(c.id, *v);
                 }
                 if c.channel == s.my_channel() && c.id != s.me {
-                    shared.play_tones(&[(660.0, 70)]);
+                    shared.play_tones(JOIN_TONES);
                 }
                 s.log(EventKind::Good, format!("\"{}\" connected", c.nickname));
                 s.clients.insert(c.id, c);
             }
             S2C::ClientLeft { id, reason } => {
+                if s.clients.get(&id).map(|c| c.channel == s.my_channel() && id != s.me).unwrap_or(false) {
+                    shared.play_tones(LEAVE_TONES);
+                }
                 if let Some(c) = s.clients.remove(&id) {
                     let text = match reason {
                         LeaveReason::Disconnected(m) if m.is_empty() => format!("\"{}\" disconnected", c.nickname),
@@ -1517,6 +1566,7 @@ impl VoxaApp {
             }
             S2C::ClientMoved { id, channel, by } => {
                 let my_channel = s.my_channel();
+                let was_here = s.clients.get(&id).map(|c| c.channel == my_channel).unwrap_or(false);
                 let name = s.client_name(id);
                 let cname = s.channels.get(&channel).map(|c| c.name.clone()).unwrap_or_default();
                 if let Some(c) = s.clients.get_mut(&id) {
@@ -1540,8 +1590,11 @@ impl VoxaApp {
                     s.fetch_pins(TextTarget::Channel(channel));
                 } else {
                     if channel == my_channel {
-                        shared.play_tones(&[(660.0, 70)]);
-                    } else if s.watching.remove(&id) {
+                        shared.play_tones(JOIN_TONES);
+                    } else if was_here {
+                        shared.play_tones(LEAVE_TONES);
+                    }
+                    if channel != my_channel && s.watching.remove(&id) {
                         s.viewer.clear(id);
                         self.textures.remove(&id);
                     }
@@ -1684,6 +1737,17 @@ impl VoxaApp {
                     }
                 }
             }
+            S2C::ServerOptions(o) => {
+                // Sent right after the welcome: report this PC's hardware tokens (once).
+                // The tokens are bound to the fingerprint Voxa verified (pinned on first
+                // connect), not the one the server claims, so a server cannot pose as another
+                // to get tokens that would match there.
+                if s.server_options.is_none() && !s.server_key.is_empty() {
+                    s.conn.send(C2S::Hardware(crate::hardware::tokens(&s.server_key)));
+                }
+                s.server_options = Some(o);
+            }
+            S2C::BannedHardware(ids) => s.hw_bans = ids.into_iter().collect(),
             S2C::AvatarImage { uid, image, data } => {
                 if uid == s.my_uid && s.adopt_avatar && voxa_proto::avatar_hash(&data) == image && crate::avatars::decode(&data).is_some() {
                     s.adopt_avatar = false;
@@ -2002,6 +2066,7 @@ impl eframe::App for VoxaApp {
         self.process_events();
         self.handle_tray(ctx);
         self.handle_hotkeys();
+        self.auto_away();
         // Avatar pictures that were drawn but are not here yet.
         let wants = crate::avatars::take_wants();
         if let Some(s) = self.sess.as_ref().filter(|s| s.supports("1.15.0")) {

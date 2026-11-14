@@ -75,6 +75,7 @@ pub struct OptionsDlg {
     pub timestamps: bool,
     pub tray: bool,
     pub link_previews: bool,
+    pub auto_away: bool,
     pub auto_update: bool,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
@@ -129,6 +130,8 @@ pub struct ServerDlg {
     pub max_gb: f64,
     pub quota_unlimited: bool,
     pub quota_gb: f64,
+    /// Auto-away minutes (None: server older than 1.16.0).
+    pub auto_away: Option<u32>,
 }
 
 impl ServerDlg {
@@ -228,6 +231,8 @@ pub struct Dialogs {
     pub groups: Option<GroupsDlg>,
     pub bans: Option<BansDlg>,
     pub ban_client: Option<TextPrompt>,
+    /// What the ban dialog bans: unique ID, IP address, hardware.
+    pub ban_what: [bool; 3],
     pub kick: Option<TextPrompt>,
     pub poke: Option<TextPrompt>,
     pub pokes: Vec<(String, String)>,
@@ -364,6 +369,7 @@ impl Dialogs {
                         max_gb: 2.0,
                         quota_unlimited: true,
                         quota_gb: 100.0,
+                        auto_away: s.server_options.map(|o| o.auto_away_minutes),
                     });
                     if crate::app::server_at_least(&i.version, "1.3.0") {
                         if let (Some(d), Some(l)) = (&mut self.server, s.file_limits) {
@@ -407,7 +413,10 @@ impl Dialogs {
             }
             Open::Poke(id) => self.poke = Some(prompt(id, "")),
             Open::Kick(id, server) => self.kick = Some(TextPrompt { target: id, text: String::new(), flag: server, number: 0 }),
-            Open::Ban(id) => self.ban_client = Some(TextPrompt { target: id, text: String::new(), flag: false, number: 60 }),
+            Open::Ban(id) => {
+                self.ban_client = Some(TextPrompt { target: id, text: String::new(), flag: false, number: 60 });
+                self.ban_what = [true, true, false];
+            }
             Open::ChannelPassword(ch) => self.channel_password = Some((ch, String::new())),
             Open::Away => self.away = Some(String::new()),
             Open::TalkRequest => self.talk_request = Some(String::new()),
@@ -440,6 +449,7 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         timestamps: s.show_timestamps,
         tray: s.minimize_to_tray,
         link_previews: s.link_previews,
+        auto_away: s.auto_away,
         auto_update: s.auto_update,
         inputs: crate::audio::input_devices(),
         outputs: crate::audio::output_devices(),
@@ -942,6 +952,8 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             ui.checkbox(&mut d.timestamps, "Show timestamps");
                             ui.checkbox(&mut d.link_previews, "Show previews of YouTube links and play them in Voxa")
                                 .on_hover_text("Loading a preview contacts YouTube from your computer, like opening the link would.");
+                            ui.checkbox(&mut d.auto_away, "Set me away when I'm idle")
+                                .on_hover_text("After the time the server's admin chose (10 minutes by default) without keyboard, mouse or talking. Coming back sets you online again.");
                         });
                     });
                     form_row(ui, "System tray:", |ui| {
@@ -996,6 +1008,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         app.settings.show_timestamps = d.timestamps;
         app.settings.minimize_to_tray = d.tray;
         app.settings.link_previews = d.link_previews;
+        app.settings.auto_away = d.auto_away;
         app.settings.auto_update = d.auto_update;
         app.settings.hotkeys = d.hotkeys.iter().filter(|e| e.binding.is_set()).cloned().collect();
         app.hotkeys.set(app.settings.hotkeys.clone());
@@ -1340,6 +1353,12 @@ fn server_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 ui.add(egui::DragValue::new(&mut d.edit.chat_retention_days).range(0..=3650).suffix(" days"));
                 ui.label(RichText::new("(0 = keep forever)").weak());
             });
+            if let Some(m) = &mut d.auto_away {
+                form_row(ui, "Auto away after:", |ui| {
+                    ui.add(egui::DragValue::new(m).range(0..=MAX_AUTO_AWAY_MINUTES).suffix(" min"));
+                    ui.label(RichText::new("without input (0 = never, at most 30)").weak());
+                });
+            }
         });
         ui.add_space(6.0);
         ui.label(RichText::new("File transfers").strong());
@@ -1376,6 +1395,11 @@ fn server_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 PasswordChange::Keep
             };
             s.conn.send(C2S::EditServer(e));
+            if let (Some(m), Some(old)) = (d.auto_away, s.server_options) {
+                if m != old.auto_away_minutes {
+                    s.conn.send(C2S::SetServerOptions(ServerOptions { auto_away_minutes: m }));
+                }
+            }
             if let Some(old) = d.limits {
                 let new = d.edited_limits();
                 if new != old {
@@ -1516,8 +1540,8 @@ fn bans_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut open = true;
     egui::Window::new("Ban List").open(&mut open).collapsible(false).resizable(true).default_size([760.0, 420.0]).show_fill(ctx, |ui| {
         crate::updater::fill_list(ui, "list3", 200.0, 100.0, |ui| {
-            egui::Grid::new("bans").num_columns(7).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
-                for h in ["Name", "Unique ID", "IP", "Reason", "Expires", "By", ""] {
+            egui::Grid::new("bans").num_columns(8).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
+                for h in ["Name", "Unique ID", "IP", "Hardware", "Reason", "Expires", "By", ""] {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.end_row();
@@ -1525,6 +1549,7 @@ fn bans_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     ui.label(b.name.clone().unwrap_or_default());
                     ui.label(RichText::new(b.uid.clone().unwrap_or_default()).small());
                     ui.label(b.ip.clone().unwrap_or_default());
+                    ui.label(if s.hw_bans.contains(&b.id) { "🖥 banned" } else { "" });
                     ui.label(&b.reason);
                     ui.label(b.expires.map(fmt_date).unwrap_or("Never".into()));
                     ui.label(&b.by);
@@ -2295,8 +2320,19 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut open = true;
         let mut close = false;
         let name = app.sess.as_ref().map(|s| s.client_name(p.target)).unwrap_or_default();
+        let (hw_ok, web) = app.sess.as_ref().map(|s| (s.supports("1.16.0"), s.clients.get(&p.target).map(|c| c.platform == "Web").unwrap_or(false))).unwrap_or((false, false));
+        let mut what = app.dlg.ban_what;
         window("Ban Client").open(&mut open).show_fill(ctx, |ui| {
-            ui.label(format!("Ban {name} (by unique ID and IP address)"));
+            ui.label(RichText::new(format!("Ban {name}")).strong());
+            ui.label("Ban by (choose any):");
+            ui.checkbox(&mut what[0], "Unique ID (this identity)");
+            ui.checkbox(&mut what[1], "IP address (their current address)");
+            ui.add_enabled_ui(hw_ok && !web, |ui| {
+                ui.checkbox(&mut what[2], "Hardware (this PC's network adapters and Windows machine ID)").on_disabled_hover_text(if web { "The web page has no hardware to ban" } else { "Needs Voxa Server 1.16.0" });
+            });
+            if what[2] {
+                ui.label(RichText::new("Stops new identities from the same PC. Voxa only sends this server scrambled tokens, never the MAC addresses themselves.").small().weak());
+            }
             egui::Grid::new("banc").num_columns(2).show(ui, |ui| {
                 form_row(ui, "Reason:", |ui| {
                     ui.text_edit_singleline(&mut p.text);
@@ -2307,14 +2343,22 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                 });
             });
             let (ok, cancel) = ok_cancel(ui, "Ban");
-            if ok {
-                app.send(C2S::Ban { target: BanTarget::Client(p.target), duration_secs: Some(p.number * 60), reason: p.text.clone() });
+            if ok && !what.iter().any(|w| *w) {
+                app.dlg.error = Some("Choose at least one thing to ban.".into());
+            } else if ok {
+                let duration_secs = Some(p.number * 60);
+                if hw_ok {
+                    app.send(C2S::BanWith { target: p.target, uid: what[0], ip: what[1], hardware: what[2] && !web, duration_secs, reason: p.text.clone() });
+                } else {
+                    app.send(C2S::Ban { target: BanTarget::Client(p.target), duration_secs, reason: p.text.clone() });
+                }
                 close = true;
             }
             if cancel {
                 close = true;
             }
         });
+        app.dlg.ban_what = what;
         if open && !close {
             app.dlg.ban_client = Some(p);
         }

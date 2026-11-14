@@ -23,7 +23,7 @@ server needs a newer version, Voxa tells you and opens the update window.
 
 ### Layout
 * **TeamSpeak 6 style:**
-  * Server rail on the far left.
+  * Server rail on the far left. Drag your saved servers to put them in any order.
   * Channel tree with avatars and speaking rings.
   * "Voice Connected" card and your user panel (mute microphone, mute speakers,
     settings).
@@ -34,6 +34,9 @@ server needs a newer version, Voxa tells you and opens the update window.
   **Options ▸ Application ▸ Theme**.
 * **Avatars** (Voxa Server 1.15.0+): click your name ▸ **Change Avatar…**.
   * Keep your initials and pick their **colour**, or use **your own picture**.
+  * Or pick one of 60 **icons** (headphones, speakers, microphones, controllers, tools,
+    gear, robots, animals and more), drawn in colour on the colour you choose. Handy for
+    giving bots and tools their own picture.
   * Pictures are cropped like on Steam: drag the square to move it, drag a corner or
     scroll to resize it, with live round previews at every size Voxa uses.
   * The avatar belongs to the identity, so every server shows it. Another PC using the
@@ -67,6 +70,12 @@ server needs a newer version, Voxa tells you and opens the update window.
 * **Muted warning:** talking while your microphone is muted plays a warning sound and
   shows a red notice, like TeamSpeak. Turn it off under **Options ▸ Playback**.
 * **Volume:** per-user volume, local mute and notification sounds.
+* **Join / leave sounds:** a rising pair of notes when someone joins your channel, a
+  falling pair when someone leaves (turn sounds off under **Options ▸ Playback**).
+* **Auto away** (Voxa Server 1.16.0+): after 10 minutes without keyboard, mouse or
+  talking you are set *Away (idle)*, and back online as soon as you return. The server
+  admin chooses the time (up to 30 minutes, or off); turn it off for yourself under
+  **Options ▸ Application**.
 
 ### Chat
 * **Persistent encrypted history:** channel and server chat is stored encrypted on the
@@ -179,6 +188,13 @@ server needs a newer version, Voxa tells you and opens the update window.
 ### Administration
 * Permissions (server and channel groups), privilege keys, bans, kick, move, poke, talk
   power and channel commander.
+* **Bans** (Voxa Server 1.16.0+): ban by **unique ID**, **IP address** and / or
+  **hardware**, any combination you tick.
+  * A hardware ban stops new identities from the same PC (its network adapters' MAC
+    addresses and the Windows machine ID; one match is enough).
+  * Privacy: Voxa never sends the MAC addresses or machine ID. It sends each server
+    scrambled tokens (hashes mixed with that server's verified fingerprint), which mean
+    nothing to other servers and cannot be turned back into the addresses.
 * **Personal permissions:** right-click a user ▸ **Permissions…** to grant individual
   permissions on top of their groups (needs *Manage groups*).
 * **Traffic statistics** in the server info panel (admins only).

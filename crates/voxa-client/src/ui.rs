@@ -42,6 +42,8 @@ pub enum Action {
     ShareScreen,
     Connect(ConnectRequest),
     ConnectBookmark(usize),
+    /// Moves a saved server in the list (dragged in the server rail): (from, to).
+    MoveBookmark(usize, usize),
     Disconnect,
     LoadOlder(TextTarget),
     DeleteMessage(TextTarget, MessageId),
@@ -328,6 +330,17 @@ fn paint_avatar(ui: &Ui, center: egui::Pos2, r: f32, name: &str, uid: &str, ring
     }
 }
 
+/// "Away", "Away: <message>", or the message itself if it already says away.
+pub fn away_text(m: &str) -> String {
+    if m.is_empty() {
+        "Away".into()
+    } else if m.to_ascii_lowercase().starts_with("away") {
+        m.to_string()
+    } else {
+        format!("Away: {m}")
+    }
+}
+
 pub fn avatar_small(ui: &mut Ui, size: f32, name: &str, uid: &str) -> egui::Response {
     avatar(ui, size, name, uid, None)
 }
@@ -479,6 +492,9 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
 
 // ---------------------------------------------------------------- server rail
 
+/// A saved server being dragged in the server rail (its index in the bookmarks).
+struct RailDrag(usize);
+
 fn rail_button(ui: &mut Ui, label: &str, tip: &str, selected: bool, fill: Color32, big_text: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(68.0, 50.0), Sense::click());
     let sq = egui::Rect::from_center_size(rect.center(), Vec2::splat(44.0));
@@ -520,7 +536,22 @@ fn rail(app: &mut VoxaApp, ui: &mut Ui) {
                 continue;
             }
             let label = if b.name.is_empty() { b.address.clone() } else { b.name.clone() };
-            if rail_button(ui, &initials(&label), &format!("{label}\nClick to connect"), false, t.card, false).clicked() {
+            let r = rail_button(ui, &initials(&label), &format!("{label}\nClick to connect, drag to reorder"), false, t.card, false);
+            // Drag a server onto another to put it there.
+            let r = r.interact(Sense::drag());
+            r.dnd_set_drag_payload(RailDrag(i));
+            if r.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            if let Some(p) = r.dnd_hover_payload::<RailDrag>() {
+                if p.0 != i {
+                    let y = if p.0 > i { r.rect.top() + 1.0 } else { r.rect.bottom() - 1.0 };
+                    ui.painter().hline(r.rect.x_range().shrink(10.0), y, Stroke::new(3.0, accent()));
+                }
+            }
+            if let Some(p) = r.dnd_release_payload::<RailDrag>() {
+                a.push(Action::MoveBookmark(p.0, i));
+            } else if r.clicked() {
                 a.push(Action::ConnectBookmark(i));
             }
         }
@@ -1235,7 +1266,7 @@ fn client_row(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, c: &
                 ui.label(RichText::new("★").color(YELLOW)).on_hover_text("Channel commander");
             }
             if let Some(m) = &c.away {
-                ui.label(RichText::new("🌙").small().color(YELLOW)).on_hover_text(if m.is_empty() { "Away".to_string() } else { format!("Away: {m}") });
+                ui.label(RichText::new("🌙").small().color(YELLOW)).on_hover_text(away_text(m));
             }
         });
     });
@@ -1629,7 +1660,7 @@ fn info_view(app: &mut VoxaApp, ui: &mut Ui) {
             ui.vertical_centered(|ui| {
                 avatar(ui, 72.0, &c.nickname, &c.uid, None);
                 ui.label(RichText::new(&c.nickname).strong().size(18.0));
-                let status = if let Some(m) = &c.away { if m.is_empty() { "Away".into() } else { format!("Away: {m}") } } else { "Online".to_string() };
+                let status = if let Some(m) = &c.away { away_text(m) } else { "Online".to_string() };
                 ui.label(RichText::new(status).color(if c.away.is_some() { YELLOW } else { GREEN }));
                 if !c.description.is_empty() {
                     ui.label(RichText::new(&c.description).italics().color(t.dim));
@@ -2747,6 +2778,14 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         Action::Connect(req) => {
             app.home = false;
             app.connect(req);
+        }
+        Action::MoveBookmark(from, to) => {
+            let n = app.settings.bookmarks.len();
+            if from < n && to < n && from != to {
+                let b = app.settings.bookmarks.remove(from);
+                app.settings.bookmarks.insert(to, b);
+                app.settings.save();
+            }
         }
         Action::ConnectBookmark(i) => {
             if let Some(b) = app.settings.bookmarks.get(i).cloned() {

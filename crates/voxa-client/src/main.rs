@@ -16,6 +16,7 @@ mod dialogs;
 mod dm_store;
 mod emoji;
 mod gamepad;
+mod hardware;
 mod highlight;
 mod hotkeys;
 mod icon;

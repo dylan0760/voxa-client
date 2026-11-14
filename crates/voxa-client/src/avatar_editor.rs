@@ -20,7 +20,7 @@ enum Drag {
 
 pub struct AvatarDlg {
     pub identity: usize,
-    color: Option<u32>,
+    pub color: Option<u32>,
     /// The picture being cropped (scaled down to at most 1024 px) and its texture.
     src: Option<(image::RgbaImage, egui::TextureHandle)>,
     /// The crop square in picture pixels: top-left and side.
@@ -30,6 +30,8 @@ pub struct AvatarDlg {
     current_tex: Option<egui::TextureHandle>,
     drag: Option<Drag>,
     error: Option<String>,
+    /// The icon picked (redrawn when the colour changes).
+    icon: Option<&'static str>,
 }
 
 impl AvatarDlg {
@@ -44,6 +46,7 @@ impl AvatarDlg {
             current_tex: None,
             drag: None,
             error: None,
+            icon: None,
         }
     }
 
@@ -61,7 +64,24 @@ impl AvatarDlg {
             self.error = Some("That is not a picture Voxa can read (PNG, JPEG, GIF, WebP or BMP, at most 8192 x 8192).".into());
             return;
         };
-        let mut rgba = img.to_rgba8();
+        self.icon = None;
+        self.set_picture(ctx, img.to_rgba8());
+    }
+
+    /// Draws an icon on the chosen colour and uses it as the picture.
+    pub fn pick_icon(&mut self, ctx: &egui::Context, icon: &'static str, uid: &str) {
+        let bg = self.color.map(crate::avatars::rgb).unwrap_or_else(|| crate::ui::name_color(uid));
+        match crate::avatars::render_icon(icon, bg, 512) {
+            Some(img) => {
+                self.icon = Some(icon);
+                self.error = None;
+                self.set_picture(ctx, img);
+            }
+            None => self.error = Some("That icon could not be drawn on this PC.".into()),
+        }
+    }
+
+    fn set_picture(&mut self, ctx: &egui::Context, mut rgba: image::RgbaImage) {
         let longest = rgba.width().max(rgba.height());
         if longest > 1024 {
             let f = 1024.0 / longest as f32;
@@ -212,6 +232,8 @@ pub fn show(app: &mut VoxaApp, ctx: &egui::Context) {
     let uid = ident.uid();
     let name = app.sess.as_ref().and_then(|s| s.me().map(|m| m.nickname.clone())).unwrap_or_else(|| app.settings.nickname.clone());
     let (mut open, mut save, mut cancel, mut pick) = (true, false, false, false);
+    let mut icon_pick: Option<&'static str> = None;
+    let color_before = d.color;
     egui::Window::new("Avatar")
         .id(egui::Id::unique("voxa_avatar_editor"))
         .open(&mut open)
@@ -264,13 +286,32 @@ pub fn show(app: &mut VoxaApp, ctx: &egui::Context) {
                     d.color = Some(((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32);
                 }
             });
-            if d.src.is_some() || d.current.is_some() {
+            if d.icon.is_some() {
+                ui.label(RichText::new("The colour is the background of your icon.").small().color(t.dim));
+            } else if d.src.is_some() || d.current.is_some() {
                 ui.label(RichText::new("The colour shows behind your initials when you have no picture.").small().color(t.dim));
+            }
+            if crate::avatars::icons_available() {
+                ui.add_space(4.0);
+                ui.label(RichText::new("Icons").strong());
+                egui::ScrollArea::vertical().id_salt("avatar_icons").max_height(96.0).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
+                        for (icon, name) in crate::avatars::ICONS {
+                            let on = d.icon == Some(*icon);
+                            let b = egui::Button::new(RichText::new(*icon).size(20.0)).min_size(Vec2::splat(34.0)).selected(on);
+                            if ui.add(b).on_hover_text(*name).clicked() {
+                                icon_pick = Some(*icon);
+                            }
+                        }
+                    });
+                });
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 pick = ui.button("📂 Choose Picture...").clicked();
                 if (d.src.is_some() || d.current.is_some()) && ui.button("🗑 Remove Picture").clicked() {
+                    d.icon = None;
                     d.src = None;
                     d.current = None;
                     d.current_tex = None;
@@ -285,6 +326,10 @@ pub fn show(app: &mut VoxaApp, ctx: &egui::Context) {
                 cancel = ui.button("Cancel").clicked();
             });
         });
+    // An icon follows the colour.
+    if let Some(icon) = icon_pick.or(d.icon.filter(|_| d.color != color_before)) {
+        d.pick_icon(ctx, icon, &uid);
+    }
     if pick {
         if let Some(path) = rfd::FileDialog::new().set_title("Choose a picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"]).pick_file() {
             d.load(ctx, &path);

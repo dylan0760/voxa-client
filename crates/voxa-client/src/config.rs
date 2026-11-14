@@ -196,6 +196,8 @@ pub struct Settings {
     pub recent_emoji: Vec<String>,
     /// Show previews (and the in-app player) for YouTube links in chat.
     pub link_previews: bool,
+    /// Set away automatically after the server's idle time (servers 1.16.0+).
+    pub auto_away: bool,
     /// Open screen shares in my channel automatically.
     pub auto_watch_streams: bool,
     /// Most redraws per second (0 = as fast as the monitor refreshes).
@@ -230,6 +232,7 @@ impl Default for Settings {
             auto_update: true,
             recent_emoji: Vec::new(),
             link_previews: true,
+            auto_away: true,
             auto_watch_streams: true,
             max_fps: 60,
             hotkeys: Vec::new(),

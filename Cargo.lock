@@ -4928,7 +4928,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voxa-client"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4946,9 +4946,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "skrifa",
  "tokio",
  "tray-icon",
  "ureq",
+ "vello_cpu",
  "voxa-proto",
  "windows",
  "windows-core",
@@ -4958,7 +4960,7 @@ dependencies = [
 
 [[package]]
 name = "voxa-proto"
-version = "1.20.0"
+version = "1.21.0"
 dependencies = [
  "base64 0.22.1",
  "bincode",
