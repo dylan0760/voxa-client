@@ -41,6 +41,17 @@ pub enum Open {
     DeleteMessage(TextTarget, MessageId, String, String),
     ClearChat(TextTarget),
     ClientPerms(ClientId),
+    /// The avatar editor for an identity.
+    Avatar(usize),
+}
+
+/// Someone who sent direct messages while you were offline.
+pub struct OfflineSender {
+    pub uid: String,
+    pub name: String,
+    pub count: usize,
+    /// Their latest message.
+    pub last: String,
 }
 
 pub struct ConnectDlg {
@@ -239,6 +250,11 @@ pub struct Dialogs {
     pub fingerprint: Option<(ConnectRequest, String, String)>,
     /// A voxa:// link (from a web page etc.) waiting for the user to confirm.
     pub link_prompt: Option<String>,
+    /// A web admin page asking to be signed in, and the identity to use.
+    pub web_login: Option<(crate::weblogin::WebLogin, usize)>,
+    /// Who wrote while you were offline (shown once after connecting).
+    pub offline: Option<Vec<OfflineSender>>,
+    pub avatar: Option<crate::avatar_editor::AvatarDlg>,
     pub error: Option<String>,
 }
 
@@ -278,6 +294,7 @@ impl Dialogs {
             Open::Identities => self.identities = Some(IdentitiesDlg { selected: settings.default_identity, import: String::new(), new_name: String::new() }),
             Open::About => self.about = true,
             Open::Updates => self.update = true,
+            Open::Avatar(i) => self.avatar = Some(crate::avatar_editor::AvatarDlg::new(settings, i)),
             _ => {}
         }
     }
@@ -301,7 +318,7 @@ impl Dialogs {
     pub fn open(&mut self, o: Open, settings: &Settings, s: &Session) {
         let prompt = |target: ClientId, text: &str| TextPrompt { target, text: text.into(), flag: false, number: 0 };
         match o {
-            Open::Connect | Open::Bookmarks | Open::Options | Open::Identities | Open::About | Open::Updates => self.open_offline(o, settings),
+            Open::Connect | Open::Bookmarks | Open::Options | Open::Identities | Open::About | Open::Updates | Open::Avatar(_) => self.open_offline(o, settings),
             Open::AddBookmark => {
                 let _ = s;
                 self.bookmarks = Some(BookmarksDlg { selected: None });
@@ -1058,7 +1075,7 @@ fn identities_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 ui.add(egui::TextEdit::singleline(&mut d.import).password(true).desired_width(300.0));
                 if ui.button("Import").clicked() {
                     if voxa_proto::identity::KeyPair::import(&d.import).is_some() {
-                        app.settings.identities.push(Identity { name: format!("Imported {}", app.settings.identities.len() + 1), key: d.import.trim().to_string() });
+                        app.settings.identities.push(Identity { name: format!("Imported {}", app.settings.identities.len() + 1), key: d.import.trim().to_string(), avatar_color: None, avatar_image: None });
                         d.selected = app.settings.identities.len() - 1;
                         d.import.clear();
                     } else {
@@ -2361,6 +2378,99 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         });
         if open && !close {
             app.dlg.clone_channel = Some((id, name, children));
+        }
+    }
+    crate::avatar_editor::show(app, ctx);
+    // Direct messages that arrived while you were offline.
+    if let Some(list) = app.dlg.offline.take() {
+        let mut open = true;
+        let mut close = false;
+        let mut opened: Option<(String, String)> = None;
+        let total: usize = list.iter().map(|x| x.count).sum();
+        egui::Window::new("📬 Messages while you were away")
+            .id(egui::Id::unique("offline_messages"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+            ui.set_min_width(380.0);
+            ui.label(RichText::new(format!("You got {total} direct message{} while you were offline:", if total == 1 { "" } else { "s" })).strong());
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                for x in &list {
+                    ui.horizontal(|ui| {
+                        crate::ui::avatar_small(ui, 30.0, &x.name, &x.uid);
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(format!("{} · {} message{}", x.name, x.count, if x.count == 1 { "" } else { "s" })).strong());
+                            ui.label(RichText::new(crate::share_picker::ellipsize(&x.last.replace('\n', " "), 70)).small().weak());
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("💬 Open").clicked() {
+                                opened = Some((x.uid.clone(), x.name.clone()));
+                            }
+                        });
+                    });
+                    ui.separator();
+                }
+            });
+            close = ui.button("Close").clicked();
+        });
+        let keep = open && !close && opened.is_none();
+        if let Some((uid, name)) = opened {
+            crate::ui::apply(app, crate::ui::Action::OpenDm(uid, name));
+        }
+        if keep {
+            app.dlg.offline = Some(list);
+        }
+    }
+    // A web admin page asking to be signed in with an identity of this Voxa.
+    if let Some((w, mut identity)) = app.dlg.web_login.take() {
+        let mut open = true;
+        let (mut go, mut cancel) = (false, false);
+        let known: Vec<String> = app.settings.known_servers.iter().filter(|(_, fp)| !w.fingerprint.is_empty() && fp.eq_ignore_ascii_case(&w.fingerprint)).map(|(a, _)| a.clone()).collect();
+        egui::Window::new("Sign in to the web admin page?")
+            .id(egui::Id::unique("voxa_web_login"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.label("A web page wants to sign in with your Voxa identity:");
+                ui.label(RichText::new(&w.origin).strong().monospace().size(15.0));
+                if !w.server_name.is_empty() {
+                    ui.label(format!("Server: {}", w.server_name));
+                }
+                if known.is_empty() {
+                    ui.label(RichText::new("Voxa has not connected to this server before.").color(Color32::from_rgb(0xE0, 0x9B, 0x30)));
+                } else {
+                    ui.label(RichText::new(format!("✔ The server you connect to as {}", known.join(", "))).color(crate::ui::GREEN));
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Identity:");
+                    let label = app.settings.identities.get(identity).map(|i| i.name.clone()).unwrap_or_default();
+                    egui::ComboBox::from_id_salt("web_login_identity").selected_text(label).show_ui(ui, |ui| {
+                        for (i, id) in app.settings.identities.iter().enumerate() {
+                            ui.selectable_value(&mut identity, i, &id.name);
+                        }
+                    });
+                });
+                ui.label(RichText::new("Only continue if you opened this page yourself. It gets the rights this identity has on that server. Your identity key stays in Voxa: only a proof for this address is sent.").small().weak());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    go = ui.add(egui::Button::new(RichText::new("Sign in").color(Color32::WHITE)).fill(crate::ui::accent())).clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+            });
+        if go {
+            match app.settings.identities.get(identity).and_then(|i| i.keypair()).and_then(|kp| w.hand_back_url(&kp)) {
+                Some(url) => crate::markdown::open_link(&url),
+                None => app.dlg.error = Some("This identity could not sign in.".into()),
+            }
+        } else if open && !cancel {
+            app.dlg.web_login = Some((w, identity));
         }
     }
     // Received pokes.

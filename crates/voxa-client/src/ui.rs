@@ -46,6 +46,8 @@ pub enum Action {
     LoadOlder(TextTarget),
     DeleteMessage(TextTarget, MessageId),
     CopyText(String),
+    /// Starts editing one of your messages: (chat, message, current text).
+    StartEdit(TextTarget, MessageId, String),
     Toggle(ChannelId),
     Dialog(dialogs::Open),
     Home(bool),
@@ -289,7 +291,7 @@ pub fn apply_style(ctx: &egui::Context, s: &Settings) {
     ctx.set_zoom_factor(s.ui_scale);
 }
 
-fn name_color(uid: &str) -> Color32 {
+pub fn name_color(uid: &str) -> Color32 {
     let h = uid.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
     let palette = [
         Color32::from_rgb(0x25, 0x80, 0xC3),
@@ -303,7 +305,7 @@ fn name_color(uid: &str) -> Color32 {
     palette[(h as usize) % palette.len()]
 }
 
-fn initials(name: &str) -> String {
+pub fn initials(name: &str) -> String {
     let words: Vec<&str> = name.split_whitespace().collect();
     let s: String = match words.len() {
         0 => "?".into(),
@@ -319,8 +321,15 @@ fn paint_avatar(ui: &Ui, center: egui::Pos2, r: f32, name: &str, uid: &str, ring
     if let Some(c) = ring {
         p.circle_stroke(center, r + 2.0, Stroke::new(2.0, c));
     }
-    p.circle_filled(center, r, name_color(uid));
-    p.text(center, Align2::CENTER_CENTER, initials(name), FontId::proportional(r * 0.85), Color32::WHITE);
+    // A picture if they chose one (and it is loaded), else the initials on their colour.
+    if !crate::avatars::paint(ui, center, r, uid) {
+        p.circle_filled(center, r, crate::avatars::color_of(uid).unwrap_or_else(|| name_color(uid)));
+        p.text(center, Align2::CENTER_CENTER, initials(name), FontId::proportional(r * 0.85), Color32::WHITE);
+    }
+}
+
+pub fn avatar_small(ui: &mut Ui, size: f32, name: &str, uid: &str) -> egui::Response {
+    avatar(ui, size, name, uid, None)
 }
 
 fn avatar(ui: &mut Ui, size: f32, name: &str, uid: &str, ring: Option<Color32>) -> egui::Response {
@@ -786,6 +795,10 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
             }
             if ui.button("📝 Edit Description...").clicked() {
                 a.push(Action::Dialog(dialogs::Open::MyDescription));
+                ui.close();
+            }
+            if ui.button("🖼 Change Avatar...").on_hover_text("A colour for your initials, or your own picture").clicked() {
+                a.push(Action::Dialog(dialogs::Open::Avatar(s.req.identity)));
                 ui.close();
             }
             let req = me.as_ref().map(|m| m.talk_request.is_some()).unwrap_or(false);
@@ -1353,6 +1366,16 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
             a.push(Action::Dialog(dialogs::Open::Description(c.id)));
             ui.close();
         }
+        // Moderators can take down a picture (it cannot be used again on this server).
+        if !me
+            && perms & perm::CLIENT_DESCRIPTION_EDIT != 0
+            && s.supports("1.15.0")
+            && crate::avatars::image_version(&c.uid) != 0
+            && ui.button(RichText::new("🖼  Remove Avatar Picture").color(RED)).on_hover_text("They cannot use the same picture again on this server").clicked()
+        {
+            a.push(Action::Send(C2S::ClearAvatar(c.uid.clone())));
+            ui.close();
+        }
         if perms & perm::GROUP_MANAGE != 0 && s.supports("1.4.0") && ui.button("🔐  Permissions...").clicked() {
             a.push(Action::Dialog(dialogs::Open::ClientPerms(c.id)));
             ui.close();
@@ -1860,7 +1883,49 @@ fn insert_emoji(input: &mut String, ch: &str) {
 /// `row` must sense clicks from *behind* the message content (see `chat_area`), so it
 /// offers the context menu without stealing clicks from images in the message.
 /// pin: Some(is pinned) when the user may pin / unpin this message.
-fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx, m: &ChatMessage, target: TextTarget, can_del: bool, pin: Option<bool>, a: &mut Vec<Action>) {
+/// "(edited)" after a message its author changed, with when on hover.
+fn edited_mark(ui: &mut Ui, edited: Option<u64>) {
+    if let Some(at) = edited {
+        ui.label(RichText::new("(edited)").small().color(theme().dim)).on_hover_text(format!("Edited {}", fmt_day_time(at)));
+    }
+}
+
+/// Editing one of your messages in place: Enter saves, Esc cancels, Shift+Enter is a new line.
+fn edit_box(ui: &mut Ui, editing: &mut Option<(TextTarget, MessageId, String)>, a: &mut Vec<Action>) {
+    let Some((target, id, text)) = editing.as_mut() else { return };
+    let (target, id) = (*target, *id);
+    let box_id = egui::Id::unique(("voxa_edit_message", id));
+    let focused = ui.memory(|m| m.has_focus(box_id));
+    let enter = focused && take_send_enter(ui);
+    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let r = ui.add(egui::TextEdit::multiline(text).id(box_id).desired_rows(1).desired_width(f32::INFINITY).char_limit(8000));
+    // Focus once when editing starts.
+    if !focused && !r.lost_focus() && ui.memory(|m| m.focused().is_none() || m.focused() == Some(egui::Id::unique("voxa_chat_input"))) {
+        r.request_focus();
+    }
+    let mut save = enter;
+    let mut cancel = esc;
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Enter to save · Esc to cancel · Shift+Enter for a new line").small().color(theme().dim));
+        save |= ui.small_button("Save").clicked();
+        cancel |= ui.small_button("Cancel").clicked();
+    });
+    if save {
+        let new = text.trim_end().to_string();
+        if new.trim().is_empty() {
+            // Empty: offer deleting instead.
+            a.push(Action::Dialog(dialogs::Open::DeleteMessage(target, id, String::new(), String::new())));
+        } else {
+            a.push(Action::Send(C2S::EditMessage { target, id, text: new }));
+        }
+        *editing = None;
+    } else if cancel {
+        *editing = None;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx, m: &ChatMessage, target: TextTarget, can_del: bool, pin: Option<bool>, can_edit: bool, a: &mut Vec<Action>) {
     let t = theme();
     let rect = row.rect.expand2(egui::vec2(0.0, 2.0));
     let click = row;
@@ -1874,6 +1939,10 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
         }
     };
     click.context_menu(|ui| {
+        if can_edit && ui.button("✏  Edit Message").clicked() {
+            a.push(Action::StartEdit(target, m.id, m.text.clone()));
+            ui.close();
+        }
         if ui.button("📋  Copy Text").clicked() {
             a.push(Action::CopyText(shown.clone()));
             ui.close();
@@ -1892,7 +1961,7 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
     if ui.rect_contains_pointer(rect) {
         // Painted into a slot reserved before the content, so it stays behind images.
         ui.painter().set(bg, egui::Shape::rect_filled(rect, CornerRadius::same(4), t.hover.linear_multiply(0.35)));
-        let n = 1.0 + if can_del { 1.0 } else { 0.0 } + if pin.is_some() { 1.0 } else { 0.0 };
+        let n = 1.0 + if can_del { 1.0 } else { 0.0 } + if pin.is_some() { 1.0 } else { 0.0 } + if can_edit { 1.0 } else { 0.0 };
         let bar = egui::Rect::from_min_size(egui::pos2(rect.right() - 30.0 * n - 6.0, rect.top() + 1.0), egui::vec2(30.0 * n + 4.0, 28.0));
         ui.painter().rect_filled(bar, CornerRadius::same(6), t.card);
         let mut x = bar.left() + 2.0;
@@ -1906,6 +1975,9 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
             ui.painter().text(r.center(), Align2::CENTER_CENTER, icon, FontId::proportional(14.0), color);
             resp.clicked()
         };
+        if can_edit && button(ui, "✏", "Edit message (or press Up in an empty message box)", t.dim) {
+            a.push(Action::StartEdit(target, m.id, m.text.clone()));
+        }
         if button(ui, "📋", "Copy text", t.dim) {
             a.push(Action::CopyText(shown.clone()));
         }
@@ -2179,6 +2251,23 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
     let is_dm = matches!(s.tab, ChatKey::Dm(_));
     let can_delete_others = is_dm || s.chat_perm(target, perm::CHAT_DELETE);
     let can_pin = s.supports("1.8.0") && !matches!(target, TextTarget::Private(_)) && s.chat_perm(target, perm::CHAT_PIN);
+    // Editing your own messages (servers 1.15.0+, "Edit own chat messages").
+    let can_edit = s.supports("1.15.0") && !matches!(target, TextTarget::Private(_)) && s.chat_perm(target, perm::CHAT_EDIT_OWN);
+    let editable = |m: &ChatMessage| can_edit && m.id != 0 && m.from_uid == s.my_uid && ImageRef::parse(&m.text).is_none();
+    // Up in an empty message box edits your last message.
+    let last_own: Option<(MessageId, String)> = if can_edit {
+        let log = match s.tab {
+            ChatKey::Server => Some(&s.server_log),
+            ChatKey::Channel => s.channel_logs.get(&my_channel),
+            ChatKey::Dm(_) => None,
+        };
+        log.and_then(|l| l.lines.iter().rev().find_map(|x| match x {
+            ChatLine::Msg(m) if editable(m) => Some((m.id, m.text.clone())),
+            _ => None,
+        }))
+    } else {
+        None
+    };
     let pins: Vec<PinnedMessage> = s.pins.get(&target).cloned().unwrap_or_default();
     let pinned_ids: std::collections::HashSet<MessageId> = pins.iter().map(|p| p.message.id).collect();
     let hint = match s.tab {
@@ -2222,6 +2311,11 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                 let focused = ui.memory(|m| m.has_focus(input_id));
                 let mut enter = false;
                 if focused {
+                    if input.is_empty() && s.editing.is_none() && ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                        if let Some((id, text)) = &last_own {
+                            a.push(Action::StartEdit(target, *id, text.clone()));
+                        }
+                    }
                     enter = take_send_enter(ui);
                     if !suggestions.is_empty() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
                         accept = suggestions.first().map(|e| e.ch);
@@ -2331,11 +2425,18 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                         let grouped = prev.map(|(u, ts)| u == m.from_uid && m.ts.saturating_sub(ts) < 300).unwrap_or(false);
                         prev = Some((&m.from_uid, m.ts));
                         let can_del = m.id != 0 && (m.from_uid == my_uid || can_delete_others);
+                        let editing_this = matches!(&s.editing, Some((tg, id, _)) if *tg == target && *id == m.id);
+                        let edited = log.edited.get(&m.id).copied();
                         let bg = ui.painter().add(egui::Shape::Noop);
                         let r = ui.scope_builder(egui::UiBuilder::new().sense(Sense::click()), |ui| if grouped {
                             ui.horizontal_wrapped(|ui| {
                                 ui.add_space(44.0);
-                                message_body(ui, &mut s.images, &s.conn, s.bulk_ready, &m.text, t.dim, (m.id, m.ts), previews, a);
+                                if editing_this {
+                                    ui.vertical(|ui| edit_box(ui, &mut s.editing, a));
+                                } else {
+                                    message_body(ui, &mut s.images, &s.conn, s.bulk_ready, &m.text, t.dim, (m.id, m.ts), previews, a);
+                                    edited_mark(ui, edited);
+                                }
                             })
                         } else {
                             ui.add_space(6.0);
@@ -2348,12 +2449,17 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                                         ui.label(RichText::new(&m.from_name).strong().color(name_color(&m.from_uid)));
                                         ui.label(RichText::new(fmt_day_time(m.ts)).small().color(t.dim));
                                     });
-                                    message_body(ui, &mut s.images, &s.conn, s.bulk_ready, &m.text, t.dim, (m.id, m.ts), previews, a);
+                                    if editing_this {
+                                        edit_box(ui, &mut s.editing, a);
+                                    } else {
+                                        message_body(ui, &mut s.images, &s.conn, s.bulk_ready, &m.text, t.dim, (m.id, m.ts), previews, a);
+                                        edited_mark(ui, edited);
+                                    }
                                 });
                             })
                         });
                         let pin = (can_pin && m.id != 0).then(|| pinned_ids.contains(&m.id));
-                        message_actions(ui, &r.response, bg, m, target, can_del, pin, a);
+                        message_actions(ui, &r.response, bg, m, target, can_del, pin, editable(m) && !editing_this, a);
                     }
                 }
             }
@@ -2666,6 +2772,11 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         }
         Action::DeleteMessage(t, id) => app.send_mut(C2S::DeleteMessage { target: t, id }),
         Action::CopyText(t) => app.ctx.copy_text(t),
+        Action::StartEdit(target, id, text) => {
+            if let Some(s) = &mut app.sess {
+                s.editing = Some((target, id, text));
+            }
+        }
         Action::Toggle(ch) => {
             if let Some(s) = &mut app.sess {
                 if !s.collapsed.remove(&ch) {

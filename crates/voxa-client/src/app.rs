@@ -84,6 +84,8 @@ pub struct ChatLog {
     pub complete: bool,
     pub unread: usize,
     pub loading: bool,
+    /// Messages edited by their author: id -> when (servers 1.15.0+).
+    pub edited: HashMap<MessageId, u64>,
 }
 
 impl ChatLog {
@@ -228,6 +230,12 @@ pub struct Session {
     pub people_asked: Option<Instant>,
     /// Conversations stored on this PC for this server: (uid, name, last message time).
     pub stored_dms: Vec<(String, String, u64)>,
+    /// Your message being edited: (chat, message, new text).
+    pub editing: Option<(TextTarget, MessageId, String)>,
+    /// Your avatar was compared with the server's after connecting.
+    pub avatars_synced: bool,
+    /// Waiting for your own picture from the server, to keep it with your identity.
+    pub adopt_avatar: bool,
     pub tab: ChatKey,
     pub selected: Selection,
     pub watching: HashSet<ClientId>,
@@ -387,6 +395,15 @@ impl Session {
     }
 
     /// Writes a conversation to this PC (encrypted).
+    /// The stored chat log of a channel or the server chat.
+    pub fn log_for(&mut self, target: TextTarget) -> Option<&mut ChatLog> {
+        match target {
+            TextTarget::Server => Some(&mut self.server_log),
+            TextTarget::Channel(ch) => self.channel_logs.get_mut(&ch),
+            TextTarget::Private(_) => None,
+        }
+    }
+
     pub fn dm_save(&self, id: DmId) {
         let Some(d) = self.dms.get(id) else { return };
         let messages = d.log.lines.iter().filter_map(|l| if let ChatLine::Msg(m) = l { Some(m.clone()) } else { None }).collect();
@@ -660,6 +677,33 @@ impl VoxaApp {
                     d.edit.codec_quality = voxa_proto::pack_codec(voxa_proto::VoiceCodec::Lossless, 6);
                 }
             }
+            // Edits your latest message in the channel chat (waits until there is one).
+            "edit-last" => {
+                let Some(s) = &mut self.sess else { return };
+                let ch = s.my_channel();
+                let last = s.channel_logs.get(&ch).and_then(|l| {
+                    l.lines.iter().rev().find_map(|x| match x {
+                        ChatLine::Msg(m) if m.from_uid == s.my_uid && m.id != 0 => Some((m.id, m.text.clone())),
+                        _ => None,
+                    })
+                });
+                match last {
+                    Some((id, text)) => s.editing = Some((TextTarget::Channel(ch), id, text)),
+                    None => self.debug_done = false,
+                }
+            }
+            // The avatar editor, with VOXA_DEBUG_PICTURE loaded into it.
+            "avatar" => {
+                let identity = self.sess.as_ref().map(|s| s.req.identity).unwrap_or(0);
+                let mut d = crate::avatar_editor::AvatarDlg::new(&self.settings, identity);
+                if let Ok(p) = std::env::var("VOXA_DEBUG_PICTURE") {
+                    d.load(&self.ctx, std::path::Path::new(&p));
+                }
+                if std::env::var("VOXA_DEBUG_AVATAR_SAVE").is_ok() {
+                    let _ = crate::avatar_editor::apply(self, &d);
+                }
+                self.dlg.avatar = Some(d);
+            }
             // The People panel and the first direct message conversation.
             "people-dm" => {
                 self.show_members = true;
@@ -731,11 +775,44 @@ impl VoxaApp {
     /// A link from the command line: `--connect` connects at once, a voxa:// link (which
     /// any web page can open) asks first.
     fn open_link_request(&mut self, link: crate::Link) {
+        // A web admin page asking to be signed in: always confirmed by the user.
+        if link.target.starts_with("web-login") {
+            if let Some(w) = crate::weblogin::WebLogin::parse(&link.target) {
+                let identity = self.identity_for_fingerprint(&w.fingerprint);
+                self.dlg.web_login = Some((w, identity));
+                self.show_window();
+            }
+            return;
+        }
         if link.ask {
             self.dlg.link_prompt = Some(link.target);
             self.show_window();
         } else {
             self.connect_link(&link.target);
+        }
+    }
+
+    /// The identity used with the server that has this fingerprint (else the default).
+    pub fn identity_for_fingerprint(&self, fingerprint: &str) -> usize {
+        if !fingerprint.is_empty() {
+            for (address, fp) in &self.settings.known_servers {
+                if fp.eq_ignore_ascii_case(fingerprint) {
+                    if let Some(b) = self.settings.bookmarks.iter().find(|b| crate::config::normalize_address(&b.address) == *address) {
+                        return b.identity.min(self.settings.identities.len().saturating_sub(1));
+                    }
+                }
+            }
+        }
+        self.settings.default_identity
+    }
+
+    /// Your avatar changed: show it and give it to the server.
+    pub fn avatar_changed(&mut self) {
+        let Some(s) = &self.sess else { return };
+        let ident = self.settings.identity(s.req.identity);
+        crate::avatars::set_local(&s.my_uid, ident.avatar_color, ident.avatar_bytes());
+        if s.supports("1.15.0") {
+            s.conn.send(C2S::SetAvatar { color: ident.avatar_color, image: ident.avatar_bytes() });
         }
     }
 
@@ -953,6 +1030,9 @@ impl VoxaApp {
             people: Vec::new(),
             people_asked: None,
             stored_dms: Vec::new(),
+            editing: None,
+            avatars_synced: false,
+            adopt_avatar: false,
             tab: ChatKey::Channel,
             selected: Selection::Server,
             watching: HashSet::new(),
@@ -1333,6 +1413,10 @@ impl VoxaApp {
                 s.welcomed = true;
                 s.me = your_id;
                 s.my_uid = your_uid;
+                // Your own avatar shows at once; others arrive with AvatarInfo (servers 1.15.0+).
+                crate::avatars::clear();
+                let ident = self.settings.identity(s.req.identity);
+                crate::avatars::set_local(&s.my_uid, ident.avatar_color, ident.avatar_bytes());
                 // Direct messages are kept per server, under its verified fingerprint.
                 s.server_key = self.settings.known_servers.get(&s.req.address).cloned().unwrap_or_default();
                 s.channels = channels.into_iter().map(|c| (c.id, c)).collect();
@@ -1523,6 +1607,17 @@ impl VoxaApp {
             }
             S2C::OfflineMessages(msgs) => {
                 let n = msgs.len();
+                let mut summary: Vec<crate::dialogs::OfflineSender> = Vec::new();
+                for m in &msgs {
+                    let last = voxa_proto::ImageRef::parse(&m.text).map(|r| format!("📷 {}", r.name)).unwrap_or_else(|| m.text.clone());
+                    match summary.iter_mut().find(|x| x.uid == m.from_uid) {
+                        Some(x) => {
+                            x.count += 1;
+                            x.last = last;
+                        }
+                        None => summary.push(crate::dialogs::OfflineSender { uid: m.from_uid.clone(), name: m.from_name.clone(), count: 1, last }),
+                    }
+                }
                 for m in msgs {
                     let id = s.dm_open(&m.from_uid, &m.from_name);
                     let msg = ChatMessage { id: 0, target: TextTarget::Private(0), from: None, from_uid: m.from_uid, from_name: m.from_name, ts: m.ts, text: m.text };
@@ -1531,6 +1626,75 @@ impl VoxaApp {
                 }
                 s.log(EventKind::Good, format!("{n} direct message(s) arrived while you were away"));
                 shared.play_tones(&[(880.0, 60), (1175.0, 80)]);
+                // Pop up who wrote, so nobody misses them.
+                self.dlg.offline = Some(summary);
+                self.want_show = true;
+                self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+            }
+            S2C::MessageEdited { target, id, text, edited_at } => {
+                if let Some(log) = s.log_for(target) {
+                    for l in log.lines.iter_mut() {
+                        if let ChatLine::Msg(m) = l {
+                            if m.id == id {
+                                m.text = text.clone();
+                            }
+                        }
+                    }
+                    log.edited.insert(id, edited_at);
+                }
+                if let Some(p) = s.pins.get_mut(&target) {
+                    for x in p.iter_mut().filter(|x| x.message.id == id) {
+                        x.message.text = text.clone();
+                    }
+                }
+            }
+            S2C::EditedMessages { target, edits } => {
+                if let Some(log) = s.log_for(target) {
+                    log.edited.extend(edits);
+                }
+            }
+            S2C::AvatarInfo(metas) => {
+                for m in &metas {
+                    crate::avatars::set_meta(&m.uid, m.color, m.image);
+                }
+                // The first list after connecting: give the server your avatar if it differs.
+                if !s.avatars_synced {
+                    s.avatars_synced = true;
+                    let ident = self.settings.identity(s.req.identity);
+                    let image = ident.avatar_bytes();
+                    let hash = image.as_deref().map(voxa_proto::avatar_hash).unwrap_or(0);
+                    let server = metas.iter().find(|m| m.uid == s.my_uid).map(|m| (m.color, m.image)).unwrap_or((None, 0));
+                    let local_empty = ident.avatar_color.is_none() && image.is_none();
+                    if server != (ident.avatar_color, hash) && local_empty && server != (None, 0) {
+                        // Set elsewhere (another PC, the web page): keep it with this identity.
+                        let idx = s.req.identity;
+                        if let Some(i) = self.settings.identities.get_mut(idx) {
+                            i.avatar_color = server.0;
+                        }
+                        self.settings.save();
+                        if server.1 != 0 {
+                            s.adopt_avatar = true;
+                            s.conn.send(C2S::GetAvatar(s.my_uid.clone()));
+                        }
+                    } else {
+                        if server != (ident.avatar_color, hash) {
+                            s.conn.send(C2S::SetAvatar { color: ident.avatar_color, image: image.clone() });
+                        }
+                        crate::avatars::set_local(&s.my_uid, ident.avatar_color, image);
+                    }
+                }
+            }
+            S2C::AvatarImage { uid, image, data } => {
+                if uid == s.my_uid && s.adopt_avatar && voxa_proto::avatar_hash(&data) == image && crate::avatars::decode(&data).is_some() {
+                    s.adopt_avatar = false;
+                    use base64::Engine;
+                    let idx = s.req.identity;
+                    if let Some(i) = self.settings.identities.get_mut(idx) {
+                        i.avatar_image = Some(base64::engine::general_purpose::STANDARD.encode(&data));
+                    }
+                    self.settings.save();
+                }
+                crate::avatars::set_image(&uid, image, data);
             }
             S2C::OfflineQueued { to_uid, ts } => {
                 if let Some(d) = s.dms.iter_mut().find(|d| d.uid == to_uid) {
@@ -1838,6 +2002,13 @@ impl eframe::App for VoxaApp {
         self.process_events();
         self.handle_tray(ctx);
         self.handle_hotkeys();
+        // Avatar pictures that were drawn but are not here yet.
+        let wants = crate::avatars::take_wants();
+        if let Some(s) = self.sess.as_ref().filter(|s| s.supports("1.15.0")) {
+            for uid in wants {
+                s.conn.send(C2S::GetAvatar(uid));
+            }
+        }
         self.transfer_watchdog();
         self.pump_transfers();
         // Keep the watchdog ticking (also while hidden in the tray) during transfers.

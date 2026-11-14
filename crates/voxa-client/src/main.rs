@@ -10,6 +10,8 @@ mod capture;
 mod config;
 #[cfg(windows)]
 mod dda;
+mod avatar_editor;
+mod avatars;
 mod dialogs;
 mod dm_store;
 mod emoji;
@@ -28,6 +30,7 @@ mod share_picker;
 mod stream;
 mod tray;
 mod ui;
+mod weblogin;
 mod updater;
 
 /// A server to connect to from the command line.

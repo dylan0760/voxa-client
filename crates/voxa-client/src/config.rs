@@ -10,11 +10,23 @@ pub struct Identity {
     /// Base64 X25519 private key (encrypted in the settings file).
     #[serde(with = "crate::protect")]
     pub key: String,
+    /// Background colour of the initials (`0xRRGGBB`), shown to others on servers 1.15.0+.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_color: Option<u32>,
+    /// Picture shown instead of the initials: a 128x128 PNG / JPEG, base64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_image: Option<String>,
 }
 
 impl Identity {
     pub fn generate(name: &str) -> Identity {
-        Identity { name: name.into(), key: KeyPair::generate().export() }
+        Identity { name: name.into(), key: KeyPair::generate().export(), avatar_color: None, avatar_image: None }
+    }
+
+    /// The avatar picture's bytes, if any.
+    pub fn avatar_bytes(&self) -> Option<Vec<u8>> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(self.avatar_image.as_deref()?).ok()
     }
 
     pub fn keypair(&self) -> Option<KeyPair> {

@@ -32,6 +32,14 @@ server needs a newer version, Voxa tells you and opens the update window.
 * **Themes:** Dark, Light, 🌸 Sakura (cherry blossom), 🍼 Layette (baby blue),
   🍷 Crimson, 🌌 Midnight (purple) and 🍵 Celadon (jade green). Pick one in
   **Options ▸ Application ▸ Theme**.
+* **Avatars** (Voxa Server 1.15.0+): click your name ▸ **Change Avatar…**.
+  * Keep your initials and pick their **colour**, or use **your own picture**.
+  * Pictures are cropped like on Steam: drag the square to move it, drag a corner or
+    scroll to resize it, with live round previews at every size Voxa uses.
+  * The avatar belongs to the identity, so every server shows it. Another PC using the
+    same identity picks it up automatically.
+  * Moderators (*Edit client descriptions*) can remove an offensive picture; it can't be
+    used on that server again.
 * **Windows:** dialogs can be moved and resized.
 * **Frame rate limit:** set it under **Options ▸ Application** (60 fps by default) to
   save GPU on fast monitors.
@@ -102,6 +110,13 @@ server needs a newer version, Voxa tells you and opens the update window.
   server delivers it when they come online.
   * The server keeps it encrypted until then and deletes it after delivery.
   * Undelivered messages are dropped after 30 days, and at most 100 can wait per person.
+  * When you come online, a window pops up showing who wrote, how many messages and
+    the latest one, with **Open** to read them. The taskbar button flashes too.
+* **Edit your messages** (Voxa Server 1.15.0+, *Edit own chat messages*): hover one of
+  your channel or server chat messages ▸ ✏, right-click ▸ **Edit Message**, or press
+  **Up** in an empty message box.
+  * Enter saves, Esc cancels. Everyone sees the change at once, marked **(edited)**.
+  * You can only edit your own messages, never images.
 * **Moderation:**
   * Hover a message for 📋 Copy and 🗑 Delete, or right-click it. Deleted messages
     disappear for everyone and from the stored history.
@@ -168,8 +183,11 @@ server needs a newer version, Voxa tells you and opens the update window.
   permissions on top of their groups (needs *Manage groups*).
 * **Traffic statistics** in the server info panel (admins only).
 * **Web admin page** (Voxa Server 1.14.0+): manage the server from a browser with the
-  same layout and themes. Sign in with an identity exported from Voxa (see the server's
-  README).
+  same layout and themes (see the server's README).
+  * **Sign in with Voxa** (Voxa Server 1.15.0+): the page asks Voxa, Voxa asks you
+    which identity to use, and the browser is signed in. Your key never leaves Voxa;
+    the proof only works on that page's web address, so a look-alike site gets nothing.
+  * Or paste an identity exported from Voxa.
 
 ### Everyday conveniences
 * Identities (export/import), bookmarks, and trust-on-first-use server fingerprint
