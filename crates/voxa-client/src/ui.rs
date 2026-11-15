@@ -931,14 +931,20 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
                 }
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, "⏏", "Disconnect", Some(RED)).clicked() {
+                if icon_button(ui, "⏏", "Disconnect from the server", Some(RED)).clicked() {
                     a.push(Action::Disconnect);
+                }
+                let in_channel = s.my_channel() != NO_CHANNEL;
+                // Leave the channel but stay on the server (servers 1.17.0+).
+                if in_channel && s.supports("1.17.0") && icon_button(ui, "🚪", "Leave the channel (stay connected to the server)", None).clicked() {
+                    a.push(Action::Send(C2S::SwitchChannel { channel: NO_CHANNEL, password: None }));
                 }
                 let sharing = s.streamer.is_some();
                 if s.streamer.as_ref().map(|st| !st.preview_on.load(Ordering::Relaxed)).unwrap_or(false) && icon_button(ui, "👁", "Show the preview of your own stream", None).clicked() {
                     a.push(Action::Watch(s.me, true));
                 }
-                if icon_button(ui, "🖥", if sharing { "Stop sharing your screen" } else { "Share your screen or an application" }, sharing.then_some(RED)).clicked() {
+                // Screens are shared with a channel, so not outside one.
+                if (in_channel || sharing) && icon_button(ui, "🖥", if sharing { "Stop sharing your screen" } else { "Share your screen or an application" }, sharing.then_some(RED)).clicked() {
                     a.push(Action::ShareScreen);
                 }
                 let vping = shared.ping_ms.load(Ordering::Relaxed);
@@ -1333,7 +1339,12 @@ fn drag_ghost(app: &VoxaApp, ctx: &egui::Context) {
 fn channel_menu(s: &Session, r: &egui::Response, c: &ChannelInfo, a: &mut Vec<Action>) {
     let perms = s.perms();
     r.context_menu(|ui| {
-        if ui.add_enabled(s.my_channel() != c.id && !voxa_proto::is_spacer(&c.name), egui::Button::new("➡  Join Channel")).clicked() {
+        if s.my_channel() == c.id && s.supports("1.17.0") {
+            if ui.button("🚪  Leave Channel").on_hover_text("Stay connected to the server without being in a channel").clicked() {
+                a.push(Action::Send(C2S::SwitchChannel { channel: NO_CHANNEL, password: None }));
+                ui.close();
+            }
+        } else if ui.add_enabled(s.my_channel() != c.id && !voxa_proto::is_spacer(&c.name), egui::Button::new("➡  Join Channel")).clicked() {
             a.push(Action::Join(c.id));
             ui.close();
         }
@@ -1839,6 +1850,11 @@ fn info_view(app: &mut VoxaApp, ui: &mut Ui) {
                 let b = egui::Button::new(RichText::new("➡ Join Channel").color(Color32::WHITE)).fill(accent()).min_size(egui::vec2(ui.available_width(), 30.0));
                 if ui.add(b).clicked() {
                     a.push(Action::Join(id));
+                }
+            } else if s.supports("1.17.0") {
+                let b = egui::Button::new("🚪 Leave Channel").min_size(egui::vec2(ui.available_width(), 30.0));
+                if ui.add(b).on_hover_text("Stay connected to the server without being in a channel").clicked() {
+                    a.push(Action::Send(C2S::SwitchChannel { channel: NO_CHANNEL, password: None }));
                 }
             }
             section(ui, "Channel");

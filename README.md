@@ -30,7 +30,7 @@ server needs a newer version, Voxa tells you and opens the update window.
   * Chat in the main area.
   * Info panel on the right.
 * **Themes:** pick one under **Options ▸ Application ▸ Themes**, where every theme is
-  shown as a small preview of the window.
+  shown as a small preview of the window (the list scrolls; the window can be resized).
   * **Solid:** Dark, Light, 🌸 Sakura (cherry blossom), 🍼 Layette (baby blue),
     🍷 Crimson, 🌌 Midnight (purple), 🍵 Celadon (jade green), 🟡 Mustard (#FFDB58),
     Slate (soft charcoal) and Obsidian (near black).
@@ -78,6 +78,10 @@ server needs a newer version, Voxa tells you and opens the update window.
 * **Muted warning:** talking while your microphone is muted plays a warning sound and
   shows a red notice, like TeamSpeak. Turn it off under **Options ▸ Playback**.
 * **Volume:** per-user volume, local mute and notification sounds.
+* **Saves upload bandwidth:** when nobody else in your channel can hear you (you're alone,
+  or the others are on the web page or have muted their speakers), Voxa sends no voice
+  at all. Your speaking ring still lights up, and sending starts the moment someone who
+  can listen joins.
 * **Join / leave sounds:** a rising pair of notes when someone joins your channel, a
   falling pair when someone leaves (turn sounds off under **Options ▸ Playback**).
 * **Auto away** (Voxa Server 1.16.0+): after 10 minutes without keyboard, mouse or
@@ -91,7 +95,9 @@ server needs a newer version, Voxa tells you and opens the update window.
   to join it.
   * Turn off **Options ▸ Application ▸ Join a channel when connecting** to always connect
     this way (a bookmark's default channel is still joined).
-  * Click your name ▸ **🚪 Leave Channel** to step out of a channel and stay on the server.
+  * **🚪 Leave the channel** and stay on the server: the 🚪 button on the "Voice
+    Connected" card at the bottom left, your channel's right-click menu, its info panel,
+    or the menu under your name.
   * Outside a channel nothing is transmitted, and there is no channel chat, files or
     screen sharing.
 * **People:** everyone who is online is listed under **👥 People** with where they are

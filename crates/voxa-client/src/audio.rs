@@ -88,6 +88,9 @@ pub struct VoiceShared {
     pub ptt_hotkey: AtomicBool,
     /// Not in a channel: nothing is transmitted.
     pub no_channel: AtomicBool,
+    /// Nobody else in the channel can hear you (alone, or only web pages / people with
+    /// muted speakers): voice is not sent, to save upload bandwidth.
+    pub no_listeners: AtomicBool,
     /// Do not disturb: no notification sounds.
     pub busy: AtomicBool,
 }
@@ -122,6 +125,7 @@ impl VoiceShared {
             testing: AtomicBool::new(false),
             ptt_hotkey: AtomicBool::new(false),
             no_channel: AtomicBool::new(false),
+            no_listeners: AtomicBool::new(false),
             busy: AtomicBool::new(false),
         })
     }
@@ -918,6 +922,13 @@ fn encoder_loop(
                 && shared.transmit_allowed.load(Ordering::Relaxed)
                 && !shared.push_to_mute.load(Ordering::Relaxed)
                 && !shared.testing.load(Ordering::Relaxed);
+            let unheard = shared.no_listeners.load(Ordering::Relaxed);
+            if active && unheard {
+                // Nobody can hear it, so nothing is sent; your speaking ring still shows.
+                transmitting = true;
+                shared.self_talking.store(true, Ordering::Relaxed);
+                continue;
+            }
             if active {
                 let br = shared.bitrate.load(Ordering::Relaxed);
                 if enc.bitrate_bps != br {
@@ -944,8 +955,10 @@ fn encoder_loop(
                 }
                 transmitting = true;
             } else if transmitting {
-                frame_seq = frame_seq.wrapping_add(1);
-                send(Kind::Voice, &voice::encode_voice(frame_seq, voice::FLAG_END, &[]));
+                if !unheard {
+                    frame_seq = frame_seq.wrapping_add(1);
+                    send(Kind::Voice, &voice::encode_voice(frame_seq, voice::FLAG_END, &[]));
+                }
                 transmitting = false;
                 ptt_release_at = None;
             }

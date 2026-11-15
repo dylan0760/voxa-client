@@ -929,7 +929,9 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             }
             _ if d.app_tab == 1 => {
                 app_tabs(ui, &mut d.app_tab);
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                // A plain ScrollArea that fills the window stops it from being resized.
+                crate::updater::fill_list(ui, "themes", 60.0, 120.0, |ui| {
+                    ui.set_width(ui.available_width());
                     let all = crate::config::ThemeKind::ALL;
                     for (title, note, kinds) in [
                         ("Solid", "One colour family per theme.", all.iter().filter(|k| !k.is_gradient()).copied().collect::<Vec<_>>()),

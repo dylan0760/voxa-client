@@ -914,6 +914,11 @@ impl VoxaApp {
             if self.tray.is_none() {
                 self.tray = Tray::new("Voxa", crate::icon::icon_rgba(32, false), 32, "Voxa");
             }
+            // No tray icon (e.g. the taskbar was not ready yet at sign-in): a hidden window
+            // could never be opened again, so show it.
+            if self.tray.is_none() && self.hidden {
+                self.show_window();
+            }
         } else {
             self.tray = None;
             if self.hidden {
@@ -2145,6 +2150,17 @@ impl eframe::App for VoxaApp {
         // What the voice and sound threads need to know.
         let no_channel = self.sess.as_ref().map(|s| s.welcomed && s.my_channel() == NO_CHANNEL).unwrap_or(false);
         self.voice_shared.no_channel.store(no_channel, Ordering::Relaxed);
+        // Alone in the channel (or only with web pages / people whose speakers are muted,
+        // who get no voice): talking is not sent to the server at all.
+        let no_listeners = self
+            .sess
+            .as_ref()
+            .map(|s| {
+                let ch = s.my_channel();
+                s.welcomed && ch != NO_CHANNEL && !s.clients.values().any(|c| c.id != s.me && c.channel == ch && c.platform != "Web" && !c.output_muted)
+            })
+            .unwrap_or(false);
+        self.voice_shared.no_listeners.store(no_listeners, Ordering::Relaxed);
         self.voice_shared.busy.store(self.settings.presence == Presence::Busy, Ordering::Relaxed);
         // Avatar pictures that were drawn but are not here yet.
         let wants = crate::avatars::take_wants();
