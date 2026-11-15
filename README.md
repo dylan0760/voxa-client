@@ -133,6 +133,9 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
 * **The 🖧 Server tab** shows what happens on the server: who connects and leaves, where
   you are, the welcome message. Nobody can write there (Voxa Server 1.19.0 refuses it):
   chat in a channel, or with direct and group messages.
+  * On Voxa Server 1.20.0+ the events are only for people with the **See server events**
+    permission (Server Admins by default). Everyone else sees the server's **welcome
+    message** there instead.
 * **Rich text** (Discord-style Markdown):
   * `**bold**`, `*italic*`, `__underline__`, `~~strikethrough~~` and `` `inline code` ``;
   * `> quotes`, `# headings`, and `- bullet` or `1. numbered` lists;

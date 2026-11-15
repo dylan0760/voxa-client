@@ -1973,7 +1973,10 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
     }
     // Header: current conversation, topic and actions.
     let (title, topic) = match s.tab {
-        ChatKey::Server => (format!("🖧  {}", s.server.as_ref().map(|i| i.name.clone()).unwrap_or_default()), "Server chat".to_string()),
+        ChatKey::Server => (
+            format!("🖧  {}", s.server.as_ref().map(|i| i.name.clone()).unwrap_or_default()),
+            if s.sees_server_events() { "Server events".to_string() } else { "Welcome".to_string() },
+        ),
         ChatKey::Channel => {
             let c = s.channels.get(&s.my_channel());
             (format!("🔊  {}", c.map(|c| c.name.clone()).unwrap_or_default()), c.map(|c| c.topic.clone()).unwrap_or_default())
@@ -2157,6 +2160,29 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
         }
     }
     chat_area(s, &mut app.actions, &mut app.chat_input, &app.settings, &mut app.emoji, &app.previews, ui);
+}
+
+/// The Server tab for people without "See server events": the server's welcome message.
+fn server_welcome(s: &Session, ui: &mut Ui) {
+    let t = theme();
+    let (name, welcome) = s.server.as_ref().map(|i| (i.name.clone(), i.welcome_message.clone())).unwrap_or_default();
+    egui::CentralPanel::default().frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin::same(24))).show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.label(RichText::new(format!("Welcome to {name}")).strong().size(20.0));
+            ui.add_space(10.0);
+            if welcome.trim().is_empty() {
+                ui.label(RichText::new("The server has no welcome message.").color(t.dim));
+            } else {
+                message_text(ui, &welcome, (0, 0));
+            }
+            ui.add_space(16.0);
+            ui.label(
+                RichText::new("Chat in a channel (double-click one to join it), or with direct and group messages in 💬 Messages.")
+                    .small()
+                    .color(t.dim),
+            );
+        });
+    });
 }
 
 /// Shows a conversation: in the Messages window (brought to the front), or as a chat tab.
@@ -3029,6 +3055,11 @@ fn message_body(
 fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings: &Settings, picker: &mut EmojiPicker, previews: &crate::links::Previews, ui: &mut Ui) {
     let previews = settings.link_previews.then_some(previews);
     let t = theme();
+    // Without "See server events" the Server tab shows the welcome message.
+    if s.tab == ChatKey::Server && !s.sees_server_events() {
+        server_welcome(s, ui);
+        return;
+    }
     let my_uid = s.my_uid.clone();
     let my_channel = s.my_channel();
     let target = chat_target(s);

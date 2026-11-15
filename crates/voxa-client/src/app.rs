@@ -309,6 +309,8 @@ pub struct Session {
     pub presences: HashMap<ClientId, Presence>,
     /// Direct messages in their own window (Options ▸ Application).
     pub dm_win: DmWindow,
+    /// The Server tab's history was asked for.
+    pub server_history_asked: bool,
     pub tab: ChatKey,
     pub selected: Selection,
     pub watching: HashSet<ClientId>,
@@ -471,10 +473,11 @@ impl Session {
     /// Windows does: minimized and flashing in the taskbar, never in front of your game.
     /// Returns whether to play the message sound: only when the window is minimized or
     /// not open (with chat tabs: unless the conversation is the open tab).
-    pub fn dm_arrived(&mut self, id: DmId, from_me: bool, popped: bool, busy: bool) -> bool {
+    pub fn dm_arrived(&mut self, id: DmId, from_me: bool, popped: bool, busy: bool, main_shown: bool) -> bool {
         let w = &mut self.dm_win;
         let visible = w.open && !w.minimized;
-        let viewing = if popped { visible && w.sel == Some(id) } else { self.tab == ChatKey::Dm(id) };
+        // With chat tabs, the open tab only counts as read while the main window is shown.
+        let viewing = if popped { visible && w.sel == Some(id) } else { main_shown && self.tab == ChatKey::Dm(id) };
         if !viewing {
             if let Some(d) = self.dms.get_mut(id) {
                 d.log.unread += 1;
@@ -655,6 +658,25 @@ impl Session {
     pub fn log(&mut self, kind: EventKind, text: impl Into<String>) {
         self.server_log.lines.push(ChatLine::Event { ts: now_unix(), text: text.into(), kind });
     }
+
+    /// May you see the Server tab's events (servers 1.20.0+: "See server events")? Without
+    /// it the tab shows the welcome message. Older servers show them to everyone.
+    pub fn sees_server_events(&self) -> bool {
+        if !self.supports("1.20.0") {
+            return true;
+        }
+        self.me().map(|m| self.server_perms_of(m) & perm::SERVER_EVENTS != 0).unwrap_or(false)
+    }
+
+    /// Fetches the Server tab's history once you may see it (also when an admin gives you
+    /// the permission later; personal permissions arrive after Welcome).
+    pub fn server_events(&mut self) {
+        if self.welcomed && !self.server_history_asked && self.sees_server_events() {
+            self.server_history_asked = true;
+            self.conn.send(C2S::FetchHistory { target: TextTarget::Server, before: None, limit: 50 });
+            self.fetch_pins(TextTarget::Server);
+        }
+    }
 }
 
 /// Someone joins / leaves your channel: a rising and a falling pair of notes.
@@ -803,7 +825,9 @@ impl VoxaApp {
         };
         // First start of a new version: show its change log (not on a fresh install).
         if app.settings.last_seen_version != APP_VERSION {
-            if !app.settings.fresh {
+            // Not after going back to an older version.
+            let seen = &app.settings.last_seen_version;
+            if !app.settings.fresh && (seen.is_empty() || voxa_proto::update::is_newer(APP_VERSION, seen)) {
                 app.show_whats_new();
             }
             app.settings.last_seen_version = APP_VERSION.to_string();
@@ -859,6 +883,11 @@ impl VoxaApp {
             }
             // The Messages window with the people list (as from the tray menu).
             "people-window" => self.show_people(),
+            // The main window on the Server tab (waits until connected).
+            "server-tab" => match &mut self.sess {
+                Some(s) if s.welcomed => s.tab = ChatKey::Server,
+                _ => self.debug_done = false,
+            },
             // The Messages window on the first group chat (waits until there is one).
             "open-group" => {
                 let found = self.sess.as_ref().and_then(|s| s.dms.iter().position(|d| d.group.is_some() && !d.log.lines.iter().all(|l| !matches!(l, ChatLine::Msg(_)))));
@@ -1418,6 +1447,7 @@ impl VoxaApp {
             auto_away: false,
             presences: HashMap::new(),
             dm_win: DmWindow::default(),
+            server_history_asked: false,
             tab: ChatKey::Channel,
             selected: Selection::Server,
             watching: HashSet::new(),
@@ -1832,8 +1862,8 @@ impl VoxaApp {
                 if supports_limits {
                     s.conn.send(C2S::GetFileLimits);
                 }
-                s.conn.send(C2S::FetchHistory { target: TextTarget::Server, before: None, limit: 50 });
-                s.fetch_pins(TextTarget::Server);
+                // The Server tab's history is fetched once you may see it (`server_events`).
+                s.server_history_asked = false;
                 let ch = s.my_channel();
                 if ch == NO_CHANNEL {
                     s.tab = ChatKey::Server;
@@ -2011,7 +2041,7 @@ impl VoxaApp {
                     }
                     let id = s.dm_open(&uid, &name);
                     s.dm_push(id, msg);
-                    if s.dm_arrived(id, from_me, self.settings.dm_window, self.settings.presence == Presence::Busy) {
+                    if s.dm_arrived(id, from_me, self.settings.dm_window, self.settings.presence == Presence::Busy, !self.hidden) {
                         shared.play_tones(MESSAGE_TONES);
                     }
                     return;
@@ -2026,7 +2056,7 @@ impl VoxaApp {
                     s.dms[id].open = true;
                     let from_me = msg.from_uid == s.my_uid;
                     s.dm_push(id, msg);
-                    if s.dm_arrived(id, from_me, self.settings.dm_window, self.settings.presence == Presence::Busy) {
+                    if s.dm_arrived(id, from_me, self.settings.dm_window, self.settings.presence == Presence::Busy, !self.hidden) {
                         shared.play_tones(MESSAGE_TONES);
                     }
                     return;
@@ -2267,7 +2297,10 @@ impl VoxaApp {
                     let what = if pinned { "pinned a message to this chat" } else { "unpinned a message" };
                     log.lines.push(ChatLine::Event { ts: now_unix(), text: format!("📌 {by} {what}"), kind: EventKind::Info });
                 }
-                s.fetch_pins(target);
+                // Without "See server events" the Server tab's pins would only be refused.
+                if target != TextTarget::Server || s.sees_server_events() {
+                    s.fetch_pins(target);
+                }
             }
             S2C::ChatCleared { target, by } => {
                 s.pins.remove(&target);
@@ -2524,6 +2557,9 @@ impl eframe::App for VoxaApp {
             self.updater.auto_check();
         }
         self.startup_retry(ctx);
+        if let Some(s) = &mut self.sess {
+            s.server_events();
+        }
         if self.hide_frames > 0 {
             self.hide_frames -= 1;
             if self.hidden {
