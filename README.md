@@ -127,9 +127,12 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   moderate.
 
 ### Chat
-* **Persistent encrypted history:** channel and server chat is stored encrypted on the
-  server, so the history follows you to any PC (like Discord). Private messages are
+* **Persistent encrypted history:** channel chat is stored encrypted on the server, so
+  the history follows you to any PC (like Discord). Direct messages and group chats are
   also supported.
+* **The 🖧 Server tab** shows what happens on the server: who connects and leaves, where
+  you are, the welcome message. Nobody can write there (Voxa Server 1.19.0 refuses it):
+  chat in a channel, or with direct and group messages.
 * **Rich text** (Discord-style Markdown):
   * `**bold**`, `*italic*`, `__underline__`, `~~strikethrough~~` and `` `inline code` ``;
   * `> quotes`, `# headings`, and `- bullet` or `1. numbered` lists;
@@ -155,19 +158,34 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
 * **Pinned messages** (Voxa Server 1.8.0+): pin messages with 📌 (hover or right-click).
   A **📌 Pinned** bar at the top of the chat lists them. Needs the **Pin messages**
   permission.
-* **Messages window** (like Steam): direct messages open in a window of their own that
+* **Messages window** (like Steam's friends and chat window): a window of its own that
   you can move to another screen.
-  * Your open conversations are listed on the left with who's online and how many
-    messages are unread; the selected one is on the right with its own message box,
-    emoji, images (button, Ctrl+V or drag and drop) and 🗑.
-  * A new message opens the window without taking the keyboard from your game, and
-    flashes it in the taskbar (not while you're *Do not disturb*), also while Voxa sits
-    in the tray. The window title shows how many messages are unread.
-  * Open a conversation by clicking someone under 👥 People, double-clicking them in the
-    channel tree, or **💬 Messages** above the chat.
-  * Closing the window or a conversation (✖) keeps everything; it all comes back next time.
+  * **Left:** a search box, your **chats** (direct and group, with unread counts), **➕ New
+    group chat**, then everyone on the server: **online** (with their status and channel)
+    and **offline** (with when they were last seen). Click someone to chat; right-click
+    for **Send message**, **Invite to group chat** and **New group chat with them**.
+  * **Right:** the selected chat with its own message box, emoji, images (button, Ctrl+V
+    or drag and drop) and 🗑.
+  * Open it from the tray (**People on this server**), with **⧉ Open in its own window**
+    in the 👥 People panel, **💬 Messages** above the chat, or by clicking or
+    double-clicking someone.
+  * **New messages, like Windows does it:** when the window is closed or minimized, it
+    waits **minimized in the taskbar, flashing**, and a sound plays; it never jumps in
+    front of your game. When the window is open on screen, the message just appears (no
+    sound). Nothing pops up or plays while you're *Do not disturb*. Works while Voxa sits
+    in the tray too.
+  * Closing the window or a chat keeps everything; it all comes back next time.
   * Prefer tabs in the main window? Turn off **Options ▸ Application ▸ Open direct
     messages in their own window**.
+* **Group chats** (Voxa Server 1.19.0+), like Steam's: chat with several people at once.
+  * **➕ New group chat** in the Messages window: give it a name (or leave it empty for the
+    names of the people), tick the people (online or offline) and start it.
+  * In the chat's header: the people in it, **➕ Add people**, **✏ Rename**, **🚪 Leave**
+    and 🗑 (deletes your copy of the history from this PC).
+  * Any member can add people, rename it or leave; up to 50 people per group chat.
+  * Like direct messages, the history is kept only on the members' PCs (encrypted). The
+    server only keeps a message for members who are offline, until they connect.
+  * Pictures can be sent too; only the chat's members can open them.
 * **Direct messages** are kept **only on your PC**, never on the server, encrypted for
   your Windows account.
   * Delete single messages or a whole conversation (🗑 in its header). That removes your
@@ -283,10 +301,9 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   open such a link.
 * **System tray:** closing the window (✕) keeps Voxa running in the notification area.
   Toggle it in **Options ▸ Application ▸ System tray**. Right-click the tray icon for:
-  * **People on this server**: opens Voxa on the server you're connected to with the
-    👥 People list showing;
-  * **Messages**: opens the Messages window (or the People list if you have no
-    conversations yet);
+  * **People on this server**: opens the Messages window with everyone on the server you
+    are connected to (like Steam's friends list), or the 👥 People list with chat tabs;
+  * **Messages**: opens the Messages window on your chats;
   * mute microphone / speakers, disconnect and quit.
 * **Connect on startup:** tick **Connect when Voxa starts** on a bookmark (**Bookmarks**;
   one bookmark at a time). Voxa connects to it whenever it starts, also with Windows in

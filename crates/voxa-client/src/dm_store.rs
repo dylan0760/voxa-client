@@ -149,6 +149,7 @@ pub fn list(server_key: &str) -> Vec<(String, String, u64)> {
         .filter(|e| e.path().extension().map(|x| x == "vdm").unwrap_or(false))
         .filter_map(|e| std::fs::read(e.path()).ok())
         .filter_map(|data| open_any(server_key, &data))
+        .filter(|d| !d.uid.starts_with("group:"))
         .map(|d| (d.uid, d.name, d.messages.last().map(|m| m.ts).unwrap_or(0)))
         .collect();
     out.sort_by(|a, b| b.2.cmp(&a.2));

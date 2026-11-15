@@ -56,6 +56,9 @@ pub struct StartupConnect {
     pub retry_at: Option<std::time::Instant>,
 }
 
+/// The sound of a direct or group message.
+const MESSAGE_TONES: &[(f32, u32)] = &[(880.0, 60), (1175.0, 80)];
+
 /// Tries of the startup connection (one every 10 seconds).
 const STARTUP_TRIES: u32 = 6;
 
@@ -75,15 +78,47 @@ pub struct DmWindow {
     pub focus_now: bool,
     /// Flash its taskbar button next frame (a message arrived).
     pub attention: bool,
+    /// The window is minimized (then a new message plays a sound and flashes it).
+    pub minimized: bool,
+    /// Show it minimized (a message arrived while it was closed: it waits in the taskbar).
+    pub show_minimized: bool,
+    /// Filter of the people list.
+    pub search: String,
+    /// Starting a group chat, or adding people to one.
+    pub compose: Option<GroupCompose>,
+    /// A group chat you just started: shown as soon as the server confirms it.
+    pub pending_group: bool,
+    /// Renaming the selected group chat (the new name being typed).
+    pub rename: Option<String>,
+}
+
+/// The "New group chat" / "Add people" form in the Messages window.
+#[derive(Default)]
+pub struct GroupCompose {
+    /// Adding people to this group chat (None: a new one).
+    pub invite_to: Option<GroupChatId>,
+    pub name: String,
+    /// The people ticked (uid, nickname).
+    pub picked: Vec<(String, String)>,
 }
 
 /// A direct message conversation, kept per person (identity), stored only on this PC.
+/// Group chats (servers 1.19.0+) are conversations too: `uid` is `group:<id>`.
 pub struct Dm {
     pub uid: String,
     pub name: String,
     pub log: ChatLog,
     /// Shown as a tab.
     pub open: bool,
+    /// A group chat: who is in it (None for a direct message).
+    pub group: Option<GroupChatInfo>,
+    /// A group chat you left (its history stays on this PC).
+    pub left: bool,
+}
+
+/// The conversation key of a group chat.
+pub fn group_uid(id: GroupChatId) -> String {
+    format!("group:{id}")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -345,7 +380,7 @@ impl Session {
         match target {
             TextTarget::Server => self.server_perms_of(me) & bit == bit,
             TextTarget::Channel(_) => self.perms() & bit == bit,
-            TextTarget::Private(_) => false,
+            TextTarget::Private(_) | TextTarget::Group(_) => false,
         }
     }
 
@@ -407,8 +442,68 @@ impl Session {
             log.lines = st.messages.into_iter().map(ChatLine::Msg).collect();
         }
         let name = if name.is_empty() { known } else { name.to_string() };
-        self.dms.push(Dm { uid: uid.to_string(), name, log, open: true });
+        self.dms.push(Dm { uid: uid.to_string(), name, log, open: true, group: None, left: false });
         self.dms.len() - 1
+    }
+
+    /// The conversation of a group chat (made, with its stored history, if new). `open`
+    /// also shows it in the list.
+    pub fn group_conv(&mut self, info: GroupChatInfo, open: bool) -> DmId {
+        let uid = group_uid(info.id);
+        let i = match self.dms.iter().position(|d| d.uid == uid) {
+            Some(i) => i,
+            None => {
+                let i = self.dm_open(&uid, &info.name);
+                self.dms[i].open = false;
+                i
+            }
+        };
+        let d = &mut self.dms[i];
+        d.name = info.name.clone();
+        d.group = Some(info);
+        d.left = false;
+        d.open |= open;
+        i
+    }
+
+    /// A direct or group message arrived in conversation `id`: counts it as unread unless
+    /// you are looking at it, and with the Messages window (`popped`) brings that up like
+    /// Windows does: minimized and flashing in the taskbar, never in front of your game.
+    /// Returns whether to play the message sound: only when the window is minimized or
+    /// not open (with chat tabs: unless the conversation is the open tab).
+    pub fn dm_arrived(&mut self, id: DmId, from_me: bool, popped: bool, busy: bool) -> bool {
+        let w = &mut self.dm_win;
+        let visible = w.open && !w.minimized;
+        let viewing = if popped { visible && w.sel == Some(id) } else { self.tab == ChatKey::Dm(id) };
+        if !viewing {
+            if let Some(d) = self.dms.get_mut(id) {
+                d.log.unread += 1;
+            }
+        }
+        if from_me {
+            return false;
+        }
+        if !popped {
+            return !viewing;
+        }
+        if busy || visible {
+            return false;
+        }
+        if !w.open {
+            w.open = true;
+            w.show_minimized = true;
+            w.sel = Some(id);
+        } else if w.sel.is_none() {
+            w.sel = Some(id);
+        }
+        w.attention = true;
+        true
+    }
+
+    /// The group chat with this id, if you know it.
+    pub fn group_index(&self, id: GroupChatId) -> Option<DmId> {
+        let uid = group_uid(id);
+        self.dms.iter().position(|d| d.uid == uid)
     }
 
     /// The session id of the person in a conversation, if they are online.
@@ -422,9 +517,20 @@ impl Session {
     }
 
     pub fn dm_name(&self, id: DmId) -> String {
+        if self.dms.get(id).is_some_and(|d| d.group.is_some()) {
+            return self.dms[id].name.clone();
+        }
         match self.dm_online(id) {
             Some(c) => self.client_name(c),
             None => self.dms.get(id).map(|d| d.name.clone()).unwrap_or_default(),
+        }
+    }
+
+    /// The chat target of a conversation: the group chat, or the person when online.
+    pub fn dm_target(&self, id: DmId) -> TextTarget {
+        match self.dms.get(id).and_then(|d| d.group.as_ref()) {
+            Some(g) => TextTarget::Group(g.id),
+            None => TextTarget::Private(self.dm_online(id).unwrap_or(0)),
         }
     }
 
@@ -442,7 +548,7 @@ impl Session {
         match target {
             TextTarget::Server => Some(&mut self.server_log),
             TextTarget::Channel(ch) => self.channel_logs.get_mut(&ch),
-            TextTarget::Private(_) => None,
+            TextTarget::Private(_) | TextTarget::Group(_) => None,
         }
     }
 
@@ -751,6 +857,42 @@ impl VoxaApp {
                     _ => self.debug_done = false,
                 }
             }
+            // The Messages window with the people list (as from the tray menu).
+            "people-window" => self.show_people(),
+            // The Messages window on the first group chat (waits until there is one).
+            "open-group" => {
+                let found = self.sess.as_ref().and_then(|s| s.dms.iter().position(|d| d.group.is_some() && !d.log.lines.iter().all(|l| !matches!(l, ChatLine::Msg(_)))));
+                match found {
+                    Some(i) => {
+                        self.show_people();
+                        if let Some(s) = &mut self.sess {
+                            s.dm_win.sel = Some(i);
+                        }
+                    }
+                    None => self.debug_done = false,
+                }
+            }
+            // The Messages window on the "New group chat" form.
+            "group-form" => {
+                self.show_people();
+                if let Some(s) = &mut self.sess {
+                    s.dm_win.compose = Some(GroupCompose::default());
+                }
+            }
+            // Starts a group chat with everyone else online, then writes in it.
+            "make-group" => {
+                static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                let Some(s) = &mut self.sess else { return };
+                let others: Vec<String> = s.clients.values().filter(|c| c.uid != s.my_uid).map(|c| c.uid.clone()).collect();
+                if let Some(g) = s.dms.iter().find_map(|d| d.group.as_ref().map(|g| g.id)) {
+                    s.conn.send(C2S::SendText { target: TextTarget::Group(g), text: "Welcome to the group! Raid at 8 🎮".into() });
+                } else {
+                    if others.len() >= 2 && !ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        s.conn.send(C2S::CreateGroupChat { name: "Raid night".into(), members: others });
+                    }
+                    self.debug_done = false;
+                }
+            }
             // Sends a direct message to the first other person (waits until someone is on).
             "send-dm" => {
                 let Some(s) = &mut self.sess else { return };
@@ -1038,8 +1180,18 @@ impl VoxaApp {
         self.connect_bookmark(i);
     }
 
-    /// The window on the current server with the People list showing (tray menu).
+    /// The people on the current server (tray menu): in the Messages window like Steam's
+    /// friends list, or (with chat tabs) the main window's People list.
     pub fn show_people(&mut self) {
+        if self.settings.dm_window {
+            if let Some(s) = &mut self.sess {
+                s.dm_win.open = true;
+                s.dm_win.focus_now = true;
+                s.dm_win.compose = None;
+                s.people_asked = None;
+            }
+            return;
+        }
         self.show_window();
         if let Some(s) = &mut self.sess {
             self.home = false;
@@ -1195,11 +1347,11 @@ impl VoxaApp {
                     });
                 }
             },
-            C2S::DeleteMessage { target: TextTarget::Private(_), id: msg } => {
+            C2S::DeleteMessage { target: TextTarget::Private(_) | TextTarget::Group(_), id: msg } => {
                 s.dms[id].log.lines.retain(|l| !matches!(l, ChatLine::Msg(x) if x.id == msg));
                 s.dm_save(id);
             }
-            C2S::ClearChat(TextTarget::Private(_)) => {
+            C2S::ClearChat(TextTarget::Private(_) | TextTarget::Group(_)) => {
                 let name = s.dm_name(id);
                 s.dms[id].log.lines.clear();
                 crate::dm_store::delete(&s.server_key, &s.dms[id].uid);
@@ -1859,26 +2011,23 @@ impl VoxaApp {
                     }
                     let id = s.dm_open(&uid, &name);
                     s.dm_push(id, msg);
-                    let popped = self.settings.dm_window;
-                    let w = &mut s.dm_win;
-                    let viewing = if popped { w.open && w.sel == Some(id) && w.focused } else { s.tab == ChatKey::Dm(id) };
-                    if !viewing {
-                        s.dms[id].log.unread += 1;
+                    if s.dm_arrived(id, from_me, self.settings.dm_window, self.settings.presence == Presence::Busy) {
+                        shared.play_tones(MESSAGE_TONES);
                     }
-                    if !from_me {
-                        shared.play_tones(&[(880.0, 60), (1175.0, 80)]);
-                        // Like Steam: the Messages window opens (without taking the keyboard
-                        // from your game) and flashes in the taskbar. Not when busy.
-                        if popped && self.settings.presence != Presence::Busy {
-                            let w = &mut s.dm_win;
-                            if !w.open {
-                                w.open = true;
-                                w.sel = Some(id);
-                            }
-                            if !w.focused {
-                                w.attention = true;
-                            }
-                        }
+                    return;
+                }
+                // A group chat message (servers 1.19.0+).
+                if let TextTarget::Group(gid) = msg.target {
+                    let id = match s.group_index(gid) {
+                        Some(i) => i,
+                        // A chat we were not told about yet: shown under a plain name.
+                        None => s.group_conv(GroupChatInfo { id: gid, name: "Group chat".into(), owner: String::new(), members: Vec::new(), created: 0 }, true),
+                    };
+                    s.dms[id].open = true;
+                    let from_me = msg.from_uid == s.my_uid;
+                    s.dm_push(id, msg);
+                    if s.dm_arrived(id, from_me, self.settings.dm_window, self.settings.presence == Presence::Busy) {
+                        shared.play_tones(MESSAGE_TONES);
                     }
                     return;
                 }
@@ -1985,6 +2134,35 @@ impl VoxaApp {
                 s.server_options = Some(o);
             }
             S2C::BannedHardware(ids) => s.hw_bans = ids.into_iter().collect(),
+            S2C::GroupChats(list) => {
+                for info in list {
+                    s.group_conv(info, false);
+                }
+            }
+            S2C::GroupChatUpdated(info) => {
+                let known = s.group_index(info.id).is_some();
+                let mine = info.owner == s.my_uid;
+                let names: Vec<String> = info.members.iter().map(|(_, n)| n.clone()).collect();
+                // Only a new group chat opens; changes (a rename, people added) don't reopen
+                // one you closed.
+                let id = s.group_conv(info, !known);
+                if !known {
+                    let text = if mine { format!("You started this group chat with {}", names.join(", ")) } else { format!("You were added to this group chat ({})", names.join(", ")) };
+                    s.dms[id].log.lines.push(ChatLine::Event { ts: now_unix(), text, kind: EventKind::Info });
+                    // The one you just made opens right away.
+                    if mine && std::mem::take(&mut s.dm_win.pending_group) {
+                        s.dm_win.sel = Some(id);
+                    }
+                }
+            }
+            S2C::GroupChatLeft(gid) => {
+                if let Some(i) = s.group_index(gid) {
+                    let d = &mut s.dms[i];
+                    d.left = true;
+                    d.open = false;
+                    d.log.lines.push(ChatLine::Event { ts: now_unix(), text: "You left this group chat".into(), kind: EventKind::Info });
+                }
+            }
             S2C::ClientPresence { id, presence } => {
                 if presence == Presence::Online {
                     s.presences.remove(&id);
@@ -2014,7 +2192,7 @@ impl VoxaApp {
                 let log = match target {
                     TextTarget::Server => &mut s.server_log,
                     TextTarget::Channel(ch) => s.channel_logs.entry(ch).or_default(),
-                    TextTarget::Private(_) => return,
+                    TextTarget::Private(_) | TextTarget::Group(_) => return,
                 };
                 log.loading = false;
                 log.complete = complete;
@@ -2083,7 +2261,7 @@ impl VoxaApp {
                 let log = match target {
                     TextTarget::Server => Some(&mut s.server_log),
                     TextTarget::Channel(ch) => s.channel_logs.get_mut(&ch),
-                    TextTarget::Private(_) => None,
+                    TextTarget::Private(_) | TextTarget::Group(_) => None,
                 };
                 if let Some(log) = log {
                     let what = if pinned { "pinned a message to this chat" } else { "unpinned a message" };
@@ -2096,7 +2274,7 @@ impl VoxaApp {
                 let log = match target {
                     TextTarget::Server => Some(&mut s.server_log),
                     TextTarget::Channel(ch) => s.channel_logs.get_mut(&ch),
-                    TextTarget::Private(_) => None,
+                    TextTarget::Private(_) | TextTarget::Group(_) => None,
                 };
                 if let Some(log) = log {
                     log.lines.retain(|l| !matches!(l, ChatLine::Msg(_)));

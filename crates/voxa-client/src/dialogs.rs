@@ -2263,7 +2263,7 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                 "the chat of channel \"{}\"",
                 app.sess.as_ref().and_then(|s| s.channels.get(&ch)).map(|c| c.name.clone()).unwrap_or_default()
             ),
-            TextTarget::Private(_) => "this conversation".into(),
+            TextTarget::Private(_) | TextTarget::Group(_) => "this conversation".into(),
         };
         window("Clear Chat History").open(&mut open).show_fill(ctx, |ui| {
             ui.set_max_width(420.0);
