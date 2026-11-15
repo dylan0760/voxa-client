@@ -49,6 +49,9 @@ pub struct Bookmark {
     #[serde(with = "crate::protect", default)]
     pub channel_password: String,
     pub identity: usize,
+    /// Connect to this server when Voxa starts (at most one bookmark).
+    #[serde(default)]
+    pub connect_on_startup: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

@@ -49,6 +49,16 @@ pub enum ChatKey {
 
 pub type DmId = usize;
 
+/// The startup connection to a bookmark and its retries.
+pub struct StartupConnect {
+    pub bookmark: usize,
+    pub attempts: u32,
+    pub retry_at: Option<std::time::Instant>,
+}
+
+/// Tries of the startup connection (one every 10 seconds).
+const STARTUP_TRIES: u32 = 6;
+
 /// The "Messages" window (like Steam's chat window): direct messages in a window of their
 /// own, with the open conversations listed on the left.
 #[derive(Default)]
@@ -581,6 +591,12 @@ pub struct VoxaApp {
     /// Started in the tray: frames left in which the window is hidden again (eframe shows
     /// the window after its first frame no matter what).
     pub hide_frames: u8,
+    /// Creating the Messages window failed (eframe cannot create windows in the frames it
+    /// runs while the main window is hidden): try again once the main window is visible.
+    pub dm_create_blocked: bool,
+    /// Connecting to the "connect when Voxa starts" bookmark (retried while the network or
+    /// the server is not up yet, e.g. right after signing in to Windows).
+    pub startup_connect: Option<StartupConnect>,
     pub updater: crate::updater::Updater,
     update_notified: bool,
     pub emoji: crate::ui::EmojiPicker,
@@ -665,6 +681,8 @@ impl VoxaApp {
             hidden: false,
             want_show: false,
             hide_frames: if started_in_tray() { 3 } else { 0 },
+            dm_create_blocked: false,
+            startup_connect: None,
             updater: crate::updater::Updater::new(UPDATE_REPO, is_client_msi, cc.egui_ctx.clone()).with_notes_dir(crate::config::config_dir()),
             update_notified: false,
             emoji: Default::default(),
@@ -694,6 +712,13 @@ impl VoxaApp {
         // no tray icon to open it from).
         app.hidden = started_in_tray();
         app.ensure_tray();
+        // The bookmark marked "Connect when Voxa starts" (a link on the command line wins).
+        if crate::link_arg().is_none() {
+            if let Some(i) = app.settings.bookmarks.iter().position(|b| b.connect_on_startup) {
+                app.startup_connect = Some(StartupConnect { bookmark: i, attempts: 1, retry_at: None });
+                app.connect_bookmark(i);
+            }
+        }
         if let Some(link) = crate::link_arg() {
             app.open_link_request(link);
         }
@@ -983,6 +1008,48 @@ impl VoxaApp {
         }
     }
 
+    /// Connects to a saved server.
+    pub fn connect_bookmark(&mut self, i: usize) {
+        if let Some(b) = self.settings.bookmarks.get(i).cloned() {
+            let req = ConnectRequest::from_bookmark(&b, &self.settings.nickname);
+            self.home = false;
+            self.connect(req);
+        }
+    }
+
+    /// Retries the startup connection when it is due; ends once connected.
+    fn startup_retry(&mut self, ctx: &egui::Context) {
+        let Some(sc) = &mut self.startup_connect else { return };
+        if self.sess.as_ref().is_some_and(|s| s.welcomed) {
+            self.startup_connect = None;
+            return;
+        }
+        let Some(at) = sc.retry_at else { return };
+        if self.sess.is_some() {
+            return;
+        }
+        if std::time::Instant::now() < at {
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            return;
+        }
+        sc.attempts += 1;
+        sc.retry_at = None;
+        let i = sc.bookmark;
+        self.connect_bookmark(i);
+    }
+
+    /// The window on the current server with the People list showing (tray menu).
+    pub fn show_people(&mut self) {
+        self.show_window();
+        if let Some(s) = &mut self.sess {
+            self.home = false;
+            self.show_members = true;
+            self.people_view = true;
+            // A fresh list right away.
+            s.people_asked = None;
+        }
+    }
+
     fn hide_window(&mut self) {
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         self.hidden = true;
@@ -1024,6 +1091,19 @@ impl VoxaApp {
             };
             match cmd {
                 Some(TrayCmd::Show) => self.show_window(),
+                Some(TrayCmd::People) => self.show_people(),
+                Some(TrayCmd::Messages) => {
+                    let any = self.sess.as_ref().is_some_and(|s| s.dms.iter().any(|d| d.open || d.log.unread > 0));
+                    if !any {
+                        // No conversations yet: pick someone from the People list.
+                        self.show_people();
+                    } else {
+                        if !self.settings.dm_window {
+                            self.show_window();
+                        }
+                        crate::ui::apply(self, crate::ui::Action::ShowMessages);
+                    }
+                }
                 Some(TrayCmd::ToggleMic) => crate::ui::apply(self, crate::ui::Action::ToggleMic),
                 Some(TrayCmd::ToggleSpeakers) => crate::ui::apply(self, crate::ui::Action::ToggleSpeakers),
                 Some(TrayCmd::Disconnect) => self.disconnect("Leaving"),
@@ -1084,6 +1164,10 @@ impl VoxaApp {
             s.conn.send(m);
             return;
         };
+        // A conversation from before a reconnect (e.g. a confirmation left open) is gone.
+        if id >= s.dms.len() {
+            return;
+        }
         match m {
             C2S::SendText { target: TextTarget::Private(_), text } => match s.dm_online(id) {
                 Some(client) => s.conn.send(C2S::SendText { target: TextTarget::Private(client), text }),
@@ -1396,6 +1480,19 @@ impl VoxaApp {
                     self.dlg.close_session_dialogs();
                     self.offline_log = ChatLog::default();
                     let text = if was_welcomed { format!("Disconnected: {reason}") } else { format!("Failed to connect: {reason}") };
+                    // The startup connection: the network or the server may not be up yet
+                    // (right after signing in to Windows). Retried quietly, unless the server
+                    // turned us away for a reason that waiting won't fix.
+                    let lower = reason.to_lowercase();
+                    let lasting = reason.starts_with(voxa_proto::UPDATE_REQUIRED) || ["banned", "password", "identity", "fingerprint"].iter().any(|w| lower.contains(w));
+                    if let Some(sc) = self.startup_connect.as_mut().filter(|sc| !was_welcomed && !lasting && sc.attempts < STARTUP_TRIES) {
+                        sc.retry_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
+                        let msg = format!("Could not reach the server ({reason}). Trying again in 10 seconds ({}/{STARTUP_TRIES})...", sc.attempts);
+                        self.offline_log.lines.push(ChatLine::Event { ts: now_unix(), text: msg, kind: EventKind::Warn });
+                        self.ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                        return;
+                    }
+                    self.startup_connect = None;
                     self.offline_log.lines.push(ChatLine::Event { ts: now_unix(), text: text.clone(), kind: EventKind::Error });
                     if reason.starts_with(voxa_proto::UPDATE_REQUIRED) {
                         // The server needs a newer Voxa: offer the update right away.
@@ -2248,6 +2345,7 @@ impl eframe::App for VoxaApp {
         if self.settings.auto_update {
             self.updater.auto_check();
         }
+        self.startup_retry(ctx);
         if self.hide_frames > 0 {
             self.hide_frames -= 1;
             if self.hidden {

@@ -14,6 +14,10 @@ pub enum RawTray {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrayCmd {
     Show,
+    /// Show the window on the server with the People list.
+    People,
+    /// Show the Messages window (direct messages).
+    Messages,
     ToggleMic,
     ToggleSpeakers,
     Disconnect,
@@ -46,6 +50,8 @@ pub fn install_handlers(tx: Sender<RawTray>, ctx: egui::Context) {
 pub struct Tray {
     _icon: TrayIcon,
     open: MenuItem,
+    people: MenuItem,
+    messages: MenuItem,
     mic: CheckMenuItem,
     speakers: CheckMenuItem,
     disconnect: MenuItem,
@@ -56,6 +62,8 @@ pub struct Tray {
 impl Tray {
     pub fn new(tooltip: &str, rgba: Vec<u8>, size: u32, app_name: &str) -> Option<Tray> {
         let open = MenuItem::new(format!("Open {app_name}"), true, None);
+        let people = MenuItem::new("People on this server", false, None);
+        let messages = MenuItem::new("Messages", false, None);
         let mic = CheckMenuItem::new("Mute Microphone", false, false, None);
         let speakers = CheckMenuItem::new("Mute Speakers", false, false, None);
         let disconnect = MenuItem::new("Disconnect", false, None);
@@ -63,6 +71,8 @@ impl Tray {
         let menu = Menu::new();
         menu.append_items(&[
             &open,
+            &people,
+            &messages,
             &PredefinedMenuItem::separator(),
             &mic,
             &speakers,
@@ -79,13 +89,15 @@ impl Tray {
             .with_menu_on_left_click(false)
             .build()
             .ok()?;
-        Some(Tray { _icon: tray, open, mic, speakers, disconnect, quit, state: None })
+        Some(Tray { _icon: tray, open, people, messages, mic, speakers, disconnect, quit, state: None })
     }
 
     pub fn map(&self, raw: RawTray) -> Option<TrayCmd> {
         match raw {
             RawTray::Activate => Some(TrayCmd::Show),
             RawTray::Menu(id) if &id == self.open.id() => Some(TrayCmd::Show),
+            RawTray::Menu(id) if &id == self.people.id() => Some(TrayCmd::People),
+            RawTray::Menu(id) if &id == self.messages.id() => Some(TrayCmd::Messages),
             RawTray::Menu(id) if &id == self.mic.id() => Some(TrayCmd::ToggleMic),
             RawTray::Menu(id) if &id == self.speakers.id() => Some(TrayCmd::ToggleSpeakers),
             RawTray::Menu(id) if &id == self.disconnect.id() => Some(TrayCmd::Disconnect),
@@ -101,6 +113,8 @@ impl Tray {
             return;
         }
         self.state = Some(s);
+        self.people.set_enabled(connected);
+        self.messages.set_enabled(connected);
         self.mic.set_enabled(connected);
         self.speakers.set_enabled(connected);
         self.disconnect.set_enabled(connected);

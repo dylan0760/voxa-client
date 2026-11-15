@@ -161,8 +161,8 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
     messages are unread; the selected one is on the right with its own message box,
     emoji, images (button, Ctrl+V or drag and drop) and 🗑.
   * A new message opens the window without taking the keyboard from your game, and
-    flashes it in the taskbar (not while you're *Do not disturb*). The window title shows
-    how many messages are unread.
+    flashes it in the taskbar (not while you're *Do not disturb*), also while Voxa sits
+    in the tray. The window title shows how many messages are unread.
   * Open a conversation by clicking someone under 👥 People, double-clicking them in the
     channel tree, or **💬 Messages** above the chat.
   * Closing the window or a conversation (✖) keeps everything; it all comes back next time.
@@ -282,7 +282,17 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
 * **`voxa://host:port` links:** Voxa asks before connecting, because any web page can
   open such a link.
 * **System tray:** closing the window (✕) keeps Voxa running in the notification area.
-  Toggle it in **Options ▸ Application ▸ System tray**.
+  Toggle it in **Options ▸ Application ▸ System tray**. Right-click the tray icon for:
+  * **People on this server**: opens Voxa on the server you're connected to with the
+    👥 People list showing;
+  * **Messages**: opens the Messages window (or the People list if you have no
+    conversations yet);
+  * mute microphone / speakers, disconnect and quit.
+* **Connect on startup:** tick **Connect when Voxa starts** on a bookmark (**Bookmarks**;
+  one bookmark at a time). Voxa connects to it whenever it starts, also with Windows in
+  the tray. If the network or the server isn't up yet (right after signing in), it tries
+  again every 10 seconds for a minute; a refusal (wrong password, ban, update needed)
+  is shown at once.
 * **Start with Windows:** **Options ▸ Application ▸ Start Voxa when I sign in to
   Windows** starts Voxa hidden in the system tray when you sign in (a per-user entry
   under `HKCU\…\CurrentVersion\Run`; with the tray turned off, the window opens instead).

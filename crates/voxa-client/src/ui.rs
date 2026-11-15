@@ -2162,39 +2162,70 @@ fn show_dm(s: &mut Session, dm: DmId, popped: bool) {
 /// The Messages window (like Steam's chat window): a window of its own with the open
 /// conversations on the left and the selected one on the right. Closing it keeps them.
 pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
+    let vid = egui::ViewportId::from_hash_of("voxa_messages");
     let popped = app.settings.dm_window;
-    let Some(s) = &mut app.sess else { return };
-    if !popped {
-        // Turned off: whatever was in the window becomes a tab.
-        if s.dm_win.open {
-            s.dm_win.open = false;
-            if let Some(id) = s.dm_win.sel {
-                s.tab = ChatKey::Dm(id);
+    // What to show: the open conversations and the selected one (None: the window is hidden).
+    let shown: Option<(Vec<DmId>, DmId)> = match &mut app.sess {
+        Some(s) if !popped => {
+            // Turned off: whatever was in the window becomes a tab.
+            if s.dm_win.open {
+                s.dm_win.open = false;
+                if let Some(id) = s.dm_win.sel {
+                    s.tab = ChatKey::Dm(id);
+                }
+            }
+            None
+        }
+        Some(s) => {
+            // Turned on while a conversation was a tab: it moves to the window.
+            if let ChatKey::Dm(id) = s.tab {
+                s.tab = if s.my_channel() != NO_CHANNEL { ChatKey::Channel } else { ChatKey::Server };
+                show_dm(s, id, true);
+            }
+            let open_ids: Vec<DmId> = s.dms.iter().enumerate().filter(|(_, d)| d.open).map(|(i, _)| i).collect();
+            if open_ids.is_empty() {
+                s.dm_win.open = false;
+            }
+            match open_ids.first() {
+                Some(&first) if s.dm_win.open && s.welcomed => {
+                    let sel = s.dm_win.sel.filter(|i| open_ids.contains(i)).unwrap_or(first);
+                    s.dm_win.sel = Some(sel);
+                    Some((open_ids, sel))
+                }
+                _ => None,
             }
         }
-        return;
-    }
-    // Turned on while a conversation was a tab: it moves to the window.
-    if let ChatKey::Dm(id) = s.tab {
-        s.tab = if s.my_channel() != NO_CHANNEL { ChatKey::Channel } else { ChatKey::Server };
-        show_dm(s, id, true);
-    }
-    if !s.dm_win.open || !s.welcomed {
-        return;
-    }
-    let open_ids: Vec<DmId> = s.dms.iter().enumerate().filter(|(_, d)| d.open).map(|(i, _)| i).collect();
-    let Some(&first) = open_ids.first() else {
-        s.dm_win.open = false;
-        return;
+        None => None,
     };
-    let sel = match s.dm_win.sel.filter(|i| open_ids.contains(i)) {
-        Some(i) => i,
-        None => {
-            s.dm_win.sel = Some(first);
-            first
+    if !popped {
+        return;
+    }
+    // eframe can only create a window in the frames it runs for a visible main window; the
+    // frames it runs while Voxa sits in the tray cannot (creating one there crashed Voxa when
+    // a message arrived). So the window is made (hidden) while the main window is visible and
+    // kept, and later only shown or hidden, which works in every frame.
+    let exists = ctx.input(|i| i.raw.viewports.get(&vid).is_some_and(|v| v.title.is_some()));
+    let main_visible = !app.hidden && !ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+    if main_visible {
+        app.dm_create_blocked = false;
+    }
+    // Started in the tray: the first frames may still make it (if not, it is caught).
+    let can_make = (main_visible || app.hide_frames > 0) && !app.dm_create_blocked;
+    if !exists && !can_make {
+        // Shown as soon as it can be made; the messages are kept (and counted as unread).
+        return;
+    }
+    let Some((open_ids, sel)) = shown else {
+        // Hidden, but kept alive so it can be shown from the tray later.
+        if let Some(s) = &mut app.sess {
+            s.dm_win.focused = false;
         }
+        let builder = messages_builder("Voxa Messages".into(), false);
+        let made = guarded(|| ctx.show_viewport_immediate(vid, builder, |_ui, _| {}));
+        app.dm_create_blocked |= made.is_none();
+        return;
     };
-    let vid = egui::ViewportId::from_hash_of("voxa_messages");
+    let Some(s) = &mut app.sess else { return };
     if std::mem::take(&mut s.dm_win.focus_now) {
         ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Minimized(false));
@@ -2205,19 +2236,16 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
     }
     let unread: usize = s.dms.iter().map(|d| d.log.unread).sum();
     let title = if unread > 0 { format!("({unread}) {} - Voxa Messages", s.dm_name(sel)) } else { format!("{} - Voxa Messages", s.dm_name(sel)) };
-    let builder = egui::ViewportBuilder::default()
-        .with_title(title)
-        .with_app_id("voxa-messages")
-        .with_inner_size([780.0, 560.0])
-        .with_min_inner_size([520.0, 360.0])
-        .with_icon(egui::IconData { rgba: crate::icon::icon_rgba(64, false), width: 64, height: 64 });
+    let builder = messages_builder(title, true);
     let t = theme();
-    let VoxaApp { sess, actions, settings, previews, .. } = app;
+    let VoxaApp { sess, actions, settings, previews, dm_create_blocked, .. } = app;
     let Some(s) = sess.as_mut() else { return };
     let mut window_actions: Vec<Action> = Vec::new();
-    ctx.show_viewport_immediate(vid, builder, |ui, _class| {
+    let made = guarded(|| ctx.show_viewport_immediate(vid, builder, |ui, _class| {
         let wa = &mut window_actions;
         if ui.input(|i| i.viewport().close_requested()) {
+            // Hidden, not destroyed: making it again may not be possible from the tray.
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
             s.dm_win.open = false;
         }
         s.dm_win.focused = ui.input(|i| i.viewport().focused.unwrap_or(false));
@@ -2295,9 +2323,32 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
             s.dm_win.picker = picker;
             s.tab = saved;
         });
-    });
+    }));
+    *dm_create_blocked |= made.is_none();
     // Everything the window asked for applies to its conversation.
     actions.extend(window_actions.into_iter().map(|a| Action::InDm(sel, Box::new(a))));
+}
+
+/// The Messages window's settings. Only the title and visibility ever change: eframe
+/// changes those on the existing window, while some other changes would make it build a
+/// new window, which is not possible while Voxa sits in the tray.
+fn messages_builder(title: String, visible: bool) -> egui::ViewportBuilder {
+    static ICON: std::sync::OnceLock<std::sync::Arc<egui::IconData>> = std::sync::OnceLock::new();
+    let icon = ICON.get_or_init(|| std::sync::Arc::new(egui::IconData { rgba: crate::icon::icon_rgba(64, false), width: 64, height: 64 })).clone();
+    egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_app_id("voxa-messages")
+        .with_inner_size([780.0, 560.0])
+        .with_min_inner_size([520.0, 360.0])
+        .with_icon(icon)
+        .with_visible(visible)
+}
+
+/// Shows the Messages window. If eframe still cannot make it in this frame, egui panics
+/// ("the user callback was never called") before any of our code ran: that is caught here
+/// (None) instead of closing Voxa, and the window is made later.
+fn guarded<R>(f: impl FnOnce() -> R) -> Option<R> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
 }
 
 /// State of the emoji picker popup.
@@ -3190,6 +3241,7 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
             }
         }
         Action::Connect(req) => {
+            app.startup_connect = None;
             app.home = false;
             app.connect(req);
         }
@@ -3202,11 +3254,9 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
             }
         }
         Action::ConnectBookmark(i) => {
-            if let Some(b) = app.settings.bookmarks.get(i).cloned() {
-                let req = ConnectRequest::from_bookmark(&b, &app.settings.nickname);
-                app.home = false;
-                app.connect(req);
-            }
+            // Your own choice ends any startup connection still being retried.
+            app.startup_connect = None;
+            app.connect_bookmark(i);
         }
         Action::Disconnect => app.disconnect("Leaving"),
         Action::LoadOlder(t) => {

@@ -631,6 +631,7 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 default_channel: s.channel_path(s.my_channel()),
                 channel_password: String::new(),
                 identity: s.req.identity,
+                connect_on_startup: false,
             };
             if !app.settings.bookmarks.iter().any(|x| x.address == b.address) {
                 app.settings.bookmarks.push(b);
@@ -641,6 +642,8 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     }
     let mut open = true;
     let mut connect = None;
+    // A bookmark that was just set to connect on startup (the others are turned off).
+    let mut only_startup: Option<usize> = None;
     egui::Window::new("Bookmarks").open(&mut open).collapsible(false).resizable(true).default_size([620.0, 360.0]).show_fill(ctx, |ui| {
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
@@ -696,6 +699,16 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                                 }
                             });
                         });
+                        form_row(ui, "Startup:", |ui| {
+                            if ui
+                                .checkbox(&mut b.connect_on_startup, "Connect when Voxa starts")
+                                .on_hover_text("Voxa connects to this server by itself when it starts (also with Windows, in the tray). Only one bookmark can do this.")
+                                .changed()
+                                && b.connect_on_startup
+                            {
+                                only_startup = d.selected;
+                            }
+                        });
                     });
                     ui.add_space(8.0);
                     if ui.button("🔌 Connect").clicked() {
@@ -707,6 +720,11 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             });
         });
     });
+    if let Some(only) = only_startup {
+        for (i, b) in app.settings.bookmarks.iter_mut().enumerate() {
+            b.connect_on_startup = i == only;
+        }
+    }
     if let Some(i) = connect {
         app.actions.push(Action::ConnectBookmark(i));
         open = false;
