@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use egui::{Color32, Frame, Margin, RichText, Ui};
@@ -79,6 +80,8 @@ pub struct OptionsDlg {
     pub join_channel: bool,
     /// Start with Windows (read from the registry when the dialog opens).
     pub autostart: bool,
+    /// Which device each device choice means right now ((input, setting) -> name).
+    pub resolved: HashMap<(bool, Option<String>), Option<String>>,
     /// Application sub-tab: 0 General, 1 Themes.
     pub app_tab: u8,
     pub auto_update: bool,
@@ -458,6 +461,7 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         join_channel: s.join_channel,
         app_tab: 0,
         autostart: crate::autostart::enabled(),
+        resolved: HashMap::new(),
         auto_update: s.auto_update,
         inputs: crate::audio::input_devices(),
         outputs: crate::audio::output_devices(),
@@ -755,14 +759,18 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         form_row(ui, "Capture device:", |ui| {
                             egui::ComboBox::from_id_salt("indev")
                                 .width(300.0)
-                                .selected_text(d.audio.input_device.clone().unwrap_or("Default".into()))
+                                .selected_text(crate::audio::device_label(&d.audio.input_device))
                                 .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut d.audio.input_device, None, "Default");
+                                    ui.selectable_value(&mut d.audio.input_device, None, crate::audio::device_label(&None))
+                                        .on_hover_text("The microphone Windows uses for calls, like other voice apps (with SteelSeries Sonar: Sonar - Microphone)");
+                                    let wd = Some(crate::audio::WINDOWS_DEFAULT.to_string());
+                                    ui.selectable_value(&mut d.audio.input_device, wd.clone(), crate::audio::device_label(&wd));
                                     for n in &d.inputs {
                                         ui.selectable_value(&mut d.audio.input_device, Some(n.clone()), n);
                                     }
                                 });
                         });
+                        device_now(ui, &mut d.resolved, true, &d.audio.input_device);
                     }
                     form_row(ui, "Transmission:", |ui| {
                         ui.vertical(|ui| {
@@ -817,14 +825,39 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     form_row(ui, "Playback device:", |ui| {
                         egui::ComboBox::from_id_salt("outdev")
                             .width(300.0)
-                            .selected_text(d.audio.output_device.clone().unwrap_or("Default".into()))
+                            .selected_text(crate::audio::device_label(&d.audio.output_device))
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut d.audio.output_device, None, "Default");
+                                ui.selectable_value(&mut d.audio.output_device, None, crate::audio::device_label(&None))
+                                    .on_hover_text("Where Windows plays calls, like other voice apps (with SteelSeries Sonar: Sonar - Chat, so Sonar's Chat slider sets Voxa's volume)");
+                                let wd = Some(crate::audio::WINDOWS_DEFAULT.to_string());
+                                ui.selectable_value(&mut d.audio.output_device, wd.clone(), crate::audio::device_label(&wd))
+                                    .on_hover_text("Where Windows plays everything else (with SteelSeries Sonar: Sonar - Game)");
                                 for n in &d.outputs {
                                     ui.selectable_value(&mut d.audio.output_device, Some(n.clone()), n);
                                 }
                             });
                     });
+                    device_now(ui, &mut d.resolved, false, &d.audio.output_device);
+                    // SteelSeries Sonar: voice belongs in its Chat channel.
+                    let sonar_chat = d.outputs.iter().find(|n| n.contains("Sonar") && n.contains("Chat")).cloned();
+                    if let Some(chat) = sonar_chat {
+                        let now = d.resolved.get(&(false, d.audio.output_device.clone())).cloned().flatten().unwrap_or_default();
+                        form_row(ui, "SteelSeries Sonar:", |ui| {
+                            if now == chat {
+                                ui.label(RichText::new("✔ Voxa plays through Sonar's Chat channel: set its volume with Sonar's Chat slider.").small().color(Color32::from_rgb(0x3B, 0xA5, 0x5D)));
+                            } else {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new("Voxa isn't playing through Sonar's Chat channel, so Sonar's Chat slider won't change its volume.").small().color(Color32::YELLOW));
+                                    if ui.button("Use Sonar Chat and Sonar Microphone").clicked() {
+                                        d.audio.output_device = Some(chat.clone());
+                                        if let Some(mic) = d.inputs.iter().find(|n| n.contains("Sonar") && n.contains("Microphone")) {
+                                            d.audio.input_device = Some(mic.clone());
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                    }
                     form_row(ui, "Voice volume:", |ui| {
                         ui.add(egui::Slider::new(&mut d.audio.output_volume, 0.0..=2.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
                     });
@@ -2739,6 +2772,17 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         if open && !ok {
             app.dlg.error = Some(e);
         }
+    }
+}
+
+/// Under a device choice: which device a default means right now (looked up once per choice).
+fn device_now(ui: &mut Ui, cache: &mut HashMap<(bool, Option<String>), Option<String>>, input: bool, setting: &Option<String>) {
+    let is_default = setting.is_none() || setting.as_deref() == Some(crate::audio::WINDOWS_DEFAULT);
+    let now = cache.entry((input, setting.clone())).or_insert_with(|| crate::audio::resolved_device_name(input, setting)).clone();
+    if is_default {
+        form_row(ui, "", |ui| {
+            ui.label(RichText::new(format!("Now: {}", now.unwrap_or_else(|| "no device found".into()))).small().weak());
+        });
     }
 }
 

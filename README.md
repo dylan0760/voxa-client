@@ -77,6 +77,14 @@ server needs a newer version, Voxa tells you and opens the update window.
   and plays it back. It works without a server, and nothing is transmitted meanwhile.
 * **Muted warning:** talking while your microphone is muted plays a warning sound and
   shows a red notice, like TeamSpeak. Turn it off under **Options ▸ Playback**.
+* **Devices** (**Options ▸ Capture / Playback**): by default Voxa uses Windows' **default
+  communication devices**, like other voice apps; "Now:" shows which device that is. Pick
+  **Default device (Windows)** or a specific device instead if you like. Voxa asks Windows
+  not to turn other sounds down while it uses a communication device.
+* **SteelSeries Sonar:** Sonar makes *Sonar - Chat* the communication device, so Voxa plays
+  through Sonar's **Chat** channel and Sonar's Chat slider sets Voxa's volume separately
+  from the game. Options ▸ Playback shows whether that is the case, with a **Use Sonar
+  Chat and Sonar Microphone** button when it isn't.
 * **Volume:** per-user volume, local mute and notification sounds.
 * **Saves upload bandwidth:** when nobody else in your channel can hear you (you're alone,
   or the others are on the web page or have muted their speakers), Voxa sends no voice

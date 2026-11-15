@@ -203,20 +203,42 @@ pub fn output_devices() -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn find_device(input: bool, name: &Option<String>) -> Option<cpal::Device> {
+/// Device setting for Windows' normal default device. `None` (Voxa's default) is the
+/// Windows *communication* device, like other voice apps (SteelSeries Sonar: "Chat").
+pub const WINDOWS_DEFAULT: &str = "\u{1}windows-default";
+
+/// How a device setting is shown.
+pub fn device_label(name: &Option<String>) -> String {
+    match name.as_deref() {
+        None => "Default communication device (Windows)".into(),
+        Some(WINDOWS_DEFAULT) => "Default device (Windows)".into(),
+        Some(n) => n.into(),
+    }
+}
+
+/// The name of the device a setting currently means (for showing where sound goes).
+pub fn resolved_device_name(input: bool, name: &Option<String>) -> Option<String> {
+    find_device_only(input, name).and_then(|d| d.description().ok().map(|x| x.name().to_string()))
+}
+
+fn find_device_only(input: bool, name: &Option<String>) -> Option<cpal::Device> {
     let host = cpal::default_host();
-    if let Some(n) = name {
-        let found = if input { host.input_devices().ok() } else { host.output_devices().ok() }
-            .and_then(|mut it| it.find(|d| d.description().map(|x| x.name() == n).unwrap_or(false)));
-        if found.is_some() {
-            return found;
-        }
+    let list = || if input { host.input_devices().ok() } else { host.output_devices().ok() };
+    let found = match name.as_deref() {
+        Some(WINDOWS_DEFAULT) => None,
+        Some(n) => list().and_then(|mut it| it.find(|d| d.description().map(|x| x.name() == n).unwrap_or(false))),
+        None => crate::comms::default_comm_id(input).and_then(|id| list().and_then(|mut it| it.find(|d| d.id().map(|x| x.id() == id).unwrap_or(false)))),
+    };
+    found.or_else(|| if input { host.default_input_device() } else { host.default_output_device() })
+}
+
+fn find_device(input: bool, name: &Option<String>) -> Option<cpal::Device> {
+    let dev = find_device_only(input, name)?;
+    // Using a communication device must not turn the game or music down.
+    if let Ok(id) = dev.id() {
+        crate::comms::no_ducking(id.id());
     }
-    if input {
-        host.default_input_device()
-    } else {
-        host.default_output_device()
-    }
+    Some(dev)
 }
 
 /// Seconds since the last keyboard or mouse input anywhere in Windows.

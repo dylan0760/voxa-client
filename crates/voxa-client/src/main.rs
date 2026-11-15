@@ -8,6 +8,7 @@ mod audio;
 mod autostart;
 mod chat_images;
 mod capture;
+mod comms;
 mod config;
 #[cfg(windows)]
 mod dda;
