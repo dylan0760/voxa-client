@@ -29,9 +29,17 @@ server needs a newer version, Voxa tells you and opens the update window.
     settings).
   * Chat in the main area.
   * Info panel on the right.
-* **Themes:** Dark, Light, 🌸 Sakura (cherry blossom), 🍼 Layette (baby blue),
-  🍷 Crimson, 🌌 Midnight (purple) and 🍵 Celadon (jade green). Pick one in
-  **Options ▸ Application ▸ Theme**.
+* **Themes:** pick one under **Options ▸ Application ▸ Themes**, where every theme is
+  shown as a small preview of the window.
+  * **Solid:** Dark, Light, 🌸 Sakura (cherry blossom), 🍼 Layette (baby blue),
+    🍷 Crimson, 🌌 Midnight (purple), 🍵 Celadon (jade green), 🟡 Mustard (#FFDB58),
+    Slate (soft charcoal) and Obsidian (near black).
+  * **Two-tone:** one colour blends into another behind see-through panels, in the spirit
+    of Discord's gradient themes. Light: Citrus, Candyfloss, Spearmint, Lo-fi and Dune.
+    Dark: Raincloud, Afterglow, Blood Moon, Nightshade, Twilight, Synthwave,
+    Pink Lemonade, Aurora and Woodland.
+  * Older Voxa versions still read your settings: they use Dark or Light instead of a
+    theme they don't know.
 * **Avatars** (Voxa Server 1.15.0+): click your name ▸ **Change Avatar…**.
   * Keep your initials and pick their **colour**, or use **your own picture**.
   * Or pick one of 60 **icons** (headphones, speakers, microphones, controllers, tools,
@@ -76,6 +84,33 @@ server needs a newer version, Voxa tells you and opens the update window.
   talking you are set *Away (idle)*, and back online as soon as you return. The server
   admin chooses the time (up to 30 minutes, or off); turn it off for yourself under
   **Options ▸ Application**.
+
+### On the server, in no channel (Voxa Server 1.17.0+)
+* **Like Discord:** you can be connected to a server without being in a channel. You
+  show up as online, use the server chat and direct messages, and double-click a channel
+  to join it.
+  * Turn off **Options ▸ Application ▸ Join a channel when connecting** to always connect
+    this way (a bookmark's default channel is still joined).
+  * Click your name ▸ **🚪 Leave Channel** to step out of a channel and stay on the server.
+  * Outside a channel nothing is transmitted, and there is no channel chat, files or
+    screen sharing.
+* **People:** everyone who is online is listed under **👥 People** with where they are
+  ("in Lobby" or "on the server") and their status. The channel tree only shows people in
+  channels, so a busy server doesn't push the channels out of view.
+
+### Status
+Click your name at the bottom left to set your status. Voxa remembers it for next time.
+
+| Status | Others see | What it does |
+|---|---|---|
+| 🟢 **Online** | Online (the default) | |
+| 🌙 **Away** | Away, with an optional message | Also set automatically when you are idle (auto away) |
+| ⛔ **Do not disturb** | A ⛔ next to your name | No notification sounds, and pokes are only logged |
+| 👻 **Invisible** | Offline, while you are not in a channel | You can still chat and get direct messages. Joining a channel makes you visible there |
+
+* Invisible needs Voxa Server 1.17.0; Away works on every server.
+* Server administrators (*Edit virtual server*) still see invisible people, so they can
+  moderate.
 
 ### Chat
 * **Persistent encrypted history:** channel and server chat is stored encrypted on the
@@ -221,6 +256,9 @@ server needs a newer version, Voxa tells you and opens the update window.
   open such a link.
 * **System tray:** closing the window (✕) keeps Voxa running in the notification area.
   Toggle it in **Options ▸ Application ▸ System tray**.
+* **Start with Windows:** **Options ▸ Application ▸ Start Voxa when I sign in to
+  Windows** starts Voxa hidden in the system tray when you sign in (a per-user entry
+  under `HKCU\…\CurrentVersion\Run`; with the tray turned off, the window opens instead).
 * **What's new:** after an update the change log is shown once. Open it any time under
   **About ▸ What's new**, with a list of every older version.
 * **Updates:** Voxa checks this repository's GitHub releases at startup and every 12
@@ -246,6 +284,11 @@ Lossless channels need about 0.8–1.5 Mbit/s per listener, sent by the server.
   bound to its server, so it can't be read under another server or by another user.
 * **Updates** are only installed from github.com, and only if they match the SHA-256
   checksum GitHub publishes. Windows' own `msiexec` installs them.
+* **Invisible means invisible** (Voxa Server 1.17.0+): the server leaves you out of
+  everyone else's client list, chat history, avatars and group member lists, and keeps
+  your "last seen" time from when you were last visible. Anyone who can't see you gets
+  "Client not found" when they try to poke or message your session. A direct message to
+  your identity is answered "kept for later" but reaches you right away.
 * **Downloads and chat content:**
   * Folder downloads never write outside the folder you pick.
   * Hostile chat messages, images and streams are size-limited, so they cannot freeze

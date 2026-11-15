@@ -103,8 +103,18 @@ mod tests {
             s.set_theme(k);
             let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
             assert_eq!((back.theme_kind(), back.dark_theme), (k, k.is_dark()));
-            assert_eq!(k.is_dark(), matches!(k, ThemeKind::Dark | ThemeKind::Crimson | ThemeKind::Midnight));
+            // The field older versions read only ever names one of their seven themes.
+            assert!(ThemeKind::ALL[..7].contains(&back.theme.unwrap()), "{k:?}");
+            // Two-tone themes start at Citrus; their panels are see-through, so they need
+            // a gradient (and the solid ones must not have one).
+            let p = crate::ui::palette(k);
+            assert_eq!(k.is_gradient(), p.gradient.is_some(), "{k:?}");
+            assert_eq!(p.window.a(), 255, "{k:?}: dialogs need a solid fill");
         }
+        assert!(ThemeKind::Citrus.is_gradient() && !ThemeKind::Obsidian.is_gradient());
+        // A theme from a newer Voxa falls back to the default instead of losing the settings.
+        let s: Settings = serde_json::from_str(r#"{"theme":"SomethingNew","nickname":"Kept"}"#).unwrap();
+        assert_eq!((s.theme, s.nickname.as_str()), (None, "Kept"));
     }
 
     #[test]

@@ -242,6 +242,8 @@ pub struct Session {
     pub hw_bans: HashSet<u64>,
     /// You were set away by Voxa (idle), so coming back clears it.
     pub auto_away: bool,
+    /// Presences of others that are not plain online (servers 1.17.0+).
+    pub presences: HashMap<ClientId, Presence>,
     pub tab: ChatKey,
     pub selected: Selection,
     pub watching: HashSet<ClientId>,
@@ -382,7 +384,11 @@ impl Session {
     /// The session id of the person in a conversation, if they are online.
     pub fn dm_online(&self, id: DmId) -> Option<ClientId> {
         let uid = &self.dms.get(id)?.uid;
-        self.clients.values().find(|c| &c.uid == uid).map(|c| c.id)
+        // Someone on both the desktop and the web page: the desktop client gets the message
+        // (map order is random, so without this it could go either way).
+        let mut on: Vec<&ClientInfo> = self.clients.values().filter(|c| &c.uid == uid && c.id != self.me).collect();
+        on.sort_by_key(|c| (c.platform == "Web", c.id));
+        on.first().map(|c| c.id)
     }
 
     pub fn dm_name(&self, id: DmId) -> String {
@@ -552,6 +558,9 @@ pub struct VoxaApp {
     pub quitting: bool,
     pub hidden: bool,
     pub want_show: bool,
+    /// Started in the tray: frames left in which the window is hidden again (eframe shows
+    /// the window after its first frame no matter what).
+    pub hide_frames: u8,
     pub updater: crate::updater::Updater,
     update_notified: bool,
     pub emoji: crate::ui::EmojiPicker,
@@ -570,6 +579,11 @@ pub struct VoxaApp {
     last_frame: Option<std::time::Instant>,
     /// Debug builds with VOXA_FPS_LOG: frames counted in the current second.
     fps_count: (std::time::Instant, u32),
+}
+
+/// Started with Windows (`--tray`): begin hidden in the system tray.
+pub fn started_in_tray() -> bool {
+    std::env::args().any(|a| a == crate::autostart::TRAY_ARG)
 }
 
 /// GitHub repository the client updates from. Forks can override it at build time
@@ -630,6 +644,7 @@ impl VoxaApp {
             quitting: false,
             hidden: false,
             want_show: false,
+            hide_frames: if started_in_tray() { 3 } else { 0 },
             updater: crate::updater::Updater::new(UPDATE_REPO, is_client_msi, cc.egui_ctx.clone()).with_notes_dir(crate::config::config_dir()),
             update_notified: false,
             emoji: Default::default(),
@@ -655,6 +670,9 @@ impl VoxaApp {
             text: "Select a bookmark or click Connect to join a server.".into(),
             kind: EventKind::Info,
         });
+        // Started with Windows: the window stays hidden (ensure_tray shows it if there is
+        // no tray icon to open it from).
+        app.hidden = started_in_tray();
         app.ensure_tray();
         if let Some(link) = crate::link_arg() {
             app.open_link_request(link);
@@ -675,6 +693,7 @@ impl VoxaApp {
         self.debug_done = true;
         match what.as_str() {
             "share" => crate::ui::apply(self, crate::ui::Action::ShareScreen),
+            "people" => crate::ui::apply(self, crate::ui::Action::People),
             "share-start" => {
                 if let Some(src) = crate::capture::sources().into_iter().find(|s| matches!(s, crate::capture::Source::Monitor { .. })) {
                     let (ctx, settings) = (self.ctx.clone(), self.settings.stream.clone());
@@ -740,12 +759,13 @@ impl VoxaApp {
                     d.edit.name = "[*spacer]─".into();
                 }
             }
-            // Options, on the Application tab (theme picker) or `options:<tab>`.
-            w if w.starts_with("options") => {
+            // Options, on the Application tab, `options:<tab>`, or `themes` (the theme picker).
+            w if w.starts_with("options") || w == "themes" => {
                 let tab = w.strip_prefix("options:").and_then(|t| t.parse().ok()).unwrap_or(4);
                 crate::ui::apply(self, crate::ui::Action::Dialog(crate::dialogs::Open::Options));
                 if let Some(d) = &mut self.dlg.options {
                     d.tab = tab;
+                    d.app_tab = u8::from(w == "themes");
                 }
             }
             "pins" => {
@@ -815,6 +835,7 @@ impl VoxaApp {
     /// in Windows) or talking, and back when you return - only if Voxa set it.
     fn auto_away(&mut self) {
         let enabled = self.settings.auto_away;
+        let presence = self.settings.presence;
         let talking = self.voice_shared.self_talking.load(Ordering::Relaxed);
         let Some(s) = &mut self.sess else { return };
         let minutes = s.server_options.map(|o| o.auto_away_minutes).unwrap_or(0);
@@ -829,7 +850,7 @@ impl VoxaApp {
             } else if me.away.as_deref() != Some(AUTO_AWAY) {
                 s.auto_away = false; // changed by hand meanwhile
             }
-        } else if enabled && minutes > 0 && me.away.is_none() && idle >= minutes as u64 * 60 {
+        } else if enabled && minutes > 0 && me.away.is_none() && presence == Presence::Online && idle >= minutes as u64 * 60 {
             s.auto_away = true;
             s.conn.send(C2S::UpdateSelf(SelfUpdate { away: Some(Some(AUTO_AWAY.into())), ..Default::default() }));
         }
@@ -847,6 +868,20 @@ impl VoxaApp {
             }
         }
         self.settings.default_identity
+    }
+
+    /// Your status (kept for the next connection).
+    pub fn set_presence(&mut self, p: Presence) {
+        self.settings.presence = p;
+        self.settings.save();
+        let Some(s) = &mut self.sess else { return };
+        s.auto_away = false;
+        if s.supports("1.17.0") {
+            s.conn.send(C2S::SetPresence(p));
+        } else {
+            let away = if p == Presence::Away { Some(Some(String::new())) } else { Some(None) };
+            s.conn.send(C2S::UpdateSelf(SelfUpdate { away, ..Default::default() }));
+        }
     }
 
     /// Your avatar changed: show it and give it to the server.
@@ -1040,7 +1075,14 @@ impl VoxaApp {
             platform: "Windows".into(),
             nickname: req.nickname.clone(),
             server_password: Some(req.server_password.clone()).filter(|s| !s.is_empty()),
-            default_channel: Some(req.default_channel.clone()).filter(|s| !s.is_empty()),
+            // Join options: stay out of channels and / or invisible (servers 1.17.0+;
+            // older ones see an unknown path and use the default channel).
+            default_channel: Some(voxa_proto::join::build(
+                !self.settings.join_channel && req.default_channel.trim().is_empty(),
+                self.settings.presence == Presence::Invisible,
+                &req.default_channel,
+            ))
+            .filter(|s| !s.is_empty()),
             default_channel_password: Some(req.channel_password.clone()).filter(|s| !s.is_empty()),
         };
         let pinned = self.settings.known_servers.get(&req.address).cloned();
@@ -1079,6 +1121,7 @@ impl VoxaApp {
             server_options: None,
             hw_bans: HashSet::new(),
             auto_away: false,
+            presences: HashMap::new(),
             tab: ChatKey::Channel,
             selected: Selection::Server,
             watching: HashSet::new(),
@@ -1483,9 +1526,20 @@ impl VoxaApp {
                 s.conn.send(C2S::FetchHistory { target: TextTarget::Server, before: None, limit: 50 });
                 s.fetch_pins(TextTarget::Server);
                 let ch = s.my_channel();
-                s.channel_logs.entry(ch).or_default().loading = true;
-                s.conn.send(C2S::FetchHistory { target: TextTarget::Channel(ch), before: None, limit: 50 });
-                s.fetch_pins(TextTarget::Channel(ch));
+                if ch == NO_CHANNEL {
+                    s.tab = ChatKey::Server;
+                } else {
+                    s.channel_logs.entry(ch).or_default().loading = true;
+                    s.conn.send(C2S::FetchHistory { target: TextTarget::Channel(ch), before: None, limit: 50 });
+                    s.fetch_pins(TextTarget::Channel(ch));
+                }
+                // Your status from last time (servers 1.17.0+; away works everywhere).
+                match self.settings.presence {
+                    Presence::Online => {}
+                    Presence::Away => s.conn.send(C2S::UpdateSelf(SelfUpdate { away: Some(Some(String::new())), ..Default::default() })),
+                    p if s.supports("1.17.0") => s.conn.send(C2S::SetPresence(p)),
+                    _ => {}
+                }
                 // Restore per-user volumes.
                 let mut vols = shared.volumes.lock();
                 vols.clear();
@@ -1536,14 +1590,14 @@ impl VoxaApp {
                 if let Some(v) = self.settings.client_volumes.get(&c.uid) {
                     shared.volumes.lock().insert(c.id, *v);
                 }
-                if c.channel == s.my_channel() && c.id != s.me {
+                if c.channel == s.my_channel() && c.channel != NO_CHANNEL && c.id != s.me {
                     shared.play_tones(JOIN_TONES);
                 }
                 s.log(EventKind::Good, format!("\"{}\" connected", c.nickname));
                 s.clients.insert(c.id, c);
             }
             S2C::ClientLeft { id, reason } => {
-                if s.clients.get(&id).map(|c| c.channel == s.my_channel() && id != s.me).unwrap_or(false) {
+                if s.clients.get(&id).map(|c| c.channel == s.my_channel() && c.channel != NO_CHANNEL && id != s.me).unwrap_or(false) {
                     shared.play_tones(LEAVE_TONES);
                 }
                 if let Some(c) = s.clients.remove(&id) {
@@ -1557,6 +1611,7 @@ impl VoxaApp {
                     s.log(EventKind::Info, text);
                 }
                 s.watching.remove(&id);
+                s.presences.remove(&id);
                 s.viewer.clear(id);
                 self.textures.remove(&id);
                 shared.talking.lock().remove(&id);
@@ -1575,6 +1630,7 @@ impl VoxaApp {
                 if id == s.me {
                     match by {
                         Some(by) => s.log(EventKind::Warn, format!("You were moved to \"{cname}\" by {by}")),
+                        None if channel == NO_CHANNEL => s.log(EventKind::Info, "You left the channel (still on the server)".to_string()),
                         None => s.log(EventKind::Info, format!("You switched to channel \"{cname}\"")),
                     }
                     // Stop watching streams from the old channel.
@@ -1583,15 +1639,24 @@ impl VoxaApp {
                         s.viewer.clear(w);
                         self.textures.remove(&w);
                     }
-                    let log = s.channel_logs.entry(channel).or_default();
-                    *log = ChatLog { loading: true, ..Default::default() };
-                    s.conn.send(C2S::FetchHistory { target: TextTarget::Channel(channel), before: None, limit: 50 });
                     s.pins_open = false;
-                    s.fetch_pins(TextTarget::Channel(channel));
+                    if channel == NO_CHANNEL {
+                        // On the server, in no channel: only the server chat and messages.
+                        if s.tab == ChatKey::Channel {
+                            s.tab = ChatKey::Server;
+                        }
+                    } else {
+                        let log = s.channel_logs.entry(channel).or_default();
+                        *log = ChatLog { loading: true, ..Default::default() };
+                        s.conn.send(C2S::FetchHistory { target: TextTarget::Channel(channel), before: None, limit: 50 });
+                        s.fetch_pins(TextTarget::Channel(channel));
+                    }
                 } else {
-                    if channel == my_channel {
+                    // Outside a channel nobody joins or leaves "your" channel.
+                    let in_channel = my_channel != NO_CHANNEL;
+                    if in_channel && channel == my_channel {
                         shared.play_tones(JOIN_TONES);
-                    } else if was_here {
+                    } else if in_channel && was_here {
                         shared.play_tones(LEAVE_TONES);
                     }
                     if channel != my_channel && s.watching.remove(&id) {
@@ -1748,6 +1813,13 @@ impl VoxaApp {
                 s.server_options = Some(o);
             }
             S2C::BannedHardware(ids) => s.hw_bans = ids.into_iter().collect(),
+            S2C::ClientPresence { id, presence } => {
+                if presence == Presence::Online {
+                    s.presences.remove(&id);
+                } else {
+                    s.presences.insert(id, presence);
+                }
+            }
             S2C::AvatarImage { uid, image, data } => {
                 if uid == s.my_uid && s.adopt_avatar && voxa_proto::avatar_hash(&data) == image && crate::avatars::decode(&data).is_some() {
                     s.adopt_avatar = false;
@@ -1793,9 +1865,12 @@ impl VoxaApp {
                 let _ = from;
                 shared.play_tones(&[(988.0, 90), (0.0, 40), (988.0, 90), (0.0, 40), (1319.0, 160)]);
                 s.log(EventKind::Warn, format!("\"{from_name}\" poked you: {message}"));
-                self.dlg.pokes.push((from_name, message));
-                self.want_show = true;
-                self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+                // Do not disturb: the poke is only logged.
+                if self.settings.presence != Presence::Busy {
+                    self.dlg.pokes.push((from_name, message));
+                    self.want_show = true;
+                    self.ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+                }
             }
             S2C::Kicked(_) => {}
             S2C::GroupsUpdated(groups) => {
@@ -2067,6 +2142,10 @@ impl eframe::App for VoxaApp {
         self.handle_tray(ctx);
         self.handle_hotkeys();
         self.auto_away();
+        // What the voice and sound threads need to know.
+        let no_channel = self.sess.as_ref().map(|s| s.welcomed && s.my_channel() == NO_CHANNEL).unwrap_or(false);
+        self.voice_shared.no_channel.store(no_channel, Ordering::Relaxed);
+        self.voice_shared.busy.store(self.settings.presence == Presence::Busy, Ordering::Relaxed);
         // Avatar pictures that were drawn but are not here yet.
         let wants = crate::avatars::take_wants();
         if let Some(s) = self.sess.as_ref().filter(|s| s.supports("1.15.0")) {
@@ -2082,6 +2161,13 @@ impl eframe::App for VoxaApp {
         }
         if self.settings.auto_update {
             self.updater.auto_check();
+        }
+        if self.hide_frames > 0 {
+            self.hide_frames -= 1;
+            if self.hidden {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+            ctx.request_repaint();
         }
         match self.updater.get() {
             crate::updater::UpdState::Available(_) if !self.update_notified => {

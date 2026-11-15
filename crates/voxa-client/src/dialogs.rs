@@ -76,6 +76,11 @@ pub struct OptionsDlg {
     pub tray: bool,
     pub link_previews: bool,
     pub auto_away: bool,
+    pub join_channel: bool,
+    /// Start with Windows (read from the registry when the dialog opens).
+    pub autostart: bool,
+    /// Application sub-tab: 0 General, 1 Themes.
+    pub app_tab: u8,
     pub auto_update: bool,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
@@ -450,6 +455,9 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         tray: s.minimize_to_tray,
         link_previews: s.link_previews,
         auto_away: s.auto_away,
+        join_channel: s.join_channel,
+        app_tab: 0,
+        autostart: crate::autostart::enabled(),
         auto_update: s.auto_update,
         inputs: crate::audio::input_devices(),
         outputs: crate::audio::output_devices(),
@@ -919,18 +927,39 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 ui.add_space(6.0);
                 ui.label(RichText::new("Click OK or Apply to activate changed hotkeys.").small().weak());
             }
+            _ if d.app_tab == 1 => {
+                app_tabs(ui, &mut d.app_tab);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    let all = crate::config::ThemeKind::ALL;
+                    for (title, note, kinds) in [
+                        ("Solid", "One colour family per theme.", all.iter().filter(|k| !k.is_gradient()).copied().collect::<Vec<_>>()),
+                        ("Two-tone", "A colour that blends into another, behind see-through panels.", all.iter().filter(|k| k.is_gradient()).copied().collect()),
+                    ] {
+                        ui.label(RichText::new(title).strong());
+                        ui.label(RichText::new(note).small().weak());
+                        ui.add_space(4.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                            for k in kinds {
+                                theme_tile(ui, &mut d.theme, k);
+                            }
+                        });
+                        ui.add_space(10.0);
+                    }
+                    ui.label(RichText::new("Click OK or Apply to use the chosen theme.").small().weak());
+                });
+            }
             _ => {
+                app_tabs(ui, &mut d.app_tab);
                 egui::Grid::new("app").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                     form_row(ui, "Default nickname:", |ui| {
                         ui.text_edit_singleline(&mut d.nickname);
                     });
                     form_row(ui, "Theme:", |ui| {
-                        egui::Grid::new("themes").spacing([4.0, 4.0]).show(ui, |ui| {
-                            for (i, k) in crate::config::ThemeKind::ALL.into_iter().enumerate() {
-                                theme_choice(ui, &mut d.theme, k);
-                                if i % 4 == 3 {
-                                    ui.end_row();
-                                }
+                        ui.horizontal(|ui| {
+                            ui.label(d.theme.name());
+                            if ui.small_button("Change...").clicked() {
+                                d.app_tab = 1;
                             }
                         });
                     });
@@ -952,6 +981,8 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             ui.checkbox(&mut d.timestamps, "Show timestamps");
                             ui.checkbox(&mut d.link_previews, "Show previews of YouTube links and play them in Voxa")
                                 .on_hover_text("Loading a preview contacts YouTube from your computer, like opening the link would.");
+                            ui.checkbox(&mut d.join_channel, "Join a channel when connecting")
+                                .on_hover_text("Off: you are on the server (shown online) without being in a channel, like Discord. Double-click a channel to join it. A bookmark's default channel is still joined.");
                             ui.checkbox(&mut d.auto_away, "Set me away when I'm idle")
                                 .on_hover_text("After the time the server's admin chose (10 minutes by default) without keyboard, mouse or talking. Coming back sets you online again.");
                         });
@@ -959,6 +990,11 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     form_row(ui, "System tray:", |ui| {
                         ui.vertical(|ui| {
                             ui.checkbox(&mut d.tray, "Minimize to the system tray when the window is closed (✕)");
+                            // Test profiles (VOXA_CONFIG_DIR) would point Windows at the wrong settings.
+                            let profile = std::env::var_os("VOXA_CONFIG_DIR").is_some();
+                            ui.add_enabled(!profile, egui::Checkbox::new(&mut d.autostart, "Start Voxa when I sign in to Windows"))
+                                .on_hover_text("Voxa starts hidden in the system tray (with the tray turned off, the window opens).")
+                                .on_disabled_hover_text("Not available for a custom profile (VOXA_CONFIG_DIR).");
                             ui.label(
                                 RichText::new("Voxa keeps running in the notification area so you stay connected. Right-click the tray icon to quit.")
                                     .small()
@@ -1009,7 +1045,14 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         app.settings.minimize_to_tray = d.tray;
         app.settings.link_previews = d.link_previews;
         app.settings.auto_away = d.auto_away;
+        app.settings.join_channel = d.join_channel;
         app.settings.auto_update = d.auto_update;
+        if d.autostart != crate::autostart::enabled() && std::env::var_os("VOXA_CONFIG_DIR").is_none() {
+            if let Err(e) = crate::autostart::set(d.autostart) {
+                app.dlg.error = Some(format!("Could not change starting with Windows: {e}"));
+                d.autostart = crate::autostart::enabled();
+            }
+        }
         app.settings.hotkeys = d.hotkeys.iter().filter(|e| e.binding.is_set()).cloned().collect();
         app.hotkeys.set(app.settings.hotkeys.clone());
         app.ensure_tray();
@@ -2697,20 +2740,59 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     }
 }
 
-/// A theme radio button with a small preview of its colours (background, sidebar, accent).
-/// Preview and name stay together when the row wraps.
-fn theme_choice(ui: &mut Ui, current: &mut crate::config::ThemeKind, kind: crate::config::ThemeKind) {
-    let p = crate::ui::palette(kind);
+/// Options ▸ Application: General / Themes.
+fn app_tabs(ui: &mut Ui, tab: &mut u8) {
     ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 16.0), egui::Sense::hover());
-        let painter = ui.painter();
-        painter.rect_filled(rect, 4, p.main);
-        painter.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(10.0, rect.height())), egui::CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 }, p.side);
-        painter.circle_filled(rect.center() + egui::vec2(6.0, 0.0), 4.5, p.accent);
-        painter.rect_stroke(rect, 4, egui::Stroke::new(1.0, p.control_line), egui::StrokeKind::Inside);
-        ui.radio_value(current, kind, kind.name());
-        ui.add_space(6.0);
+        for (i, t) in ["General", "Themes"].iter().enumerate() {
+            if ui.selectable_label(*tab == i as u8, *t).clicked() {
+                *tab = i as u8;
+            }
+        }
     });
+    ui.add_space(6.0);
+}
+
+/// A clickable miniature of a theme: rail, sidebar and chat with a message bubble, the
+/// accent colour and the theme's name.
+fn theme_tile(ui: &mut Ui, current: &mut crate::config::ThemeKind, kind: crate::config::ThemeKind) {
+    use egui::{pos2, vec2, Rect};
+    let p = crate::ui::palette(kind);
+    let (rect, resp) = ui.allocate_exact_size(vec2(112.0, 86.0), egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    let pic = Rect::from_min_size(rect.min, vec2(rect.width(), 62.0));
+    let base = if p.gradient.is_some() { Color32::BLACK } else { p.main };
+    painter.rect_filled(pic, 6, base);
+    if let Some(g) = p.gradient {
+        crate::ui::paint_gradient(&painter, pic.shrink(1.0), g);
+    }
+    let rail = Rect::from_min_max(pic.min, pos2(pic.min.x + 14.0, pic.max.y));
+    let side = Rect::from_min_max(pos2(rail.max.x, pic.min.y), pos2(pic.min.x + 44.0, pic.max.y));
+    let chat = Rect::from_min_max(pos2(side.max.x, pic.min.y), pic.max);
+    painter.rect_filled(rail, egui::CornerRadius { nw: 6, sw: 6, ne: 0, se: 0 }, p.rail);
+    painter.rect_filled(side, 0, p.side);
+    painter.rect_filled(chat, egui::CornerRadius { nw: 0, sw: 0, ne: 6, se: 6 }, p.main);
+    painter.circle_filled(pos2(rail.center().x, pic.min.y + 10.0), 4.0, p.accent);
+    for i in 0..3 {
+        let y = pic.min.y + 10.0 + i as f32 * 9.0;
+        painter.rect_filled(Rect::from_min_size(pos2(side.min.x + 4.0, y - 2.0), vec2(22.0 - i as f32 * 4.0, 4.0)), 2, p.dim.gamma_multiply(0.7));
+    }
+    painter.rect_filled(Rect::from_min_size(pos2(chat.min.x + 6.0, chat.min.y + 8.0), vec2(40.0, 14.0)), 4, p.card);
+    painter.rect_filled(Rect::from_min_size(pos2(chat.min.x + 9.0, chat.min.y + 13.0), vec2(30.0, 4.0)), 2, p.text);
+    painter.rect_filled(Rect::from_min_size(pos2(chat.max.x - 30.0, chat.max.y - 16.0), vec2(24.0, 10.0)), 4, p.accent);
+    let on = *current == kind;
+    let stroke = if on {
+        egui::Stroke::new(2.5, ui.visuals().selection.bg_fill)
+    } else if resp.hovered() {
+        egui::Stroke::new(1.5, ui.visuals().widgets.hovered.fg_stroke.color)
+    } else {
+        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color)
+    };
+    painter.rect_stroke(pic, 6, stroke, egui::StrokeKind::Inside);
+    let label = format!("{}{}", if on { "✔ " } else { "" }, kind.name());
+    painter.text(pos2(rect.center().x, pic.max.y + 12.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(13.0), ui.visuals().text_color());
+    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        *current = kind;
+    }
 }
 
 /// Record a short test with the capture settings shown (not yet applied) and play it

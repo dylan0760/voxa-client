@@ -50,6 +50,8 @@ pub enum Action {
     CopyText(String),
     /// Starts editing one of your messages: (chat, message, current text).
     StartEdit(TextTarget, MessageId, String),
+    /// Online / away / busy / invisible.
+    SetPresence(Presence),
     Toggle(ChannelId),
     Dialog(dialogs::Open),
     Home(bool),
@@ -81,6 +83,77 @@ pub struct Theme {
     /// Checkbox / slider tracks and their outline.
     pub control: Color32,
     pub control_line: Color32,
+    /// Two-tone themes: the background blends from the first colour (top left) into the
+    /// second (bottom right), and the panel colours above are see-through.
+    pub gradient: Option<[Color32; 2]>,
+    /// Solid fill of dialogs, menus and tooltips (they float above everything).
+    pub window: Color32,
+}
+
+impl Theme {
+    /// Fill of a panel inside another panel of the same colour: see-through panel colours
+    /// would add up and get darker, so two-tone themes leave nested panels unfilled.
+    pub fn inner(&self, c: Color32) -> Color32 {
+        if self.gradient.is_some() {
+            Color32::TRANSPARENT
+        } else {
+            c
+        }
+    }
+}
+
+/// A two-tone theme: see-through panels over a blend of `a` into `b`.
+fn two_tone(dark: bool, a: (u8, u8, u8), b: (u8, u8, u8), accent: (u8, u8, u8)) -> Theme {
+    let (a, b) = (Color32::from_rgb(a.0, a.1, a.2), Color32::from_rgb(b.0, b.1, b.2));
+    let mid = a.lerp_to_gamma(b, 0.5);
+    let accent = Color32::from_rgb(accent.0, accent.1, accent.2);
+    let black = |x: u8| Color32::from_black_alpha(x);
+    let white = |x: u8| Color32::from_white_alpha(x);
+    if dark {
+        Theme {
+            rail: black(180),
+            side: black(140),
+            main: black(100),
+            card: black(70),
+            hover: white(22),
+            dim: Color32::from_rgb(0xC9, 0xCC, 0xD3),
+            accent,
+            text: Color32::from_rgb(0xF2, 0xF3, 0xF5),
+            field: black(110),
+            control: white(40),
+            control_line: white(90),
+            gradient: Some([a, b]),
+            window: mid.lerp_to_gamma(Color32::BLACK, 0.62),
+        }
+    } else {
+        Theme {
+            rail: white(90),
+            side: white(140),
+            main: white(185),
+            card: black(14),
+            hover: black(24),
+            dim: Color32::from_rgb(0x48, 0x4B, 0x53),
+            accent,
+            text: Color32::from_rgb(0x1F, 0x21, 0x26),
+            field: white(220),
+            control: black(30),
+            control_line: black(80),
+            gradient: Some([a, b]),
+            window: mid.lerp_to_gamma(Color32::WHITE, 0.8),
+        }
+    }
+}
+
+/// Paints a two-tone theme's background over `rect` (before the panels).
+pub fn paint_gradient(painter: &egui::Painter, rect: egui::Rect, [a, b]: [Color32; 2]) {
+    let mid = a.lerp_to_gamma(b, 0.5);
+    let mut mesh = egui::Mesh::default();
+    for (pos, col) in [(rect.left_top(), a), (rect.right_top(), mid), (rect.right_bottom(), b), (rect.left_bottom(), mid)] {
+        mesh.colored_vertex(pos, col);
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 pub const GREEN: Color32 = Color32::from_rgb(0x3B, 0xA5, 0x5D);
@@ -105,8 +178,79 @@ pub fn theme() -> Theme {
 }
 
 pub fn palette(kind: ThemeKind) -> Theme {
+    let mut t = solid_palette(kind);
+    if t.window == Color32::TRANSPARENT {
+        t.window = t.card;
+    }
+    t
+}
+
+fn solid_palette(kind: ThemeKind) -> Theme {
     let c = Color32::from_rgb;
     match kind {
+        // Two-tone themes (colour pairs in the spirit of Discord's gradient themes).
+        ThemeKind::Citrus => two_tone(false, (0xF3, 0xB3, 0x36), (0xEE, 0x85, 0x58), (0xB9, 0x46, 0x10)),
+        ThemeKind::Candyfloss => two_tone(false, (0xF4, 0xAB, 0xB8), (0xB1, 0xC2, 0xFC), (0x74, 0x55, 0xCF)),
+        ThemeKind::Spearmint => two_tone(false, (0x8F, 0xD6, 0xC0), (0xC4, 0xDD, 0x8E), (0x2A, 0x7A, 0x58)),
+        ThemeKind::Lofi => two_tone(false, (0xA4, 0xC0, 0xF7), (0xCF, 0xDF, 0xA2), (0x3B, 0x6B, 0xC0)),
+        ThemeKind::Dune => two_tone(false, (0xE7, 0xDB, 0xD0), (0xE0, 0xD0, 0x9A), (0x86, 0x64, 0x34)),
+        ThemeKind::Raincloud => two_tone(true, (0x3A, 0x7C, 0xA1), (0x7F, 0x7E, 0xB9), (0x3F, 0x76, 0xB8)),
+        ThemeKind::Afterglow => two_tone(true, (0x48, 0x28, 0x8C), (0xDB, 0x7F, 0x4B), (0xC0, 0x5A, 0x34)),
+        ThemeKind::BloodMoon => two_tone(true, (0x95, 0x09, 0x09), (0x00, 0x00, 0x00), (0xC4, 0x1E, 0x3A)),
+        ThemeKind::Nightshade => two_tone(true, (0x53, 0x48, 0xCA), (0x14, 0x07, 0x30), (0x6C, 0x5C, 0xE7)),
+        ThemeKind::Twilight => two_tone(true, (0x66, 0x50, 0x69), (0x91, 0xA3, 0xD1), (0x6E, 0x62, 0xA8)),
+        ThemeKind::Synthwave => two_tone(true, (0x01, 0xA8, 0x9E), (0xB4, 0x38, 0x98), (0xA0, 0x2D, 0x88)),
+        ThemeKind::PinkLemonade => two_tone(true, (0xAF, 0x1A, 0x6C), (0xE7, 0xA5, 0x25), (0xB0, 0x22, 0x6A)),
+        ThemeKind::Aurora => two_tone(true, (0x06, 0x20, 0x53), (0x10, 0xB6, 0xB6), (0x0B, 0x84, 0x90)),
+        ThemeKind::Woodland => two_tone(true, (0x14, 0x22, 0x15), (0x5A, 0x7C, 0x58), (0x4A, 0x75, 0x3A)),
+        // Mustard yellow (#FFDB58) with a deep mustard accent and brown text.
+        ThemeKind::Mustard => Theme {
+            rail: c(0xFF, 0xDB, 0x58),
+            side: c(0xFF, 0xE8, 0x96),
+            main: c(0xFF, 0xF7, 0xDA),
+            card: c(0xFF, 0xEE, 0xB5),
+            hover: c(0xFC, 0xE0, 0x84),
+            dim: c(0x74, 0x5E, 0x1E),
+            accent: c(0x8C, 0x6A, 0x00),
+            text: c(0x3D, 0x31, 0x10),
+            field: c(0xFF, 0xFB, 0xEA),
+            control: c(0xF5, 0xD9, 0x7A),
+            control_line: c(0xC9, 0xA6, 0x3C),
+            gradient: None,
+            window: c(0xFF, 0xF3, 0xC9),
+        },
+        // Soft charcoal greys with a blurple accent.
+        ThemeKind::Slate => Theme {
+            rail: c(0x1E, 0x1F, 0x22),
+            side: c(0x2B, 0x2D, 0x31),
+            main: c(0x31, 0x33, 0x38),
+            card: c(0x38, 0x3A, 0x40),
+            hover: c(0x40, 0x42, 0x49),
+            dim: c(0xB5, 0xBA, 0xC1),
+            accent: c(0x58, 0x65, 0xF2),
+            text: c(0xDB, 0xDE, 0xE1),
+            field: c(0x1E, 0x1F, 0x22),
+            control: c(0x4E, 0x50, 0x58),
+            control_line: c(0x6D, 0x6F, 0x78),
+            gradient: None,
+            window: c(0x2B, 0x2D, 0x31),
+        },
+        // Near-black with a blurple accent.
+        ThemeKind::Obsidian => Theme {
+            rail: c(0x00, 0x00, 0x00),
+            side: c(0x0B, 0x0B, 0x0D),
+            main: c(0x12, 0x12, 0x14),
+            card: c(0x1A, 0x1A, 0x1E),
+            hover: c(0x23, 0x23, 0x28),
+            dim: c(0xA0, 0xA3, 0xAB),
+            accent: c(0x58, 0x65, 0xF2),
+            text: c(0xE3, 0xE5, 0xE8),
+            field: c(0x07, 0x07, 0x08),
+            control: c(0x2C, 0x2D, 0x33),
+            control_line: c(0x45, 0x46, 0x4E),
+            gradient: None,
+            window: c(0x1A, 0x1A, 0x1E),
+        },
         ThemeKind::Dark => Theme {
             rail: c(0x10, 0x11, 0x14),
             side: c(0x18, 0x19, 0x1D),
@@ -119,6 +263,8 @@ pub fn palette(kind: ThemeKind) -> Theme {
             field: c(0x15, 0x16, 0x1A),
             control: c(0x3A, 0x3D, 0x46),
             control_line: c(0x55, 0x5A, 0x66),
+            gradient: None,
+            window: Color32::TRANSPARENT,
         },
         ThemeKind::Light => Theme {
             rail: c(0xE3, 0xE5, 0xE8),
@@ -132,6 +278,8 @@ pub fn palette(kind: ThemeKind) -> Theme {
             field: c(0xF7, 0xF8, 0xFA),
             control: c(0xD5, 0xD9, 0xE0),
             control_line: c(0xA8, 0xAE, 0xB8),
+            gradient: None,
+            window: Color32::TRANSPARENT,
         },
         // Cherry blossom: petal pinks with a deep blossom accent and plum text.
         ThemeKind::Sakura => Theme {
@@ -146,6 +294,8 @@ pub fn palette(kind: ThemeKind) -> Theme {
             field: c(0xFF, 0xFB, 0xFD),
             control: c(0xEE, 0xC6, 0xD5),
             control_line: c(0xD3, 0x9C, 0xB1),
+            gradient: None,
+            window: Color32::TRANSPARENT,
         },
         // Baby blue: soft sky blues with a clear blue accent and navy text.
         ThemeKind::Layette => Theme {
@@ -160,6 +310,8 @@ pub fn palette(kind: ThemeKind) -> Theme {
             field: c(0xFB, 0xFD, 0xFF),
             control: c(0xC3, 0xDC, 0xF2),
             control_line: c(0x93, 0xBA, 0xDC),
+            gradient: None,
+            window: Color32::TRANSPARENT,
         },
         // Crimson: dark wine backgrounds with a bright crimson accent.
         ThemeKind::Crimson => Theme {
@@ -174,6 +326,8 @@ pub fn palette(kind: ThemeKind) -> Theme {
             field: c(0x18, 0x0B, 0x0E),
             control: c(0x4A, 0x2A, 0x31),
             control_line: c(0x6B, 0x3D, 0x47),
+            gradient: None,
+            window: Color32::TRANSPARENT,
         },
         // Midnight purple: deep indigo night with a violet accent.
         ThemeKind::Midnight => Theme {
@@ -188,6 +342,8 @@ pub fn palette(kind: ThemeKind) -> Theme {
             field: c(0x11, 0x0E, 0x20),
             control: c(0x38, 0x30, 0x5A),
             control_line: c(0x55, 0x4A, 0x80),
+            gradient: None,
+            window: Color32::TRANSPARENT,
         },
         // Celadon: pale jade porcelain greens with a jade accent and forest text.
         ThemeKind::Celadon => Theme {
@@ -202,6 +358,8 @@ pub fn palette(kind: ThemeKind) -> Theme {
             field: c(0xFA, 0xFD, 0xFB),
             control: c(0xBF, 0xDD, 0xC9),
             control_line: c(0x8D, 0xBC, 0x9F),
+            gradient: None,
+            window: Color32::TRANSPARENT,
         },
     }
 }
@@ -260,7 +418,7 @@ pub fn apply_style(ctx: &egui::Context, s: &Settings) {
     let t = palette(kind);
     let mut v = if kind.is_dark() { egui::Visuals::dark() } else { egui::Visuals::light() };
     v.panel_fill = t.main;
-    v.window_fill = t.card;
+    v.window_fill = t.window;
     v.extreme_bg_color = t.field;
     v.code_bg_color = t.card;
     v.faint_bg_color = t.card;
@@ -439,6 +597,10 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
         }
     }
     let show_server = app.sess.is_some() && !app.home;
+    // Two-tone themes: the blend behind the see-through panels.
+    if let Some(g) = t.gradient {
+        paint_gradient(ui.painter(), ctx.content_rect(), g);
+    }
 
     egui::Panel::left("rail")
         .resizable(false)
@@ -566,16 +728,16 @@ fn rail(app: &mut VoxaApp, ui: &mut Ui) {
                     a.push(Action::Dialog(dialogs::Open::Updates));
                 }
             }
-            if rail_button(ui, "?", "About Voxa", false, t.rail, true).clicked() {
+            if rail_button(ui, "?", "About Voxa", false, t.inner(t.rail), true).clicked() {
                 a.push(Action::Dialog(dialogs::Open::About));
             }
-            if rail_button(ui, "⚙", "Settings", false, t.rail, true).clicked() {
+            if rail_button(ui, "⚙", "Settings", false, t.inner(t.rail), true).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Options));
             }
-            if rail_button(ui, "👤", "Identities", false, t.rail, true).clicked() {
+            if rail_button(ui, "👤", "Identities", false, t.inner(t.rail), true).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Identities));
             }
-            if rail_button(ui, "📑", "Bookmarks", false, t.rail, true).clicked() {
+            if rail_button(ui, "📑", "Bookmarks", false, t.inner(t.rail), true).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Bookmarks));
             }
         });
@@ -718,7 +880,7 @@ fn server_column(app: &mut VoxaApp, ui: &mut Ui) {
     let Some(s) = &app.sess else { return };
     let a = &mut app.actions;
     // Header with the server menu.
-    egui::Panel::top("srvhead").frame(Frame::new().fill(t.side).inner_margin(Margin::symmetric(12, 10))).show(ui, |ui| {
+    egui::Panel::top("srvhead").frame(Frame::new().fill(t.inner(t.side)).inner_margin(Margin::symmetric(12, 10))).show(ui, |ui| {
         let name = s.server.as_ref().map(|i| i.name.clone()).unwrap_or_else(|| s.req.label.clone());
         ui.horizontal(|ui| {
             if s.welcomed {
@@ -736,13 +898,15 @@ fn server_column(app: &mut VoxaApp, ui: &mut Ui) {
     egui::Panel::bottom("selfpanel").frame(Frame::new().fill(t.rail.lerp_to_gamma(t.side, 0.5)).inner_margin(Margin::same(10))).show(ui, |ui| {
         self_panel(s, &app.voice_shared, &app.settings, ui, a);
     });
-    egui::CentralPanel::default().frame(Frame::new().fill(t.side).inner_margin(Margin::symmetric(6, 6))).show(ui, |ui| {
+    egui::CentralPanel::default().frame(Frame::new().fill(t.inner(t.side)).inner_margin(Margin::symmetric(6, 6))).show(ui, |ui| {
         if !s.welcomed {
             ui.centered_and_justified(|ui| {
                 ui.spinner();
             });
             return;
         }
+        // People who are on the server but in no channel are listed under People, not here
+        // (on a busy server they would push the channels out of view).
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             channel_rows(s, &app.voice_shared, ui, None, 0, a);
         });
@@ -756,10 +920,15 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         // Voice connected card.
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(RichText::new("📶 Voice Connected").color(GREEN).strong());
-                let ch = s.channels.get(&s.my_channel()).map(|c| c.name.clone()).unwrap_or_default();
                 let srv = s.server.as_ref().map(|i| i.name.clone()).unwrap_or_default();
-                ui.label(RichText::new(format!("{ch} / {srv}")).small().color(t.dim));
+                if s.my_channel() == NO_CHANNEL {
+                    ui.label(RichText::new("🌐 Connected").color(GREEN).strong());
+                    ui.label(RichText::new(format!("Not in a channel / {srv}")).small().color(t.dim));
+                } else {
+                    ui.label(RichText::new("📶 Voice Connected").color(GREEN).strong());
+                    let ch = s.channels.get(&s.my_channel()).map(|c| c.name.clone()).unwrap_or_default();
+                    ui.label(RichText::new(format!("{ch} / {srv}")).small().color(t.dim));
+                }
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_button(ui, "⏏", "Disconnect", Some(RED)).clicked() {
@@ -801,7 +970,9 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         let ring = if talking { Some(GREEN) } else { None };
         let r = avatar(ui, 32.0, &name, &uid, ring);
         let status = match &me {
-            Some(m) if m.away.is_some() => ("Away".to_string(), YELLOW),
+            Some(m) if m.away.is_some() => (m.away.as_deref().map(away_text).unwrap_or_default(), YELLOW),
+            Some(_) if settings.presence == Presence::Busy => ("Do not disturb".to_string(), RED),
+            Some(_) if settings.presence == Presence::Invisible => ("Invisible".to_string(), t.dim),
             Some(m) if m.input_muted => ("Microphone muted".to_string(), RED),
             Some(_) if talking => ("Speaking".to_string(), GREEN),
             Some(_) => ("Online".to_string(), GREEN),
@@ -815,9 +986,33 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         let resp = r.union(menu.response.interact(Sense::click()));
         egui::Popup::menu(&resp).show(|ui| {
             ui.set_min_width(200.0);
+            // Status, like Discord: kept for the next time you connect.
             let away = me.as_ref().map(|m| m.away.is_some()).unwrap_or(false);
-            if ui.button(if away { "● Set Online" } else { "🌙 Set Away..." }).clicked() {
-                a.push(Action::ToggleAway);
+            let cur = if away { Presence::Away } else { settings.presence };
+            ui.label(RichText::new("Status").small().color(t.dim));
+            for (p, dot, label, tip) in [
+                (Presence::Online, GREEN, "Online", "Everyone sees you online"),
+                (Presence::Away, YELLOW, "Away", "Shown as away (Voxa also sets this when you are idle)"),
+                (Presence::Busy, RED, "Do not disturb", "No sounds or pop-ups for messages, pokes or joins"),
+                (Presence::Invisible, Color32::GRAY, "Invisible", "Appear offline while you are not in a channel (administrators still see you)"),
+            ] {
+                let on = cur == p;
+                let text = RichText::new(format!("{}  {label}", if on { "◉" } else { "○" })).color(if on { dot } else { ui.visuals().text_color() });
+                if ui.button(text).on_hover_text(tip).clicked() {
+                    a.push(Action::SetPresence(p));
+                    ui.close();
+                }
+            }
+            if ui.button("🌙 Away with a message...").clicked() {
+                if away {
+                    a.push(Action::SetPresence(Presence::Online));
+                }
+                a.push(Action::Dialog(dialogs::Open::Away));
+                ui.close();
+            }
+            ui.separator();
+            if s.my_channel() != NO_CHANNEL && s.supports("1.17.0") && ui.button("🚪 Leave Channel").on_hover_text("Stay on the server without being in a channel").clicked() {
+                a.push(Action::Send(C2S::SwitchChannel { channel: NO_CHANNEL, password: None }));
                 ui.close();
             }
             if ui.button("✏ Change Nickname...").clicked() {
@@ -1259,6 +1454,15 @@ fn client_row(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, c: &
             if !s.can_talk(c) && !c.input_muted {
                 ui.label(RichText::new("🎙").small().color(YELLOW)).on_hover_text("No talk power");
             }
+            match s.presences.get(&c.id) {
+                Some(Presence::Busy) => {
+                    ui.label(RichText::new("⛔").small().color(RED)).on_hover_text("Do not disturb");
+                }
+                Some(Presence::Invisible) => {
+                    ui.label(RichText::new("👻").small().color(t.dim)).on_hover_text("Invisible: others see them as offline");
+                }
+                _ => {}
+            }
             if c.talk_request.is_some() {
                 ui.label("✋").on_hover_text(format!("Requests talk power: {}", c.talk_request.clone().unwrap_or_default()));
             }
@@ -1515,11 +1719,12 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
     let a = &mut app.actions;
     let now = now_unix();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        let mut row = |ui: &mut Ui, uid: &str, name: &str, sub: String, online: bool| {
+        let mut row = |ui: &mut Ui, uid: &str, name: &str, sub: String, dot: Option<Color32>| {
+            let online = dot.is_some();
             let r = ui.scope_builder(egui::UiBuilder::new().sense(Sense::click()), |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    avatar(ui, 28.0, name, uid, online.then_some(GREEN));
+                    avatar(ui, 28.0, name, uid, dot);
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(name).strong().color(if online { ui.visuals().strong_text_color() } else { t.dim }));
@@ -1539,8 +1744,22 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
         };
         section(ui, &format!("Online — {}", online.len()));
         for c in &online {
-            let ch = s.channels.get(&c.channel).map(|ch| ch.name.clone()).unwrap_or_default();
-            row(ui, &c.uid, &c.nickname, format!("in {ch}"), true);
+            // Where they are (or just on the server, like Discord) and their status.
+            let place = match s.channels.get(&c.channel) {
+                Some(ch) if c.channel != NO_CHANNEL => format!("in {}", ch.name),
+                _ => "on the server".to_string(),
+            };
+            let (dot, status) = match (c.away.as_deref(), s.presences.get(&c.id)) {
+                (Some(m), _) => (YELLOW, Some(away_text(m))),
+                (None, Some(Presence::Busy)) => (RED, Some("Do not disturb".to_string())),
+                (None, Some(Presence::Invisible)) => (Color32::GRAY, Some("Invisible".to_string())),
+                _ => (GREEN, None),
+            };
+            let sub = match status {
+                Some(st) => format!("{st} · {place}"),
+                None => place,
+            };
+            row(ui, &c.uid, &c.nickname, sub, Some(dot));
         }
         if !can_list {
             ui.add_space(8.0);
@@ -1550,7 +1769,7 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
             section(ui, &format!("Offline — {}", offline.len()));
             for (uid, name, seen) in &offline {
                 let sub = if *seen == 0 { "offline".to_string() } else { format!("last seen {} ago", fmt_duration(now.saturating_sub(*seen))) };
-                row(ui, uid, name, sub, false);
+                row(ui, uid, name, sub, None);
             }
         }
     });
@@ -1738,7 +1957,7 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
     };
     let my_channel = s.my_channel();
     let a = &mut app.actions;
-    egui::Panel::top("mainhead").frame(Frame::new().fill(t.main).inner_margin(Margin::symmetric(14, 8))).show(ui, |ui| {
+    egui::Panel::top("mainhead").frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin::symmetric(14, 8))).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(title).strong().size(16.0));
             if !topic.is_empty() {
@@ -1753,10 +1972,10 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 if ui.add(egui::Button::new(RichText::new("👥 People").small().color(if people_on { Color32::WHITE } else { t.dim })).fill(if people_on { accent() } else { t.card }).corner_radius(12)).on_hover_text("Everyone on this server, online and offline: click someone to message them").clicked() {
                     a.push(Action::People);
                 }
-                if icon_button(ui, "📁", "Channel files", None).clicked() {
+                if my_channel != NO_CHANNEL && icon_button(ui, "📁", "Channel files", None).clicked() {
                     a.push(Action::Dialog(dialogs::Open::Files(my_channel)));
                 }
-                if icon_button(ui, "🖥", "Share your screen", s.streamer.is_some().then_some(RED)).clicked() {
+                if my_channel != NO_CHANNEL && icon_button(ui, "🖥", "Share your screen", s.streamer.is_some().then_some(RED)).clicked() {
                     a.push(Action::ShareScreen);
                 }
                 let chat_target = match s.tab {
@@ -1791,7 +2010,9 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 }
             };
             let cname = s.channels.get(&my_channel).map(|c| c.name.clone()).unwrap_or_default();
-            tab(ui, ChatKey::Channel, format!("# {cname}"), s.channel_logs.get(&my_channel).map(|l| l.unread).unwrap_or(0));
+            if my_channel != NO_CHANNEL {
+                tab(ui, ChatKey::Channel, format!("# {cname}"), s.channel_logs.get(&my_channel).map(|l| l.unread).unwrap_or(0));
+            }
             tab(ui, ChatKey::Server, "🖧 Server".into(), s.server_log.unread);
             for (id, d) in s.dms.iter().enumerate().filter(|(_, d)| d.open) {
                 let dot = if s.dm_online(id).is_some() { "" } else { " (offline)" };
@@ -2307,7 +2528,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
         ChatKey::Dm(id) => format!("Message @{}", s.dm_name(id)),
     };
     // Input bar (bottom).
-    egui::Panel::bottom("chatinput").frame(Frame::new().fill(t.main).inner_margin(Margin { left: 14, right: 14, top: 4, bottom: 14 })).show(ui, |ui| {
+    egui::Panel::bottom("chatinput").frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin { left: 14, right: 14, top: 4, bottom: 14 })).show(ui, |ui| {
         // `:shortcode` autocomplete suggestions (Tab or click to insert).
         let (token_start, suggestions) = crate::emoji::suggestions(input, 6);
         let mut accept: Option<&'static str> = None;
@@ -2410,7 +2631,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
         ChatKey::Dm(id) => s.dms.get_mut(id).map(|d| &mut d.log),
     };
     let pins_open = &mut s.pins_open;
-    egui::CentralPanel::default().frame(Frame::new().fill(t.main).inner_margin(Margin::symmetric(14, 4))).show(ui, |ui| {
+    egui::CentralPanel::default().frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin::symmetric(14, 4))).show(ui, |ui| {
         pinned_bar(ui, &pins, pins_open, can_pin, target, a);
         egui::ScrollArea::vertical().id_salt(format!("chat{:?}", s.tab)).auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
             let Some(log) = log else {
@@ -2811,6 +3032,7 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         }
         Action::DeleteMessage(t, id) => app.send_mut(C2S::DeleteMessage { target: t, id }),
         Action::CopyText(t) => app.ctx.copy_text(t),
+        Action::SetPresence(p) => app.set_presence(p),
         Action::StartEdit(target, id, text) => {
             if let Some(s) = &mut app.sess {
                 s.editing = Some((target, id, text));

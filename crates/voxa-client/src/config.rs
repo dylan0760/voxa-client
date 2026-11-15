@@ -73,10 +73,31 @@ pub enum ThemeKind {
     Midnight,
     /// Pale jade green.
     Celadon,
+    /// Mustard yellow (#FFDB58).
+    Mustard,
+    /// Soft charcoal greys with a blurple accent (dark).
+    Slate,
+    /// Near-black with a blurple accent (dark).
+    Obsidian,
+    // Two-tone themes: one colour blends into another behind see-through panels.
+    Citrus,
+    Candyfloss,
+    Spearmint,
+    Lofi,
+    Dune,
+    Raincloud,
+    Afterglow,
+    BloodMoon,
+    Nightshade,
+    Twilight,
+    Synthwave,
+    PinkLemonade,
+    Aurora,
+    Woodland,
 }
 
 impl ThemeKind {
-    pub const ALL: [ThemeKind; 7] = [
+    pub const ALL: [ThemeKind; 24] = [
         ThemeKind::Dark,
         ThemeKind::Light,
         ThemeKind::Sakura,
@@ -84,6 +105,23 @@ impl ThemeKind {
         ThemeKind::Crimson,
         ThemeKind::Midnight,
         ThemeKind::Celadon,
+        ThemeKind::Mustard,
+        ThemeKind::Slate,
+        ThemeKind::Obsidian,
+        ThemeKind::Citrus,
+        ThemeKind::Candyfloss,
+        ThemeKind::Spearmint,
+        ThemeKind::Lofi,
+        ThemeKind::Dune,
+        ThemeKind::Raincloud,
+        ThemeKind::Afterglow,
+        ThemeKind::BloodMoon,
+        ThemeKind::Nightshade,
+        ThemeKind::Twilight,
+        ThemeKind::Synthwave,
+        ThemeKind::PinkLemonade,
+        ThemeKind::Aurora,
+        ThemeKind::Woodland,
     ];
 
     pub fn name(self) -> &'static str {
@@ -95,12 +133,43 @@ impl ThemeKind {
             ThemeKind::Crimson => "Crimson",
             ThemeKind::Midnight => "Midnight",
             ThemeKind::Celadon => "Celadon",
+            ThemeKind::Mustard => "Mustard",
+            ThemeKind::Slate => "Slate",
+            ThemeKind::Obsidian => "Obsidian",
+            ThemeKind::Citrus => "Citrus",
+            ThemeKind::Candyfloss => "Candyfloss",
+            ThemeKind::Spearmint => "Spearmint",
+            ThemeKind::Lofi => "Lo-fi",
+            ThemeKind::Dune => "Dune",
+            ThemeKind::Raincloud => "Raincloud",
+            ThemeKind::Afterglow => "Afterglow",
+            ThemeKind::BloodMoon => "Blood Moon",
+            ThemeKind::Nightshade => "Nightshade",
+            ThemeKind::Twilight => "Twilight",
+            ThemeKind::Synthwave => "Synthwave",
+            ThemeKind::PinkLemonade => "Pink Lemonade",
+            ThemeKind::Aurora => "Aurora",
+            ThemeKind::Woodland => "Woodland",
         }
     }
 
     pub fn is_dark(self) -> bool {
-        matches!(self, ThemeKind::Dark | ThemeKind::Crimson | ThemeKind::Midnight)
+        use ThemeKind::*;
+        matches!(
+            self,
+            Dark | Crimson | Midnight | Slate | Obsidian | Raincloud | Afterglow | BloodMoon | Nightshade | Twilight | Synthwave | PinkLemonade | Aurora | Woodland
+        )
     }
+
+    /// Two-tone (gradient) themes.
+    pub fn is_gradient(self) -> bool {
+        ThemeKind::ALL.iter().position(|k| *k == self).unwrap_or(0) >= 10
+    }
+}
+
+fn lenient_theme<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ThemeKind>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
 }
 
 /// Where the sound I transmit comes from.
@@ -182,7 +251,12 @@ pub struct Settings {
     /// Kept in step with `theme` so older versions still pick dark or light.
     pub dark_theme: bool,
     /// None in settings from before 1.13 (then `dark_theme` decides).
+    #[serde(deserialize_with = "lenient_theme")]
     pub theme: Option<ThemeKind>,
+    /// The chosen theme (1.22.0+, including themes older versions do not know). A theme
+    /// this version does not know is ignored instead of losing all settings.
+    #[serde(deserialize_with = "lenient_theme")]
+    pub theme_v2: Option<ThemeKind>,
     pub ui_scale: f32,
     pub show_timestamps: bool,
     pub download_dir: Option<String>,
@@ -198,6 +272,10 @@ pub struct Settings {
     pub link_previews: bool,
     /// Set away automatically after the server's idle time (servers 1.16.0+).
     pub auto_away: bool,
+    /// Your status, kept for the next connection (servers 1.17.0+).
+    pub presence: voxa_proto::Presence,
+    /// Join a channel when connecting (otherwise you are on the server but in no channel).
+    pub join_channel: bool,
     /// Open screen shares in my channel automatically.
     pub auto_watch_streams: bool,
     /// Most redraws per second (0 = as fast as the monitor refreshes).
@@ -224,6 +302,7 @@ impl Default for Settings {
             stream: StreamSettings::default(),
             dark_theme: true,
             theme: None,
+            theme_v2: None,
             ui_scale: 1.0,
             show_timestamps: true,
             download_dir: None,
@@ -233,6 +312,8 @@ impl Default for Settings {
             recent_emoji: Vec::new(),
             link_previews: true,
             auto_away: true,
+            presence: voxa_proto::Presence::Online,
+            join_channel: true,
             auto_watch_streams: true,
             max_fps: 60,
             hotkeys: Vec::new(),
@@ -288,11 +369,15 @@ impl Settings {
     }
 
     pub fn theme_kind(&self) -> ThemeKind {
-        self.theme.unwrap_or(if self.dark_theme { ThemeKind::Dark } else { ThemeKind::Light })
+        self.theme_v2.or(self.theme).unwrap_or(if self.dark_theme { ThemeKind::Dark } else { ThemeKind::Light })
     }
 
     pub fn set_theme(&mut self, t: ThemeKind) {
-        self.theme = Some(t);
+        // `theme` only ever holds a theme that Voxa 1.13-1.21 knows (they could not read
+        // the settings otherwise); the full choice is in `theme_v2`.
+        let old_known = ThemeKind::ALL.iter().position(|k| *k == t).unwrap_or(0) < 7;
+        self.theme = Some(if old_known { t } else if t.is_dark() { ThemeKind::Dark } else { ThemeKind::Light });
+        self.theme_v2 = Some(t);
         self.dark_theme = t.is_dark();
     }
 

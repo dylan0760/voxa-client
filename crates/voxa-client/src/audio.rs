@@ -86,6 +86,10 @@ pub struct VoiceShared {
     pub testing: AtomicBool,
     /// A push-to-talk hotkey (extra key or controller button) is held.
     pub ptt_hotkey: AtomicBool,
+    /// Not in a channel: nothing is transmitted.
+    pub no_channel: AtomicBool,
+    /// Do not disturb: no notification sounds.
+    pub busy: AtomicBool,
 }
 
 impl VoiceShared {
@@ -117,6 +121,8 @@ impl VoiceShared {
             lossless: AtomicBool::new(false),
             testing: AtomicBool::new(false),
             ptt_hotkey: AtomicBool::new(false),
+            no_channel: AtomicBool::new(false),
+            busy: AtomicBool::new(false),
         })
     }
 
@@ -130,7 +136,7 @@ impl VoiceShared {
 
     /// Queues a short notification tone sequence: (frequency Hz, duration ms).
     pub fn play_tones(&self, tones: &[(f32, u32)]) {
-        if !self.settings.lock().sounds {
+        if !self.settings.lock().sounds || self.busy.load(Ordering::Relaxed) {
             return;
         }
         self.queue_tones(tones);
@@ -870,7 +876,7 @@ fn encoder_loop(
             let db = if rms > 0.0 { 20.0 * rms.log10() } else { -90.0 };
             shared.input_level.store(db.max(-90.0).to_bits(), Ordering::Relaxed);
 
-            let wants = match settings.mode {
+            let wants = !shared.no_channel.load(Ordering::Relaxed) && match settings.mode {
                 VoiceMode::Continuous => true,
                 VoiceMode::VoiceActivation => {
                     if db >= settings.vad_threshold_db {

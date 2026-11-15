@@ -5,6 +5,7 @@
 mod gpu;
 mod app;
 mod audio;
+mod autostart;
 mod chat_images;
 mod capture;
 mod config;
@@ -97,6 +98,8 @@ fn main() -> eframe::Result<()> {
             .with_app_id("voxa")
             .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([760.0, 480.0])
+            // Started with Windows: only the tray icon (unless the tray is turned off).
+            .with_visible(!app::started_in_tray())
             .with_icon(icon),
         wgpu_options: gpu::wgpu_options(),
         ..Default::default()
