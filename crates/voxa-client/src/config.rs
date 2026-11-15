@@ -276,6 +276,8 @@ pub struct Settings {
     pub presence: voxa_proto::Presence,
     /// Join a channel when connecting (otherwise you are on the server but in no channel).
     pub join_channel: bool,
+    /// Direct messages open in a window of their own (like Steam), not as chat tabs.
+    pub dm_window: bool,
     /// Open screen shares in my channel automatically.
     pub auto_watch_streams: bool,
     /// Most redraws per second (0 = as fast as the monitor refreshes).
@@ -314,6 +316,7 @@ impl Default for Settings {
             auto_away: true,
             presence: voxa_proto::Presence::Online,
             join_channel: true,
+            dm_window: true,
             auto_watch_streams: true,
             max_fps: 60,
             hotkeys: Vec::new(),

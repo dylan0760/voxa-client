@@ -78,6 +78,7 @@ pub struct OptionsDlg {
     pub link_previews: bool,
     pub auto_away: bool,
     pub join_channel: bool,
+    pub dm_window: bool,
     /// Start with Windows (read from the registry when the dialog opens).
     pub autostart: bool,
     /// Which device each device choice means right now ((input, setting) -> name).
@@ -253,6 +254,9 @@ pub struct Dialogs {
     pub update: bool,
     pub delete_msg: Option<(TextTarget, MessageId, String, String)>,
     pub clear_chat: Option<TextTarget>,
+    /// The chat a delete / clear confirmation was opened for (the selected tab may change,
+    /// or it came from the Messages window).
+    pub chat_key: Option<ChatKey>,
     pub client_perms: Option<ClientPermsDlg>,
     pub channel_password: Option<(ChannelId, String)>,
     pub away: Option<String>,
@@ -428,8 +432,14 @@ impl Dialogs {
             Open::ChannelPassword(ch) => self.channel_password = Some((ch, String::new())),
             Open::Away => self.away = Some(String::new()),
             Open::TalkRequest => self.talk_request = Some(String::new()),
-            Open::DeleteMessage(t, id, author, text) => self.delete_msg = Some((t, id, author, text)),
-            Open::ClearChat(t) => self.clear_chat = Some(t),
+            Open::DeleteMessage(t, id, author, text) => {
+                self.chat_key = Some(s.tab);
+                self.delete_msg = Some((t, id, author, text));
+            }
+            Open::ClearChat(t) => {
+                self.chat_key = Some(s.tab);
+                self.clear_chat = Some(t);
+            }
             Open::ClientPerms(id) => {
                 if let Some(c) = s.clients.get(&id) {
                     s.conn.send(C2S::GetClientPerms(c.uid.clone()));
@@ -459,6 +469,7 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         link_previews: s.link_previews,
         auto_away: s.auto_away,
         join_channel: s.join_channel,
+        dm_window: s.dm_window,
         app_tab: 0,
         autostart: crate::autostart::enabled(),
         resolved: HashMap::new(),
@@ -1016,6 +1027,8 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             ui.checkbox(&mut d.timestamps, "Show timestamps");
                             ui.checkbox(&mut d.link_previews, "Show previews of YouTube links and play them in Voxa")
                                 .on_hover_text("Loading a preview contacts YouTube from your computer, like opening the link would.");
+                            ui.checkbox(&mut d.dm_window, "Open direct messages in their own window")
+                                .on_hover_text("Like Steam: conversations open in a Messages window you can move to another screen. A new message opens it (without taking the keyboard from your game) and flashes it in the taskbar. Off: direct messages are tabs in the chat.");
                             ui.checkbox(&mut d.join_channel, "Join a channel when connecting")
                                 .on_hover_text("Off: you are on the server (shown online) without being in a channel, like Discord. Double-click a channel to join it. A bookmark's default channel is still joined.");
                             ui.checkbox(&mut d.auto_away, "Set me away when I'm idle")
@@ -1081,6 +1094,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         app.settings.link_previews = d.link_previews;
         app.settings.auto_away = d.auto_away;
         app.settings.join_channel = d.join_channel;
+        app.settings.dm_window = d.dm_window;
         app.settings.auto_update = d.auto_update;
         if d.autostart != crate::autostart::enabled() && std::env::var_os("VOXA_CONFIG_DIR").is_none() {
             if let Err(e) = crate::autostart::set(d.autostart) {
@@ -2206,7 +2220,10 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             ui.label(RichText::new("Tip: hold Shift while clicking 🗑 to delete without this question.").small().weak());
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new(RichText::new("Delete").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
-                    app.send_mut(C2S::DeleteMessage { target, id });
+                    match app.dlg.chat_key {
+                        Some(key) => app.send_mut_as(key, C2S::DeleteMessage { target, id }),
+                        None => app.send_mut(C2S::DeleteMessage { target, id }),
+                    }
                     close = true;
                 }
                 if ui.button("Cancel").clicked() {
@@ -2240,7 +2257,10 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             });
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new(RichText::new("Clear history").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
-                    app.send_mut(C2S::ClearChat(target));
+                    match app.dlg.chat_key {
+                        Some(key) => app.send_mut_as(key, C2S::ClearChat(target)),
+                        None => app.send_mut(C2S::ClearChat(target)),
+                    }
                     close = true;
                 }
                 if ui.button("Cancel").clicked() {

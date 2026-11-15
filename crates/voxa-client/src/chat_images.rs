@@ -49,11 +49,13 @@ pub struct ChatImages {
     pub sends: Arc<Mutex<BTreeMap<u32, ImageSend>>>,
     next_send: u32,
     pub viewing: Option<ImageRef>,
+    /// The window the picture was opened in (the main window or the Messages window).
+    pub viewing_in: egui::ViewportId,
 }
 
 impl Default for ChatImages {
     fn default() -> Self {
-        ChatImages { cache: Default::default(), sends: Default::default(), next_send: FIRST_SEND_ID, viewing: None }
+        ChatImages { cache: Default::default(), sends: Default::default(), next_send: FIRST_SEND_ID, viewing: None, viewing_in: egui::ViewportId::ROOT }
     }
 }
 
@@ -225,6 +227,7 @@ pub fn chat_image(ui: &mut Ui, imgs: &mut ChatImages, conn: &crate::net::Connect
             if resp.clicked() {
                 drop(cache);
                 imgs.viewing = Some(r.clone());
+                imgs.viewing_in = ui.ctx().viewport_id();
             }
         }
         Some(ImgState::Failed(e)) => {
@@ -264,6 +267,10 @@ pub fn pending_sends(ui: &mut Ui, imgs: &ChatImages, dim: Color32) {
 
 /// Full-size viewer window with "Save as".
 pub fn viewer(ctx: &egui::Context, imgs: &mut ChatImages) {
+    // Only in the window it was opened from.
+    if ctx.viewport_id() != imgs.viewing_in {
+        return;
+    }
     let Some(r) = imgs.viewing.clone() else { return };
     let mut open = true;
     let mut save: Option<Arc<Vec<u8>>> = None;

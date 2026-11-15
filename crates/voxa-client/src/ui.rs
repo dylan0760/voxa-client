@@ -52,6 +52,10 @@ pub enum Action {
     StartEdit(TextTarget, MessageId, String),
     /// Online / away / busy / invisible.
     SetPresence(Presence),
+    /// An action from the Messages window, applied to that conversation (not the tab).
+    InDm(DmId, Box<Action>),
+    /// Bring up the Messages window.
+    ShowMessages,
     Toggle(ChannelId),
     Dialog(dialogs::Open),
     Home(bool),
@@ -582,6 +586,8 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
         app.window_title = title;
     }
+    // Direct messages in their own window (also while a stream is full screen).
+    dm_window(app, &ctx);
     // True full screen for a stream: only the picture on the whole monitor. Esc, the
     // button or the stream ending leaves it.
     if app.screen_fullscreen {
@@ -2030,9 +2036,22 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 tab(ui, ChatKey::Channel, format!("# {cname}"), s.channel_logs.get(&my_channel).map(|l| l.unread).unwrap_or(0));
             }
             tab(ui, ChatKey::Server, "🖧 Server".into(), s.server_log.unread);
-            for (id, d) in s.dms.iter().enumerate().filter(|(_, d)| d.open) {
-                let dot = if s.dm_online(id).is_some() { "" } else { " (offline)" };
-                tab(ui, ChatKey::Dm(id), format!("@ {}{dot}", s.dm_name(id)), d.log.unread);
+            if app.settings.dm_window {
+                // Direct messages are in the Messages window: one button for it.
+                let unread: usize = s.dms.iter().map(|d| d.log.unread).sum();
+                let open = s.dms.iter().any(|d| d.open);
+                if open || unread > 0 {
+                    let label = if unread > 0 { format!("💬 Messages  {unread}") } else { "💬 Messages".into() };
+                    let rt = if unread > 0 { RichText::new(label).small().strong().color(YELLOW) } else { RichText::new(label).small() };
+                    if ui.add(egui::Button::new(rt).fill(t.card).corner_radius(12)).on_hover_text("Open the Messages window").clicked() {
+                        a.push(Action::ShowMessages);
+                    }
+                }
+            } else {
+                for (id, d) in s.dms.iter().enumerate().filter(|(_, d)| d.open) {
+                    let dot = if s.dm_online(id).is_some() { "" } else { " (offline)" };
+                    tab(ui, ChatKey::Dm(id), format!("@ {}{dot}", s.dm_name(id)), d.log.unread);
+                }
             }
             if let ChatKey::Dm(id) = s.tab {
                 if ui.small_button("✖").on_hover_text("Close conversation").clicked() {
@@ -2124,6 +2143,161 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
         }
     }
     chat_area(s, &mut app.actions, &mut app.chat_input, &app.settings, &mut app.emoji, &app.previews, ui);
+}
+
+/// Shows a conversation: in the Messages window (brought to the front), or as a chat tab.
+fn show_dm(s: &mut Session, dm: DmId, popped: bool) {
+    if let Some(d) = s.dms.get_mut(dm) {
+        d.open = true;
+    }
+    if popped {
+        s.dm_win.open = true;
+        s.dm_win.sel = Some(dm);
+        s.dm_win.focus_now = true;
+    } else {
+        s.tab = ChatKey::Dm(dm);
+    }
+}
+
+/// The Messages window (like Steam's chat window): a window of its own with the open
+/// conversations on the left and the selected one on the right. Closing it keeps them.
+pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
+    let popped = app.settings.dm_window;
+    let Some(s) = &mut app.sess else { return };
+    if !popped {
+        // Turned off: whatever was in the window becomes a tab.
+        if s.dm_win.open {
+            s.dm_win.open = false;
+            if let Some(id) = s.dm_win.sel {
+                s.tab = ChatKey::Dm(id);
+            }
+        }
+        return;
+    }
+    // Turned on while a conversation was a tab: it moves to the window.
+    if let ChatKey::Dm(id) = s.tab {
+        s.tab = if s.my_channel() != NO_CHANNEL { ChatKey::Channel } else { ChatKey::Server };
+        show_dm(s, id, true);
+    }
+    if !s.dm_win.open || !s.welcomed {
+        return;
+    }
+    let open_ids: Vec<DmId> = s.dms.iter().enumerate().filter(|(_, d)| d.open).map(|(i, _)| i).collect();
+    let Some(&first) = open_ids.first() else {
+        s.dm_win.open = false;
+        return;
+    };
+    let sel = match s.dm_win.sel.filter(|i| open_ids.contains(i)) {
+        Some(i) => i,
+        None => {
+            s.dm_win.sel = Some(first);
+            first
+        }
+    };
+    let vid = egui::ViewportId::from_hash_of("voxa_messages");
+    if std::mem::take(&mut s.dm_win.focus_now) {
+        ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Focus);
+    }
+    if std::mem::take(&mut s.dm_win.attention) {
+        ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+    }
+    let unread: usize = s.dms.iter().map(|d| d.log.unread).sum();
+    let title = if unread > 0 { format!("({unread}) {} - Voxa Messages", s.dm_name(sel)) } else { format!("{} - Voxa Messages", s.dm_name(sel)) };
+    let builder = egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_app_id("voxa-messages")
+        .with_inner_size([780.0, 560.0])
+        .with_min_inner_size([520.0, 360.0])
+        .with_icon(egui::IconData { rgba: crate::icon::icon_rgba(64, false), width: 64, height: 64 });
+    let t = theme();
+    let VoxaApp { sess, actions, settings, previews, .. } = app;
+    let Some(s) = sess.as_mut() else { return };
+    let mut window_actions: Vec<Action> = Vec::new();
+    ctx.show_viewport_immediate(vid, builder, |ui, _class| {
+        let wa = &mut window_actions;
+        if ui.input(|i| i.viewport().close_requested()) {
+            s.dm_win.open = false;
+        }
+        s.dm_win.focused = ui.input(|i| i.viewport().focused.unwrap_or(false));
+        if let Some(g) = t.gradient {
+            paint_gradient(ui.painter(), ui.ctx().content_rect(), g);
+        }
+        // Open conversations.
+        egui::Panel::left("dm_list").resizable(false).exact_size(220.0).frame(Frame::new().fill(t.side).inner_margin(Margin::same(8))).show(ui, |ui| {
+            ui.label(RichText::new("DIRECT MESSAGES").small().strong().color(t.dim));
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                for &id in &open_ids {
+                    let (uid, name, unread) = (s.dms[id].uid.clone(), s.dm_name(id), s.dms[id].log.unread);
+                    let online = s.dm_online(id).is_some();
+                    let on = id == sel;
+                    let r = Frame::new()
+                        .fill(if on { t.hover } else { Color32::TRANSPARENT })
+                        .corner_radius(8)
+                        .inner_margin(Margin::symmetric(6, 4))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                avatar(ui, 30.0, &name, &uid, online.then_some(GREEN));
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 0.0;
+                                    let n = RichText::new(&name).strong();
+                                    ui.label(if unread > 0 { n.color(YELLOW) } else { n });
+                                    ui.label(RichText::new(if online { "Online" } else { "Offline" }).small().color(if online { GREEN } else { t.dim }));
+                                });
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.add(egui::Button::new(RichText::new("✖").small().color(t.dim)).frame(false)).on_hover_text("Close this conversation (it stays saved on this PC)").clicked() {
+                                        wa.push(Action::CloseTab(id));
+                                    }
+                                    if unread > 0 {
+                                        ui.label(RichText::new(format!(" {unread} ")).small().strong().color(Color32::WHITE).background_color(RED));
+                                    }
+                                });
+                            });
+                        })
+                        .response
+                        .interact(Sense::click());
+                    if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        s.dm_win.sel = Some(id);
+                    }
+                }
+            });
+        });
+        egui::CentralPanel::default().frame(Frame::new().fill(t.main)).show(ui, |ui| {
+            // Header: who, and whether they get it now or later.
+            let online = s.dm_online(sel).is_some();
+            egui::Panel::top("dm_head").frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin::symmetric(14, 10))).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("@  {}", s.dm_name(sel))).strong().size(16.0));
+                    ui.separator();
+                    ui.label(RichText::new(if online { "Direct message" } else { "Offline · gets your messages later" }).color(t.dim));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if icon_button(ui, "🗑", "Delete this conversation from this PC", None).clicked() {
+                            wa.push(Action::Dialog(dialogs::Open::ClearChat(TextTarget::Private(0))));
+                        }
+                    });
+                });
+            });
+            // Images dropped on the window go to this conversation.
+            if online {
+                let dropped: Vec<std::path::PathBuf> = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| crate::chat_images::is_image_path(p)).collect());
+                for p in dropped {
+                    wa.push(Action::SendImage(TextTarget::Private(s.dm_online(sel).unwrap_or(0)), crate::chat_images::ImageSource::File(p)));
+                }
+            }
+            let saved = std::mem::replace(&mut s.tab, ChatKey::Dm(sel));
+            let mut input = std::mem::take(&mut s.dm_win.input);
+            let mut picker = std::mem::take(&mut s.dm_win.picker);
+            chat_area(s, wa, &mut input, settings, &mut picker, previews, ui);
+            s.dm_win.input = input;
+            s.dm_win.picker = picker;
+            s.tab = saved;
+        });
+    });
+    // Everything the window asked for applies to its conversation.
+    actions.extend(window_actions.into_iter().map(|a| Action::InDm(sel, Box::new(a))));
 }
 
 /// State of the emoji picker popup.
@@ -2892,17 +3066,19 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
             app.show_members = true;
         }
         Action::OpenPrivate(id) => {
+            let popped = app.settings.dm_window;
             if let Some(s) = &mut app.sess {
                 let Some(c) = s.clients.get(&id).cloned() else { return };
                 let dm = s.dm_open(&c.uid, &c.nickname);
-                s.tab = ChatKey::Dm(dm);
+                show_dm(s, dm, popped);
             }
         }
         Action::OpenDm(uid, name) => {
+            let popped = app.settings.dm_window;
             if let Some(s) = &mut app.sess {
                 if uid != s.my_uid {
                     let dm = s.dm_open(&uid, &name);
-                    s.tab = ChatKey::Dm(dm);
+                    show_dm(s, dm, popped);
                 }
             }
         }
@@ -2918,7 +3094,8 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
                     d.open = false;
                 }
                 if s.tab == ChatKey::Dm(id) {
-                    s.tab = ChatKey::Channel;
+                    // Back to the channel chat, or the server chat when not in a channel.
+                    s.tab = if s.my_channel() != NO_CHANNEL { ChatKey::Channel } else { ChatKey::Server };
                 }
             }
         }
@@ -3049,6 +3226,27 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         Action::DeleteMessage(t, id) => app.send_mut(C2S::DeleteMessage { target: t, id }),
         Action::CopyText(t) => app.ctx.copy_text(t),
         Action::SetPresence(p) => app.set_presence(p),
+        Action::ShowMessages => {
+            if let Some(s) = &mut app.sess {
+                let first = s.dms.iter().position(|d| d.log.unread > 0).or_else(|| s.dms.iter().position(|d| d.open));
+                if let Some(id) = s.dm_win.sel.filter(|i| s.dms.get(*i).is_some_and(|d| d.open)).or(first) {
+                    show_dm(s, id, true);
+                }
+            }
+        }
+        Action::InDm(id, inner) => {
+            // Confirmations open in the main window: make sure it can be seen.
+            if matches!(*inner, Action::Dialog(_)) && app.hidden {
+                app.show_window();
+            }
+            let Some(s) = &mut app.sess else { return };
+            let saved = std::mem::replace(&mut s.tab, ChatKey::Dm(id));
+            apply(app, *inner);
+            // The main window keeps its own tab, whatever the action did with it.
+            if let Some(s) = &mut app.sess {
+                s.tab = saved;
+            }
+        }
         Action::StartEdit(target, id, text) => {
             if let Some(s) = &mut app.sess {
                 s.editing = Some((target, id, text));

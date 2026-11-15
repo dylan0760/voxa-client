@@ -49,6 +49,24 @@ pub enum ChatKey {
 
 pub type DmId = usize;
 
+/// The "Messages" window (like Steam's chat window): direct messages in a window of their
+/// own, with the open conversations listed on the left.
+#[derive(Default)]
+pub struct DmWindow {
+    pub open: bool,
+    /// The conversation shown.
+    pub sel: Option<DmId>,
+    /// Its own message box and emoji picker (the main window keeps its own).
+    pub input: String,
+    pub picker: crate::ui::EmojiPicker,
+    /// The window has the keyboard focus (then new messages there are read at once).
+    pub focused: bool,
+    /// Bring it to the front next frame (you opened a conversation).
+    pub focus_now: bool,
+    /// Flash its taskbar button next frame (a message arrived).
+    pub attention: bool,
+}
+
 /// A direct message conversation, kept per person (identity), stored only on this PC.
 pub struct Dm {
     pub uid: String,
@@ -244,6 +262,8 @@ pub struct Session {
     pub auto_away: bool,
     /// Presences of others that are not plain online (servers 1.17.0+).
     pub presences: HashMap<ClientId, Presence>,
+    /// Direct messages in their own window (Options ▸ Application).
+    pub dm_win: DmWindow,
     pub tab: ChatKey,
     pub selected: Selection,
     pub watching: HashSet<ClientId>,
@@ -694,6 +714,27 @@ impl VoxaApp {
         match what.as_str() {
             "share" => crate::ui::apply(self, crate::ui::Action::ShareScreen),
             "people" => crate::ui::apply(self, crate::ui::Action::People),
+            // Answers in the Messages window once a conversation is shown there (the same
+            // action its Send button makes).
+            "reply-dm" => {
+                let sel = self.sess.as_ref().and_then(|s| s.dm_win.sel.filter(|_| s.dm_win.open).map(|id| (id, s.dm_online(id))));
+                match sel {
+                    Some((id, Some(client))) => {
+                        let send = crate::ui::Action::Send(C2S::SendText { target: TextTarget::Private(client), text: "Sure, see you at 8!".into() });
+                        crate::ui::apply(self, crate::ui::Action::InDm(id, Box::new(send)));
+                    }
+                    _ => self.debug_done = false,
+                }
+            }
+            // Sends a direct message to the first other person (waits until someone is on).
+            "send-dm" => {
+                let Some(s) = &mut self.sess else { return };
+                let Some(other) = s.clients.values().find(|c| c.id != s.me).cloned() else {
+                    self.debug_done = false;
+                    return;
+                };
+                s.conn.send(C2S::SendText { target: TextTarget::Private(other.id), text: "Hey! Want to play later? 🎮".into() });
+            }
             "share-start" => {
                 if let Some(src) = crate::capture::sources().into_iter().find(|s| matches!(s, crate::capture::Source::Monitor { .. })) {
                     let (ctx, settings) = (self.ctx.clone(), self.settings.stream.clone());
@@ -1021,6 +1062,19 @@ impl VoxaApp {
         }
     }
 
+    /// `send_mut` for a given conversation rather than the selected tab: the Messages
+    /// window, and confirmations that were opened for a chat that is no longer selected.
+    pub fn send_mut_as(&mut self, key: ChatKey, m: C2S) {
+        let Some(s) = &mut self.sess else { return };
+        let saved = std::mem::replace(&mut s.tab, key);
+        self.send_mut(m);
+        if let Some(s) = &mut self.sess {
+            if s.tab == key {
+                s.tab = saved;
+            }
+        }
+    }
+
     /// Like `send`, but direct messages are handled here: they are stored only on this
     /// PC, so deleting and clearing them is local, and a message to someone offline is
     /// left on the server for later delivery (servers 1.13.0+).
@@ -1127,6 +1181,7 @@ impl VoxaApp {
             hw_bans: HashSet::new(),
             auto_away: false,
             presences: HashMap::new(),
+            dm_win: DmWindow::default(),
             tab: ChatKey::Channel,
             selected: Selection::Server,
             watching: HashSet::new(),
@@ -1707,11 +1762,26 @@ impl VoxaApp {
                     }
                     let id = s.dm_open(&uid, &name);
                     s.dm_push(id, msg);
-                    if s.tab != ChatKey::Dm(id) {
+                    let popped = self.settings.dm_window;
+                    let w = &mut s.dm_win;
+                    let viewing = if popped { w.open && w.sel == Some(id) && w.focused } else { s.tab == ChatKey::Dm(id) };
+                    if !viewing {
                         s.dms[id].log.unread += 1;
                     }
                     if !from_me {
                         shared.play_tones(&[(880.0, 60), (1175.0, 80)]);
+                        // Like Steam: the Messages window opens (without taking the keyboard
+                        // from your game) and flashes in the taskbar. Not when busy.
+                        if popped && self.settings.presence != Presence::Busy {
+                            let w = &mut s.dm_win;
+                            if !w.open {
+                                w.open = true;
+                                w.sel = Some(id);
+                            }
+                            if !w.focused {
+                                w.attention = true;
+                            }
+                        }
                     }
                     return;
                 }

@@ -155,11 +155,24 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
 * **Pinned messages** (Voxa Server 1.8.0+): pin messages with 📌 (hover or right-click).
   A **📌 Pinned** bar at the top of the chat lists them. Needs the **Pin messages**
   permission.
+* **Messages window** (like Steam): direct messages open in a window of their own that
+  you can move to another screen.
+  * Your open conversations are listed on the left with who's online and how many
+    messages are unread; the selected one is on the right with its own message box,
+    emoji, images (button, Ctrl+V or drag and drop) and 🗑.
+  * A new message opens the window without taking the keyboard from your game, and
+    flashes it in the taskbar (not while you're *Do not disturb*). The window title shows
+    how many messages are unread.
+  * Open a conversation by clicking someone under 👥 People, double-clicking them in the
+    channel tree, or **💬 Messages** above the chat.
+  * Closing the window or a conversation (✖) keeps everything; it all comes back next time.
+  * Prefer tabs in the main window? Turn off **Options ▸ Application ▸ Open direct
+    messages in their own window**.
 * **Direct messages** are kept **only on your PC**, never on the server, encrypted for
   your Windows account.
   * Delete single messages or a whole conversation (🗑 in its header). That removes your
     copy only; the other person keeps theirs.
-  * Closing a conversation tab keeps its history; open it again from the People list.
+  * Closing a conversation keeps its history; open it again from the People list.
 * **👥 People** (top right, Voxa Server 1.13.0+): everyone who has been on the server.
   * Online people first, with their channel; then offline people with when they were
     last seen. 💬 marks people you have a saved conversation with.
