@@ -86,6 +86,10 @@ pub fn blocks(text: &str) -> Vec<Block> {
     out
 }
 
+/// Message text can be selected with the mouse; not on phones, where a long press opens the
+/// message's menu (with Copy text) instead.
+pub const SELECTABLE: bool = !cfg!(target_os = "android");
+
 fn line_block(line: &str) -> Block {
     let trimmed = line.trim_start();
     let indent = (line.len() - trimmed.len()) / 2;
@@ -436,7 +440,7 @@ fn render_spans(ui: &mut Ui, spans: &[Span], size: f32, base: Color32) {
         let mut job = LayoutJob::default();
         let flush = |ui: &mut Ui, job: &mut LayoutJob| {
             if !job.sections.is_empty() {
-                ui.add(egui::Label::new(std::mem::take(job)).selectable(true).wrap());
+                ui.add(egui::Label::new(std::mem::take(job)).selectable(SELECTABLE).wrap());
             }
         };
         for sp in spans {
@@ -529,7 +533,7 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str, size: f32, id: egui::Id) {
         let tall = code.lines().count() > 24;
         let area = if tall { egui::ScrollArea::both().max_height(420.0) } else { egui::ScrollArea::horizontal() };
         area.id_salt(id).auto_shrink([false, true]).show(ui, |ui| {
-            ui.add(egui::Label::new(job).selectable(true).extend());
+            ui.add(egui::Label::new(job).selectable(SELECTABLE).extend());
             ui.add_space(8.0);
         });
     });

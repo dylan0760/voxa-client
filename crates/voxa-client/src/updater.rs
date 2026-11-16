@@ -125,10 +125,18 @@ pub trait ShowFill {
 
 impl ShowFill for egui::Window<'_> {
     fn show_fill<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<Option<R>>> {
-        // Phones: every dialog fills the screen (above the system bars).
+        // Phones: every dialog is a flat full-screen page (above the system bars), like an
+        // app's settings page rather than a floating window.
         if crate::ui::is_mobile(ctx) {
+            let style = ctx.global_style();
+            let page = egui::Frame::window(&style)
+                .corner_radius(0)
+                .stroke(egui::Stroke::NONE)
+                .shadow(egui::Shadow::NONE)
+                .fill(style.visuals.panel_fill)
+                .inner_margin(egui::Margin::symmetric(12, 8));
             // Content wider or taller than a phone scrolls.
-            return self.fixed_rect(crate::ui::safe_rect(ctx).shrink(4.0)).show(ctx, |ui| {
+            return self.frame(page).fixed_rect(crate::ui::safe_rect(ctx)).show(ctx, |ui| {
                 egui::ScrollArea::both().auto_shrink([false, false]).show(ui, add).inner
             });
         }

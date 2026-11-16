@@ -177,6 +177,210 @@ fn insets() -> Option<[i32; 4]> {
     .flatten()
 }
 
+/// Android's clipboard (egui has none on Android).
+fn clipboard_manager<'a>(env: &mut JNIEnv<'a>, act: &JObject) -> jni::errors::Result<JObject<'a>> {
+    let name = env.new_string("clipboard")?;
+    env.call_method(act, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", &[JValue::Object(&name)])?.l()
+}
+
+pub fn set_clipboard(text: &str) {
+    with_env(|env, act| {
+        let cm = clipboard_manager(env, act)?;
+        let label = env.new_string("Voxa")?;
+        let t = env.new_string(text)?;
+        let clip = env.call_static_method(
+            "android/content/ClipData",
+            "newPlainText",
+            "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;",
+            &[JValue::Object(&label), JValue::Object(&t)],
+        )?
+        .l()?;
+        env.call_method(&cm, "setPrimaryClip", "(Landroid/content/ClipData;)V", &[JValue::Object(&clip)])?;
+        Ok(())
+    });
+}
+
+pub fn get_clipboard() -> Option<String> {
+    with_env(|env, act| {
+        let cm = clipboard_manager(env, act)?;
+        let clip = env.call_method(&cm, "getPrimaryClip", "()Landroid/content/ClipData;", &[])?.l()?;
+        if clip.is_null() || env.call_method(&clip, "getItemCount", "()I", &[])?.i()? < 1 {
+            return Ok(None);
+        }
+        let item = env.call_method(&clip, "getItemAt", "(I)Landroid/content/ClipData$Item;", &[JValue::Int(0)])?.l()?;
+        let cs = env.call_method(&item, "coerceToText", "(Landroid/content/Context;)Ljava/lang/CharSequence;", &[JValue::Object(act)])?.l()?;
+        if cs.is_null() {
+            return Ok(None);
+        }
+        let s = env.call_method(&cs, "toString", "()Ljava/lang/String;", &[])?.l()?;
+        let s: String = env.get_string(&s.into())?.into();
+        Ok(Some(s))
+    })
+    .flatten()
+}
+
+/// Touch input made to work like a desktop where Voxa needs it:
+/// * a long press opens the right-click menu of what is under it (messages, people,
+///   channels): egui does that itself, Voxa just keeps frames coming while the finger rests;
+/// * Paste / Copy / Cut / Select all for text boxes, from the bar shown while typing.
+#[derive(Default)]
+pub struct Touch {
+    /// Where and when the finger went down (while it rests there).
+    down: Option<(egui::Pos2, f64)>,
+    /// The time of the last frame.
+    now: f64,
+    /// The edit bar's buttons as drawn last frame.
+    bar: Vec<(egui::Rect, BarAction)>,
+    /// The bar button under the finger. Taps on the bar never reach egui, so the text box
+    /// keeps the keyboard and its selection.
+    bar_press: Option<usize>,
+    /// The keyboard has been seen up since a text box got the focus.
+    ime_seen: bool,
+}
+
+#[derive(Clone, Copy)]
+enum BarAction {
+    Paste,
+    Copy,
+    Cut,
+    SelectAll,
+}
+
+impl BarAction {
+    const ALL: [(&'static str, BarAction); 4] =
+        [("📋 Paste", BarAction::Paste), ("Copy", BarAction::Copy), ("Cut", BarAction::Cut), ("Select all", BarAction::SelectAll)];
+
+    fn event(self) -> Option<egui::Event> {
+        Some(match self {
+            BarAction::Paste => egui::Event::Paste(get_clipboard().filter(|t| !t.is_empty())?),
+            BarAction::Copy => egui::Event::Copy,
+            BarAction::Cut => egui::Event::Cut,
+            BarAction::SelectAll => egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND },
+        })
+    }
+}
+
+/// A little longer than egui's long press (its longest click, 0.8 s).
+const LONG_PRESS: f64 = 1.0;
+
+impl Touch {
+    /// Runs before every frame on the raw input.
+    pub fn hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        use egui::{Event, PointerButton};
+        let now = raw.time.unwrap_or(0.0);
+        self.now = now;
+        let mut out = Vec::with_capacity(raw.events.len() + 4);
+        for ev in raw.events.drain(..) {
+            // The edit bar: the whole touch (down, moves, up) is kept from egui.
+            if let Some(i) = self.bar_press {
+                match &ev {
+                    Event::PointerButton { pos, button: PointerButton::Primary, pressed: false, .. } => {
+                        self.bar_press = None;
+                        if let Some((rect, act)) = self.bar.get(i).copied() {
+                            if rect.expand(8.0).contains(*pos) {
+                                out.extend(act.event());
+                            }
+                        }
+                        ctx.request_repaint();
+                        continue;
+                    }
+                    // The touch was cancelled (no release comes): touches work again.
+                    Event::PointerGone | Event::WindowFocused(false) => self.bar_press = None,
+                    Event::PointerMoved(_) | Event::Touch { .. } | Event::PointerButton { .. } => continue,
+                    _ => {}
+                }
+            }
+            match &ev {
+                Event::PointerButton { pos, button: PointerButton::Primary, pressed: true, .. } => {
+                    if let Some(i) = self.bar.iter().position(|(r, _)| r.contains(*pos)) {
+                        self.bar_press = Some(i);
+                        ctx.request_repaint();
+                        continue;
+                    }
+                    self.down = Some((*pos, now));
+                }
+                Event::PointerMoved(p) => {
+                    if self.down.is_some_and(|(s, _)| s.distance(*p) > 12.0) {
+                        self.down = None;
+                    }
+                }
+                Event::PointerButton { button: PointerButton::Primary, pressed: false, .. } => self.down = None,
+                _ => {}
+            }
+            out.push(ev);
+        }
+        raw.events = out;
+    }
+
+    /// After the frame: copies go to Android's clipboard, and while a text box has the
+    /// keyboard a bar above it offers Paste, Copy, Cut and Select all.
+    pub fn after_frame(&mut self, ctx: &egui::Context) {
+        let copied: Vec<String> = ctx.output(|o| {
+            o.commands
+                .iter()
+                .filter_map(|c| match c {
+                    egui::OutputCommand::CopyText(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        if let Some(t) = copied.last().filter(|t| !t.is_empty()) {
+            set_clipboard(t);
+        }
+        // Frames keep coming while a finger rests, so a long press is noticed in time.
+        if self.down.is_some_and(|(_, t0)| self.now - t0 < LONG_PRESS) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+        self.bar.clear();
+        // The keyboard closed by the user (back, or its own hide key): typing is over, so
+        // the text box lets go (otherwise the bar would stay over the page).
+        if ctx.text_edit_focused() && self.bar_press.is_none() {
+            match ime_visible() {
+                Some(true) => self.ime_seen = true,
+                Some(false) if self.ime_seen => {
+                    self.ime_seen = false;
+                    ctx.memory_mut(|m| {
+                        if let Some(id) = m.focused() {
+                            m.surrender_focus(id);
+                        }
+                    });
+                    ctx.request_repaint();
+                    return;
+                }
+                _ => {}
+            }
+        } else if !ctx.text_edit_focused() {
+            self.ime_seen = false;
+        }
+        if !ctx.text_edit_focused() && self.bar_press.is_none() {
+            return;
+        }
+        let safe = crate::ui::safe_rect(ctx);
+        let pressed = self.bar_press;
+        let mut bar = Vec::new();
+        egui::Area::new(egui::Id::unique("voxa_edit_bar"))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -(ctx.content_rect().bottom() - safe.bottom()) - 6.0))
+            .show(ctx, |ui| {
+                egui::Frame::new().fill(ui.visuals().window_fill).corner_radius(10).stroke(ui.visuals().window_stroke).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (i, (label, act)) in BarAction::ALL.into_iter().enumerate() {
+                            let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(15.0), ui.visuals().text_color());
+                            let (rect, _) = ui.allocate_exact_size(galley.size() + egui::vec2(20.0, 18.0), egui::Sense::hover());
+                            if pressed == Some(i) {
+                                ui.painter().rect_filled(rect, 6, ui.visuals().widgets.active.bg_fill);
+                            }
+                            ui.painter().galley(rect.center() - galley.size() / 2.0, galley, ui.visuals().text_color());
+                            bar.push((rect, act));
+                        }
+                    });
+                });
+            });
+        self.bar = bar;
+    }
+}
+
 /// Puts Voxa in the background like the Home button (it stays connected).
 pub fn to_background() {
     with_env(|env, act| {
@@ -201,6 +405,35 @@ pub fn intent_link() -> Option<String> {
     })
     .flatten()
     .filter(|s| s.starts_with("voxa://"))
+}
+
+/// Whether the on-screen keyboard is showing (Android 11+; asked at most a few times a
+/// second). None when unknown.
+fn ime_visible() -> Option<bool> {
+    static CACHE: parking_lot::Mutex<Option<(std::time::Instant, Option<bool>)>> = parking_lot::Mutex::new(None);
+    let mut c = CACHE.lock();
+    if let Some((at, v)) = *c {
+        if at.elapsed() < std::time::Duration::from_millis(250) {
+            return v;
+        }
+    }
+    let v = if sdk_int() >= 30 {
+        with_env(|env, act| {
+            let window = env.call_method(act, "getWindow", "()Landroid/view/Window;", &[])?.l()?;
+            let decor = env.call_method(&window, "getDecorView", "()Landroid/view/View;", &[])?.l()?;
+            let insets = env.call_method(&decor, "getRootWindowInsets", "()Landroid/view/WindowInsets;", &[])?.l()?;
+            if insets.is_null() {
+                return Ok(None);
+            }
+            let ime = env.call_static_method("android/view/WindowInsets$Type", "ime", "()I", &[])?.i()?;
+            Ok(Some(env.call_method(&insets, "isVisible", "(I)Z", &[JValue::Int(ime)])?.z()?))
+        })
+        .flatten()
+    } else {
+        None
+    };
+    *c = Some((std::time::Instant::now(), v));
+    v
 }
 
 /// Shows or hides the on-screen keyboard (egui asks for it while a text box has focus).

@@ -770,6 +770,9 @@ pub struct VoxaApp {
     /// Phones: what the last frame had, to follow along (connected: channels; a direct
     /// message opened: the chat).
     pub mobile_seen: (bool, Option<ChatKey>),
+    /// Android: long press as right-click, the clipboard and the text editing bar.
+    #[cfg(target_os = "android")]
+    pub touch: crate::mobile::Touch,
     /// The right panel shows the People list instead of the info.
     pub people_view: bool,
     pub people_search: String,
@@ -871,6 +874,8 @@ impl VoxaApp {
             show_members: true,
             mobile_page: crate::ui::MobilePage::Home,
             mobile_seen: (false, None),
+            #[cfg(target_os = "android")]
+            touch: Default::default(),
             people_view: false,
             people_search: String::new(),
             tray: None,
@@ -956,6 +961,18 @@ impl VoxaApp {
             // Turns the camera on (waits until connected and the video connection is ready).
             "camera-on" => match &self.sess {
                 Some(s) if s.welcomed && s.bulk_ready => self.actions.push(crate::ui::Action::ToggleCamera),
+                _ => self.debug_done = false,
+            },
+            // Server Groups with a permission search typed in (VOXA_PERM_SEARCH).
+            "groups" => match &self.sess {
+                Some(s) if s.welcomed && !s.groups.is_empty() => {
+                    let q = std::env::var("VOXA_PERM_SEARCH").unwrap_or_default();
+                    self.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("perm_search_groups"), q));
+                    crate::ui::apply(self, crate::ui::Action::Dialog(crate::dialogs::Open::Groups(GroupKind::Server)));
+                    if let Some(g) = &mut self.dlg.groups {
+                        g.selected = Some(2);
+                    }
+                }
                 _ => self.debug_done = false,
             },
             // A channel of my own with a few events in its calendar, shown (for screenshots).
@@ -2824,17 +2841,26 @@ impl eframe::App for VoxaApp {
         }
     }
 
+    #[cfg(target_os = "android")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.touch.hook(ctx, raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Android: the microphone permission, and the on-screen keyboard while typing.
         #[cfg(target_os = "android")]
         crate::mobile::ask_startup_permissions();
         crate::ui::draw(self, ui);
-        #[cfg(target_os = "android")]
-        crate::mobile::keyboard(ui.ctx().text_edit_focused());
         self.player.sync(ui.ctx(), frame);
         let actions: Vec<crate::ui::Action> = std::mem::take(&mut self.actions);
         for a in actions {
             crate::ui::apply(self, a);
+        }
+        // After the actions, so their copies ("Copy text") reach Android's clipboard too.
+        #[cfg(target_os = "android")]
+        {
+            self.touch.after_frame(ui.ctx());
+            crate::mobile::keyboard(ui.ctx().text_edit_focused());
         }
         // Keep talk indicators and meters fresh.
         if self.sess.is_some() {

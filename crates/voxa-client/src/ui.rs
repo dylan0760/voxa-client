@@ -493,6 +493,24 @@ pub fn apply_style(ctx: &egui::Context, s: &Settings) {
     ctx.global_style_mut(|st| {
         st.spacing.item_spacing = egui::vec2(8.0, 5.0);
         st.spacing.button_padding = egui::vec2(10.0, 5.0);
+        // Phones: finger-sized controls, like Discord's (buttons, checkboxes, list rows,
+        // sliders, the close buttons of pages), and smooth scrolling by dragging.
+        if cfg!(target_os = "android") {
+            st.spacing.item_spacing = egui::vec2(10.0, 8.0);
+            st.spacing.button_padding = egui::vec2(14.0, 9.0);
+            st.spacing.interact_size = egui::vec2(44.0, 36.0);
+            st.spacing.icon_width = 22.0;
+            st.spacing.icon_width_inner = 12.0;
+            st.spacing.icon_spacing = 8.0;
+            st.spacing.slider_width = 180.0;
+            st.spacing.combo_height = 400.0;
+            st.spacing.menu_margin = egui::Margin::same(10);
+            st.spacing.scroll = egui::style::ScrollStyle::solid();
+            st.interaction.tooltip_delay = 10.0;
+            // Text isn't picked up by a finger (it would take the long press from the message
+            // or row under it; the menus have "Copy text").
+            st.interaction.selectable_labels = false;
+        }
     });
     ctx.set_zoom_factor(s.ui_scale);
 }
@@ -784,7 +802,16 @@ fn mobile_layout(app: &mut VoxaApp, ui: &mut Ui, show_server: bool) {
     }
     // Android's back button: one page back; from Home, Voxa goes to the background (and
     // stays connected).
-    if ctx.input(|i| i.key_pressed(egui::Key::BrowserBack)) {
+    let back = ctx.input(|i| i.key_pressed(egui::Key::BrowserBack));
+    // An open menu, then page (dialog, file browser, calendar event) closes first.
+    let closed = back
+        && (egui::Popup::is_any_open(&ctx) && {
+            egui::Popup::close_all(&ctx);
+            true
+        } || crate::files::close_browser()
+            || app.dlg.close_one()
+            || app.sess.as_mut().is_some_and(|s| s.cal_ui.form.take().is_some() || s.cal_ui.open_event.take().is_some()));
+    if back && !closed {
         match app.mobile_page {
             MobilePage::Chat | MobilePage::People => app.mobile_page = MobilePage::Channels,
             MobilePage::Channels => {
@@ -1396,6 +1423,9 @@ fn channel_rows(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, pa
         if r.clicked() {
             if (has_children || !clients.is_empty()) && r.interact_pointer_pos().map(|p| p.x < r.rect.left() + indent + 22.0).unwrap_or(false) {
                 a.push(Action::Toggle(c.id));
+            } else if cfg!(target_os = "android") && c.id != s.my_channel() {
+                // Phones: a tap joins, like Discord (long press for the channel's menu).
+                a.push(Action::Join(c.id));
             } else {
                 a.push(Action::Select(Selection::Channel(c.id)));
             }
@@ -3262,11 +3292,11 @@ fn pinned_bar(ui: &mut Ui, pins: &[PinnedMessage], open: &mut bool, can_pin: boo
 /// Chat message body: colour emoji font, and "jumbo" emoji for emoji-only messages.
 pub fn message_text(ui: &mut Ui, text: &str, salt: (u64, u64)) {
     if crate::emoji::is_only_emoji(text) {
-        ui.add(egui::Label::new(RichText::new(text).font(chat_font(34.0))).selectable(true).wrap());
+        ui.add(egui::Label::new(RichText::new(text).font(chat_font(34.0))).selectable(crate::markdown::SELECTABLE).wrap());
     } else if crate::markdown::has_markup(text) {
         crate::markdown::render(ui, text, body_size(ui), salt);
     } else {
-        ui.add(egui::Label::new(RichText::new(text).font(chat_font(body_size(ui)))).selectable(true).wrap());
+        ui.add(egui::Label::new(RichText::new(text).font(chat_font(body_size(ui)))).selectable(crate::markdown::SELECTABLE).wrap());
     }
 }
 

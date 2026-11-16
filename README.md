@@ -322,6 +322,9 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
     nothing to other servers and cannot be turned back into the addresses.
 * **Personal permissions:** right-click a user ▸ **Permissions…** to grant individual
   permissions on top of their groups (needs *Manage groups*).
+* **Permission search** (1.30.0): type in the 🔍 box above a permission list (groups and
+  personal permissions) to show only the matching permissions, e.g. `calendar` or
+  `chat delete`; the words can be in any order. The Groups dialog opens on the first group.
 * **Traffic statistics** in the server info panel (admins only).
 * **Web admin page** (Voxa Server 1.14.0+): manage the server from a browser with the
   same layout and themes (see the server's README).
@@ -373,7 +376,17 @@ x86_64 for Chromebooks).
   layout.
 * **Everything else works like on Windows:** voice, chat, direct and group messages,
   pictures, files, video calls, the calendar, watching screen shares, themes, bookmarks
-  and identities. Dialogs fill the screen.
+  and identities. Dialogs open as full-screen pages with finger-sized buttons, ticks and
+  lists; Android's back button closes them (and open menus) first.
+* **Touch, like Discord** (1.30.0):
+  * **tap a channel** to join it (the arrow still opens or closes it);
+  * **press and hold** a message, person or channel for its menu (edit, copy text, pin,
+    delete, poke, move…), where Windows uses a right-click;
+  * **copy and paste:** while you type, a bar above the keyboard offers **Paste**,
+    **Copy**, **Cut** and **Select all**, using Android's clipboard (so text moves between
+    Voxa and other apps). **Copy text** in a message's menu copies it too. Voxa only reads
+    the clipboard when you tap Paste;
+  * closing the keyboard ends typing, so the bar never covers the page.
 * **Push-to-talk** is a big **Hold to talk** button (voice activation is the default).
 * **Pictures, uploads and your avatar** are chosen in Voxa's own file browser. The first
   time, Voxa asks for **All files access** (Android 11+) or the storage permission.

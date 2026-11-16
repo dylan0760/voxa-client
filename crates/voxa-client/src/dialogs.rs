@@ -279,6 +279,27 @@ pub struct Dialogs {
 }
 
 impl Dialogs {
+    /// Closes one open dialog, the small prompts first (Android's back button). False if
+    /// none was open.
+    pub fn close_one(&mut self) -> bool {
+        macro_rules! close {
+            ($($f:ident),*) => {$(
+                if self.$f.is_some() {
+                    self.$f = None;
+                    return true;
+                }
+            )*};
+        }
+        close!(error, link_prompt, web_login, fingerprint, delete_msg, clear_chat, channel_password, away, talk_request, nickname, description);
+        close!(ban_client, kick, poke, privkey_use, privkey_create, delete_channel, clone_channel, client_perms, avatar, share, offline, files);
+        if self.transfers || self.conn_info || self.about || self.update {
+            (self.transfers, self.conn_info, self.about, self.update) = (false, false, false, false);
+            return true;
+        }
+        close!(bans, groups, server, channel, identities, bookmarks, options, connect);
+        false
+    }
+
     pub fn close_session_dialogs(&mut self) {
         self.delete_msg = None;
         self.clear_chat = None;
@@ -456,6 +477,36 @@ impl Dialogs {
             }
         }
     }
+}
+
+/// A fixed width, made smaller where the space is narrower (phones).
+fn fit(ui: &Ui, w: f32) -> f32 {
+    w.min(ui.available_width() - 8.0).max(120.0)
+}
+
+/// The search box above a permission list (the text is kept while the dialog is open).
+/// Returns what to search for.
+fn perm_search(ui: &mut Ui, key: &str) -> String {
+    let id = egui::Id::unique(key);
+    let mut q: String = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut q).hint_text("🔍 Search permissions").desired_width(220.0));
+        if !q.is_empty() && ui.small_button("✖").on_hover_text("Show all permissions").clicked() {
+            q.clear();
+        }
+        let shown = perm::NAMES.iter().filter(|(_, n)| perm_matches(&q, n)).count();
+        if !q.is_empty() {
+            ui.label(RichText::new(format!("{shown} of {}", perm::NAMES.len())).small().weak());
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, q.clone()));
+    q
+}
+
+/// Every word of the search appears in the permission's name (in any order, any case).
+fn perm_matches(q: &str, name: &str) -> bool {
+    let name = name.to_lowercase();
+    q.to_lowercase().split_whitespace().all(|w| name.contains(w))
 }
 
 fn options_dlg(s: &Settings) -> OptionsDlg {
@@ -770,7 +821,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             CaptureSource::SystemSound => "🔊 System sound (everything except Voxa)".to_string(),
                             CaptureSource::Application(a) => format!("🎵 {a}"),
                         };
-                        egui::ComboBox::from_id_salt("capsrc").width(300.0).selected_text(label(&d.audio.source)).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt("capsrc").width(fit(ui, 300.0)).selected_text(label(&d.audio.source)).show_ui(ui, |ui| {
                             ui.selectable_value(&mut d.audio.source, CaptureSource::Microphone, label(&CaptureSource::Microphone));
                             ui.selectable_value(&mut d.audio.source, CaptureSource::SystemSound, label(&CaptureSource::SystemSound));
                             ui.separator();
@@ -796,7 +847,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     if d.audio.source == CaptureSource::Microphone {
                         form_row(ui, "Capture device:", |ui| {
                             egui::ComboBox::from_id_salt("indev")
-                                .width(300.0)
+                                .width(fit(ui, 300.0))
                                 .selected_text(crate::audio::device_label(&d.audio.input_device))
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(&mut d.audio.input_device, None, crate::audio::device_label(&None))
@@ -862,7 +913,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 egui::Grid::new("play").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                     form_row(ui, "Playback device:", |ui| {
                         egui::ComboBox::from_id_salt("outdev")
-                            .width(300.0)
+                            .width(fit(ui, 300.0))
                             .selected_text(crate::audio::device_label(&d.audio.output_device))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut d.audio.output_device, None, crate::audio::device_label(&None))
@@ -926,7 +977,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             (Some(n), _) => n.clone(),
                             (None, _) => "(not connected)".to_string(),
                         };
-                        egui::ComboBox::from_id_salt("camdev").selected_text(label).width(260.0).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt("camdev").selected_text(label).width(fit(ui, 260.0)).show_ui(ui, |ui| {
                             ui.selectable_value(&mut d.camera.device, String::new(), "Default");
                             for c in &d.cameras {
                                 ui.selectable_value(&mut d.camera.device, c.id.clone(), &c.name);
@@ -1323,7 +1374,7 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 d.edit.name = sp.name();
                 form_row(ui, "Parent:", |ui| {
                     let label = d.edit.parent.and_then(|p| s.channels.get(&p)).map(|c| s.channel_path(c.id)).unwrap_or("(server root)".into());
-                    egui::ComboBox::from_id_salt("chparent").width(320.0).selected_text(label).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt("chparent").width(fit(ui, 320.0)).selected_text(label).show_ui(ui, |ui| {
                         ui.selectable_value(&mut d.edit.parent, None, "(server root)");
                         for c in s.channels.values().filter(|c| Some(c.id) != d.id && !voxa_proto::is_spacer(&c.name)) {
                             ui.selectable_value(&mut d.edit.parent, Some(c.id), s.channel_path(c.id));
@@ -1362,7 +1413,7 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             });
             form_row(ui, "Parent:", |ui| {
                 let label = d.edit.parent.and_then(|p| s.channels.get(&p)).map(|c| s.channel_path(c.id)).unwrap_or("(server root)".into());
-                egui::ComboBox::from_id_salt("chparent").width(320.0).selected_text(label).show_ui(ui, |ui| {
+                egui::ComboBox::from_id_salt("chparent").width(fit(ui, 320.0)).selected_text(label).show_ui(ui, |ui| {
                     ui.selectable_value(&mut d.edit.parent, None, "(server root)");
                     for c in s.channels.values() {
                         if Some(c.id) != d.id {
@@ -1588,6 +1639,16 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 ui.set_width(200.0);
                 let mut groups: Vec<&GroupInfo> = s.groups.values().filter(|g| g.kind == d.kind).collect();
                 groups.sort_by_key(|g| (g.sort, g.id));
+                // The first group is shown right away (not an empty "Select a group").
+                if d.edit.is_none() {
+                    let first = d.selected.and_then(|id| s.groups.get(&id)).or(groups.first().copied());
+                    if let Some(g) = first {
+                        d.selected = Some(g.id);
+                        d.edit = Some(g.clone());
+                        d.members.clear();
+                        s.conn.send(C2S::GroupMembers(g.id));
+                    }
+                }
                 for g in groups {
                     if ui.selectable_label(d.selected == Some(g.id), &g.name).clicked() {
                         d.selected = Some(g.id);
@@ -1629,8 +1690,9 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                 });
                 ui.label(RichText::new("Permissions").strong());
+                let q = perm_search(ui, "perm_search_groups");
                 crate::updater::fill_list(ui, "perms", 250.0, 140.0, |ui| {
-                    for (bit, name) in perm::NAMES {
+                    for (bit, name) in perm::NAMES.iter().filter(|(_, n)| perm_matches(&q, n)) {
                         let mut on = g.perms & bit != 0;
                         if ui.checkbox(&mut on, *name).changed() {
                             if on {
@@ -2374,8 +2436,9 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                     return;
                 }
+                let q = perm_search(ui, "perm_search_client");
                 crate::updater::fill_list(ui, "list6", 50.0, 120.0, |ui| {
-                    for (bit, name) in perm::NAMES {
+                    for (bit, name) in perm::NAMES.iter().filter(|(_, n)| perm_matches(&q, n)) {
                         let via_group = (from_groups | channel_group) & bit != 0;
                         let mut on = d.edit & bit != 0;
                         ui.horizontal(|ui| {

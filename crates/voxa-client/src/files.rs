@@ -102,6 +102,18 @@ fn free_name(dir: &std::path::Path, name: &str) -> PathBuf {
     p
 }
 
+/// Closes Voxa's file browser if it is open (Android's back button).
+pub fn close_browser() -> bool {
+    #[cfg(not(windows))]
+    {
+        browser::close()
+    }
+    #[cfg(windows)]
+    {
+        false
+    }
+}
+
 /// Draws Voxa's file browser while it is open (Android).
 pub fn browser_ui(ctx: &egui::Context) {
     #[cfg(not(windows))]
@@ -145,6 +157,10 @@ mod browser {
             dir,
             selected: BTreeSet::new(),
         });
+    }
+
+    pub fn close() -> bool {
+        OPEN.lock().take().is_some()
     }
 
     pub fn take(want: impl Fn(&PickKind) -> bool) -> Option<(PickKind, Vec<PathBuf>)> {
