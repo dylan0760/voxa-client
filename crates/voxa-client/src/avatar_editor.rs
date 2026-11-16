@@ -331,8 +331,14 @@ pub fn show(app: &mut VoxaApp, ctx: &egui::Context) {
         d.pick_icon(ctx, icon, &uid);
     }
     if pick {
-        if let Some(path) = rfd::FileDialog::new().set_title("Choose a picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"]).pick_file() {
+        if let Some(path) = crate::files::pick(crate::files::PickKind::Avatar, "Choose a picture", &["png", "jpg", "jpeg", "gif", "webp", "bmp"], false, false).and_then(|f| f.into_iter().next()) {
             d.load(ctx, &path);
+        }
+    }
+    // Android: the picture chosen in Voxa's file browser.
+    if let Some((_, files)) = crate::files::take(|k| *k == crate::files::PickKind::Avatar) {
+        if let Some(path) = files.first() {
+            d.load(ctx, path);
         }
     }
     if save {

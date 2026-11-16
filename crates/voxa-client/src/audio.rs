@@ -86,6 +86,8 @@ pub struct VoiceShared {
     pub testing: AtomicBool,
     /// A push-to-talk hotkey (extra key or controller button) is held.
     pub ptt_hotkey: AtomicBool,
+    /// The on-screen push-to-talk button is held (phones).
+    pub ptt_button: AtomicBool,
     /// Not in a channel: nothing is transmitted.
     pub no_channel: AtomicBool,
     /// Nobody else in the channel can hear you (alone, or only web pages / people with
@@ -124,6 +126,7 @@ impl VoiceShared {
             lossless: AtomicBool::new(false),
             testing: AtomicBool::new(false),
             ptt_hotkey: AtomicBool::new(false),
+            ptt_button: AtomicBool::new(false),
             no_channel: AtomicBool::new(false),
             no_listeners: AtomicBool::new(false),
             busy: AtomicBool::new(false),
@@ -210,6 +213,7 @@ pub const WINDOWS_DEFAULT: &str = "\u{1}windows-default";
 /// How a device setting is shown.
 pub fn device_label(name: &Option<String>) -> String {
     match name.as_deref() {
+        None if cfg!(target_os = "android") => "Default (phone or headset)".into(),
         None => "Default communication device (Windows)".into(),
         Some(WINDOWS_DEFAULT) => "Default device (Windows)".into(),
         Some(n) => n.into(),
@@ -911,7 +915,7 @@ fn encoder_loop(
                     Instant::now() < vad_hold_until
                 }
                 VoiceMode::PushToTalk => {
-                    if key_down(settings.ptt_key) || shared.ptt_hotkey.load(Ordering::Relaxed) {
+                    if key_down(settings.ptt_key) || shared.ptt_hotkey.load(Ordering::Relaxed) || shared.ptt_button.load(Ordering::Relaxed) {
                         ptt_release_at = None;
                         true
                     } else if transmitting {
@@ -927,7 +931,7 @@ fn encoder_loop(
             // TeamSpeak) after ~0.3 s of speech, at most every 8 s while it continues.
             if settings.muted_warning && settings.source == CaptureSource::Microphone && shared.input_muted.load(Ordering::Relaxed) {
                 let speaking = match settings.mode {
-                    VoiceMode::PushToTalk => key_down(settings.ptt_key) || shared.ptt_hotkey.load(Ordering::Relaxed),
+                    VoiceMode::PushToTalk => key_down(settings.ptt_key) || shared.ptt_hotkey.load(Ordering::Relaxed) || shared.ptt_button.load(Ordering::Relaxed),
                     _ => db >= settings.vad_threshold_db,
                 };
                 if muted_talk.frame(speaking, Instant::now()) {

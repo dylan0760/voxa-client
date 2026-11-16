@@ -105,7 +105,11 @@ mod imp {
     pub fn macs() -> Vec<String> {
         Vec::new()
     }
+    /// Android: the device id (Settings.Secure.ANDROID_ID).
     pub fn machine_guid() -> Option<String> {
+        #[cfg(target_os = "android")]
+        return crate::mobile::device_id().map(|id| format!("android-{id}"));
+        #[cfg(not(target_os = "android"))]
         None
     }
 }

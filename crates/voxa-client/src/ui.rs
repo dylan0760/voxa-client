@@ -40,6 +40,16 @@ pub enum Action {
     ToggleCommander,
     RequestTalkPower,
     ShareScreen,
+    /// Turns your camera on or off (video in your channel).
+    ToggleCamera,
+    /// Shows one video tile large, or all of them again (None).
+    FocusCamera(Option<ClientId>),
+    /// Starts a call with a group chat or direct message conversation.
+    StartCall(DmId),
+    /// Joins a call someone started (its channel and password).
+    JoinCall(ChannelId, String),
+    /// Shows the channel calendar instead of the chat.
+    OpenCalendar,
     Connect(ConnectRequest),
     ConnectBookmark(usize),
     /// Moves a saved server in the list (dragged in the server rail): (from, to).
@@ -373,11 +383,10 @@ fn solid_palette(kind: ThemeKind) -> Theme {
 /// Adds Windows symbol / emoji fonts as fallbacks so icons render.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
     // Chat text uses its own family that prefers the colour Segoe UI Emoji font right
     // after the regular text font, so emotes render in full colour while UI icons keep
     // the monochrome look.
-    if let Ok(bytes) = std::fs::read(std::path::Path::new(&windir).join("Fonts").join("seguiemj.ttf")) {
+    if let Some(bytes) = system_font("seguiemj.ttf") {
         fonts.font_data.insert("chat_emoji".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
         let mut chat = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
         chat.insert(1.min(chat.len()), "chat_emoji".to_owned());
@@ -388,13 +397,13 @@ pub fn install_fonts(ctx: &egui::Context) {
     }
     // **Bold** in chat: Segoe UI Bold first, then the normal chat fonts as fallback.
     let mut bold = fonts.families.get(&chat_family()).cloned().unwrap_or_default();
-    if let Ok(bytes) = std::fs::read(std::path::Path::new(&windir).join("Fonts").join("segoeuib.ttf")) {
+    if let Some(bytes) = system_font("segoeuib.ttf") {
         fonts.font_data.insert("chat_bold".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
         bold.insert(0, "chat_bold".to_owned());
     }
     fonts.families.insert(chat_bold_family(), bold);
-    for (name, file) in [("segoe_symbol", "seguisym.ttf"), ("segoe_emoji", "seguiemj.ttf")] {
-        if let Ok(bytes) = std::fs::read(std::path::Path::new(&windir).join("Fonts").join(file)) {
+    for (name, file) in [("segoe_symbol", "seguisym.ttf"), ("segoe_symbol2", "seguisym2"), ("segoe_emoji", "seguiemj.ttf")] {
+        if let Some(bytes) = system_font(file) {
             fonts.font_data.insert(name.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
             for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
                 if let Some(list) = fonts.families.get_mut(&fam) {
@@ -403,7 +412,38 @@ pub fn install_fonts(ctx: &egui::Context) {
             }
         }
     }
+    // Android's fonts lack some symbols Voxa uses (▸ and others): DejaVu Sans (free
+    // license, in crates/voxa-android/fonts) as the last fallback.
+    #[cfg(target_os = "android")]
+    {
+        static DEJAVU: &[u8] = include_bytes!("../../voxa-android/fonts/DejaVuSans.ttf");
+        fonts.font_data.insert("dejavu".to_owned(), std::sync::Arc::new(egui::FontData::from_static(DEJAVU)));
+        for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace, chat_family(), chat_bold_family()] {
+            if let Some(list) = fonts.families.get_mut(&fam) {
+                list.push("dejavu".to_owned());
+            }
+        }
+    }
     ctx.set_fonts(fonts);
+}
+
+/// A font of the system: the Windows font `file`, or its Android counterpart.
+fn system_font(file: &str) -> Option<Vec<u8>> {
+    #[cfg(target_os = "android")]
+    {
+        let android = match file {
+            "seguiemj.ttf" => "NotoColorEmoji.ttf",
+            "seguisym.ttf" => "NotoSansSymbols-Regular-Subsetted.ttf",
+            "seguisym2" => "NotoSansSymbols-Regular-Subsetted2.ttf",
+            _ => return None,
+        };
+        std::fs::read(std::path::Path::new("/system/fonts").join(android)).ok()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        std::fs::read(std::path::Path::new(&windir).join("Fonts").join(file)).ok()
+    }
 }
 
 pub fn chat_family() -> egui::FontFamily {
@@ -588,6 +628,25 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
         app.window_title = title;
     }
+    keepalive(app, &ctx);
+    // Android: Voxa's own file browser, and what was chosen in it.
+    crate::files::browser_ui(&ctx);
+    if let Some((kind, files)) = crate::files::take(|k| matches!(k, crate::files::PickKind::Images(_) | crate::files::PickKind::Attach)) {
+        match kind {
+            crate::files::PickKind::Images(target) => {
+                for f in files {
+                    app.actions.push(Action::SendImage(target, crate::chat_images::ImageSource::File(f)));
+                }
+            }
+            _ => {
+                if let Some(ch) = app.sess.as_ref().map(|s| s.my_channel()) {
+                    for f in files {
+                        app.start_upload(ch, "", f);
+                    }
+                }
+            }
+        }
+    }
     // Direct messages in their own window (also while a stream is full screen).
     dm_window(app, &ctx);
     // True full screen for a stream: only the picture on the whole monitor. Esc, the
@@ -608,6 +667,13 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
     // Two-tone themes: the blend behind the see-through panels.
     if let Some(g) = t.gradient {
         paint_gradient(ui.painter(), ctx.content_rect(), g);
+    }
+
+    if is_mobile(&ctx) {
+        mobile_layout(app, ui, show_server);
+        drag_ghost(app, &ctx);
+        dialogs::draw_all(app, &ctx);
+        return;
     }
 
     egui::Panel::left("rail")
@@ -658,6 +724,180 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
     });
     drag_ghost(app, &ctx);
     dialogs::draw_all(app, &ctx);
+}
+
+/// Screen sharing (Windows; phones only watch).
+const CAN_SHARE: bool = cfg!(windows);
+
+/// The Server tab's icon (Android has no font with 🖧).
+pub const SERVER_ICON: &str = if cfg!(target_os = "android") { "🖥" } else { "🖧" };
+
+// ---------------------------------------------------------------- phones
+
+/// The page a phone shows (one at a time, picked in the bar at the bottom).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MobilePage {
+    Home,
+    Channels,
+    Chat,
+    People,
+}
+
+/// A phone-sized screen (Android): one page at a time instead of side-by-side columns.
+pub fn is_mobile(ctx: &egui::Context) -> bool {
+    cfg!(target_os = "android") && ctx.content_rect().width() < 720.0
+}
+
+/// The part of the screen Voxa can use: not under the status bar, the navigation bar or
+/// the on-screen keyboard.
+pub fn safe_rect(ctx: &egui::Context) -> egui::Rect {
+    let full = ctx.content_rect();
+    #[cfg(target_os = "android")]
+    if let Some(([l, t, r, b], [w, h])) = crate::mobile::content_rect() {
+        if w > 0 && h > 0 && r > l && b > t {
+            let (sx, sy) = (full.width() / w as f32, full.height() / h as f32);
+            let rect = egui::Rect::from_min_max(egui::pos2(l as f32 * sx, t as f32 * sy), egui::pos2(r as f32 * sx, b as f32 * sy));
+            return rect.intersect(full);
+        }
+    }
+    full
+}
+
+/// The phone layout: Home, Channels, Chat and People as pages, chosen at the bottom.
+fn mobile_layout(app: &mut VoxaApp, ui: &mut Ui, show_server: bool) {
+    let t = theme();
+    let ctx = ui.ctx().clone();
+    let full = ctx.content_rect();
+    let safe = safe_rect(&ctx);
+    // Follow along: connecting shows the channels, opening a direct message its chat.
+    let connected = app.sess.as_ref().is_some_and(|s| s.welcomed);
+    let tab = app.sess.as_ref().map(|s| s.tab);
+    if connected && !app.mobile_seen.0 {
+        app.mobile_page = MobilePage::Channels;
+    }
+    if matches!(tab, Some(ChatKey::Dm(_))) && tab != app.mobile_seen.1 {
+        app.mobile_page = MobilePage::Chat;
+    }
+    app.mobile_seen = (connected, tab);
+    if !show_server {
+        app.mobile_page = MobilePage::Home;
+    }
+    // Android's back button: one page back; from Home, Voxa goes to the background (and
+    // stays connected).
+    if ctx.input(|i| i.key_pressed(egui::Key::BrowserBack)) {
+        match app.mobile_page {
+            MobilePage::Chat | MobilePage::People => app.mobile_page = MobilePage::Channels,
+            MobilePage::Channels => {
+                app.mobile_page = MobilePage::Home;
+                app.actions.push(Action::Home(true));
+            }
+            MobilePage::Home => {
+                #[cfg(target_os = "android")]
+                crate::mobile::to_background();
+            }
+        }
+    }
+
+    egui::Panel::top("m_inset_top").exact_size((safe.top() - full.top()).max(0.0)).frame(Frame::new().fill(t.rail)).show(ui, |_| {});
+    egui::Panel::bottom("m_inset_bottom").exact_size((full.bottom() - safe.bottom()).max(0.0)).frame(Frame::new().fill(t.rail)).show(ui, |_| {});
+    let keyboard_up = full.bottom() - safe.bottom() > 150.0;
+    // The page bar (hidden while typing, to leave room for the chat).
+    if !keyboard_up {
+        let unread: usize = app.sess.as_ref().map(|s| s.dms.iter().map(|d| d.log.unread).sum::<usize>() + s.server_log.unread).unwrap_or(0);
+        egui::Panel::bottom("m_nav").frame(Frame::new().fill(t.rail).inner_margin(Margin::symmetric(4, 6))).show(ui, |ui| {
+            ui.columns(4, |cols| {
+                let pages = [
+                    (MobilePage::Home, "🏠", "Home".to_string()),
+                    (MobilePage::Channels, "#", "Channels".to_string()),
+                    (MobilePage::Chat, "💬", if unread > 0 { format!("Chat ({unread})") } else { "Chat".to_string() }),
+                    (MobilePage::People, "👥", "People".to_string()),
+                ];
+                for (col, (page, icon, label)) in cols.iter_mut().zip(pages) {
+                    let enabled = page == MobilePage::Home || app.sess.is_some();
+                    let on = app.mobile_page == page;
+                    let text = RichText::new(format!("{icon}\n{label}")).size(13.0).color(if on { accent() } else { t.dim });
+                    let b = egui::Button::new(text).frame(false).min_size(egui::vec2(64.0, 48.0));
+                    let clicked = col.vertical_centered(|ui| ui.add_enabled(enabled, b).clicked()).inner;
+                    if clicked {
+                        app.mobile_page = page;
+                        app.actions.push(Action::Home(page == MobilePage::Home));
+                    }
+                }
+            });
+        });
+    }
+    let page = app.mobile_page;
+    // Push-to-talk on a phone: a big button to hold (there is no key for it).
+    let in_channel = app.sess.as_ref().is_some_and(|s| s.welcomed && s.my_channel() != NO_CHANNEL);
+    let mut ptt_held = false;
+    if in_channel && !keyboard_up && app.settings.audio.mode == crate::config::VoiceMode::PushToTalk && matches!(page, MobilePage::Channels | MobilePage::People) {
+        egui::Panel::bottom("m_ptt").frame(Frame::new().fill(t.rail).inner_margin(Margin::symmetric(12, 8))).show(ui, |ui| {
+            let held_before = app.voice_shared.ptt_button.load(Ordering::Relaxed);
+            let (fill, label) = if held_before { (GREEN, "🎤  Talking...") } else { (accent(), "🎤  Hold to talk") };
+            let b = egui::Button::new(RichText::new(label).size(18.0).color(Color32::WHITE)).fill(fill).min_size(egui::vec2(ui.available_width(), 56.0)).sense(Sense::click_and_drag());
+            ptt_held = ui.add(b).is_pointer_button_down_on();
+        });
+    }
+    if app.voice_shared.ptt_button.swap(ptt_held, Ordering::Relaxed) != ptt_held {
+        ctx.request_repaint();
+    }
+    egui::CentralPanel::default().frame(Frame::new().fill(if page == MobilePage::Chat { t.main } else { t.side })).show(ui, |ui| match page {
+        MobilePage::Home => {
+            Frame::new().fill(t.rail).inner_margin(Margin::symmetric(8, 8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                mobile_home_bar(app, ui);
+            });
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| home_column(app, ui));
+        }
+        MobilePage::Channels => server_column(app, ui),
+        MobilePage::Chat => {
+            if app.player.full && app.player.video.is_some() {
+                Frame::new().inner_margin(Margin::same(6)).show(ui, |ui| player_view(app, ui));
+            } else if let Some(id) = app.fullscreen_stream {
+                Frame::new().inner_margin(Margin::same(6)).show(ui, |ui| stream_view(app, ui, id, true));
+            } else {
+                main_view(app, ui);
+            }
+        }
+        MobilePage::People => {
+            Frame::new().inner_margin(Margin::same(12)).show(ui, |ui| info_panel(app, ui));
+        }
+    });
+}
+
+/// The phone's Home page: what the server rail holds on Windows.
+fn mobile_home_bar(app: &mut VoxaApp, ui: &mut Ui) {
+    let a = &mut app.actions;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().button_padding = egui::vec2(10.0, 8.0);
+        if let Some(s) = &app.sess {
+            let name = s.server.as_ref().map(|i| i.name.clone()).unwrap_or(s.req.label.clone());
+            if ui.add(egui::Button::new(RichText::new(format!("{SERVER_ICON} {name}")).color(Color32::WHITE)).fill(accent())).clicked() {
+                a.push(Action::Home(false));
+                app.mobile_page = MobilePage::Channels;
+            }
+        }
+        if ui.button("➕ Connect").clicked() {
+            a.push(Action::Dialog(dialogs::Open::Connect));
+        }
+        if ui.button("📑 Bookmarks").clicked() {
+            a.push(Action::Dialog(dialogs::Open::Bookmarks));
+        }
+        if ui.button("👤 Identities").clicked() {
+            a.push(Action::Dialog(dialogs::Open::Identities));
+        }
+        if ui.button("⚙ Settings").clicked() {
+            a.push(Action::Dialog(dialogs::Open::Options));
+        }
+        if ui.button("? About").clicked() {
+            a.push(Action::Dialog(dialogs::Open::About));
+        }
+        if let Some(rel) = app.updater.available() {
+            if ui.add(egui::Button::new(RichText::new(format!("⬆ Voxa {}", rel.version)).color(Color32::WHITE)).fill(GREEN)).clicked() {
+                a.push(Action::Dialog(dialogs::Open::Updates));
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------- server rail
@@ -952,7 +1192,13 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
                     a.push(Action::Watch(s.me, true));
                 }
                 // Screens are shared with a channel, so not outside one.
-                if (in_channel || sharing) && icon_button(ui, "🖥", if sharing { "Stop sharing your screen" } else { "Share your screen or an application" }, sharing.then_some(RED)).clicked() {
+                // Video: your camera for everyone in the channel (servers 1.21.0+).
+                let cam_on = s.camera.is_some();
+                if (in_channel || cam_on) && s.supports("1.21.0") && icon_button(ui, "📷", if cam_on { "Turn your camera off" } else { "Turn your camera on (video for everyone in the channel)" }, cam_on.then_some(GREEN)).clicked() {
+                    a.push(Action::ToggleCamera);
+                }
+                // (Phones can watch streams, but not share their screen.)
+                if CAN_SHARE && (in_channel || sharing) && icon_button(ui, "🖥", if sharing { "Stop sharing your screen" } else { "Share your screen or an application" }, sharing.then_some(RED)).clicked() {
                     a.push(Action::ShareScreen);
                 }
                 let vping = shared.ping_ms.load(Ordering::Relaxed);
@@ -1974,7 +2220,7 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
     // Header: current conversation, topic and actions.
     let (title, topic) = match s.tab {
         ChatKey::Server => (
-            format!("🖧  {}", s.server.as_ref().map(|i| i.name.clone()).unwrap_or_default()),
+            format!("{SERVER_ICON}  {}", s.server.as_ref().map(|i| i.name.clone()).unwrap_or_default()),
             if s.sees_server_events() { "Server events".to_string() } else { "Welcome".to_string() },
         ),
         ChatKey::Channel => {
@@ -2009,7 +2255,10 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 if my_channel != NO_CHANNEL && icon_button(ui, "📁", "Channel files", None).clicked() {
                     a.push(Action::Dialog(dialogs::Open::Files(my_channel)));
                 }
-                if my_channel != NO_CHANNEL && icon_button(ui, "🖥", "Share your screen", s.streamer.is_some().then_some(RED)).clicked() {
+                if my_channel != NO_CHANNEL && s.supports("1.21.0") && icon_button(ui, "📷", if s.camera.is_some() { "Turn your camera off" } else { "Turn your camera on" }, s.camera.is_some().then_some(GREEN)).clicked() {
+                    a.push(Action::ToggleCamera);
+                }
+                if CAN_SHARE && my_channel != NO_CHANNEL && icon_button(ui, "🖥", "Share your screen", s.streamer.is_some().then_some(RED)).clicked() {
                     a.push(Action::ShareScreen);
                 }
                 let chat_target = match s.tab {
@@ -2020,6 +2269,11 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 if matches!(s.tab, ChatKey::Dm(_)) && icon_button(ui, "🗑", "Delete this conversation from this PC", None).clicked() {
                     a.push(Action::Dialog(dialogs::Open::ClearChat(TextTarget::Private(0))));
                 }
+                if let ChatKey::Dm(id) = s.tab {
+                    if icon_button(ui, "📞", "Start a call with this chat (voice and video)", None).clicked() {
+                        a.push(Action::StartCall(id));
+                    }
+                }
                 if let Some(tg) = chat_target.filter(|tg| s.supports("1.4.0") && s.chat_perm(*tg, perm::CHAT_CLEAR)) {
                     if icon_button(ui, "🗑", "Clear the entire chat history of this conversation", None).clicked() {
                         a.push(Action::Dialog(dialogs::Open::ClearChat(tg)));
@@ -2029,8 +2283,9 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
         });
         // Conversation tabs.
         ui.horizontal_wrapped(|ui| {
+            let mut open_cal = false;
             let mut tab = |ui: &mut Ui, key: ChatKey, label: String, unread: usize| {
-                let sel = s.tab == key;
+                let sel = s.tab == key && !s.calendar_open;
                 let text = if unread > 0 { format!("{label}  {unread}") } else { label };
                 let mut rt = RichText::new(text).small();
                 if sel {
@@ -2046,8 +2301,15 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
             let cname = s.channels.get(&my_channel).map(|c| c.name.clone()).unwrap_or_default();
             if my_channel != NO_CHANNEL {
                 tab(ui, ChatKey::Channel, format!("# {cname}"), s.channel_logs.get(&my_channel).map(|l| l.unread).unwrap_or(0));
+                if s.sees_calendar() {
+                    let on = s.calendar_open;
+                    let b = egui::Button::new(RichText::new("📅 Calendar").small().color(if on { Color32::WHITE } else { t.dim })).fill(if on { accent() } else { t.card }).corner_radius(12);
+                    if ui.add(b).on_hover_text("This channel's calendar: what is arranged, and who is going").clicked() {
+                        open_cal = true;
+                    }
+                }
             }
-            tab(ui, ChatKey::Server, "🖧 Server".into(), s.server_log.unread);
+            tab(ui, ChatKey::Server, format!("{SERVER_ICON} Server"), s.server_log.unread);
             if app.settings.dm_window {
                 // Direct messages are in the Messages window: one button for it.
                 let unread: usize = s.dms.iter().map(|d| d.log.unread).sum();
@@ -2062,13 +2324,16 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
             } else {
                 for (id, d) in s.dms.iter().enumerate().filter(|(_, d)| d.open) {
                     let label = if d.group.is_some() {
-                        format!("ðŸ‘¥ {}", s.dm_name(id))
+                        format!("👥 {}", s.dm_name(id))
                     } else {
                         let dot = if s.dm_online(id).is_some() { "" } else { " (offline)" };
                         format!("@ {}{dot}", s.dm_name(id))
                     };
                     tab(ui, ChatKey::Dm(id), label, d.log.unread);
                 }
+            }
+            if open_cal {
+                a.push(Action::OpenCalendar);
             }
             if let ChatKey::Dm(id) = s.tab {
                 if ui.small_button("✖").on_hover_text("Close conversation").clicked() {
@@ -2078,6 +2343,9 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
         });
     });
 
+    // Video above everything else: the cameras in my channel.
+    video_grid(app, ui);
+    let Some(s) = &app.sess else { return };
     // Stage above the chat: screen shares (my own preview first) and the video player.
     // One is shown at a time with tabs to switch, or all side by side.
     use crate::app::StageItem;
@@ -2150,7 +2418,13 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                     }
                 });
             });
-    }    let Some(s) = &mut app.sess else { return };
+    }
+    let Some(s) = &mut app.sess else { return };
+    // The channel calendar instead of the chat.
+    if s.calendar_open && s.sees_calendar() {
+        crate::calendar::view(s, ui);
+        return;
+    }
     // Images dragged in from Explorer are sent to the open chat (unless the file browser
     // is open, which takes the drop as an upload).
     if app.dlg.files.is_none() && s.tab != ChatKey::Server {
@@ -2199,10 +2473,41 @@ fn show_dm(s: &mut Session, dm: DmId, popped: bool) {
     }
 }
 
+/// A window that is never shown. While the main window is minimized, eframe only runs
+/// Voxa's UI when some other window counts as visible, and it only updates that from the
+/// UI itself: with the Messages window minimized too, opening it from the taskbar then
+/// left it frozen (its ✕ did nothing). This hidden window always counts, so it never
+/// freezes.
+fn keepalive(app: &mut VoxaApp, ctx: &egui::Context) {
+    if cfg!(not(windows)) {
+        return;
+    }
+    let vid = egui::ViewportId::from_hash_of("voxa_keepalive");
+    let exists = ctx.input(|i| i.raw.viewports.get(&vid).is_some_and(|v| v.title.is_some()));
+    let main_visible = !app.hidden && !ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+    // Made under the same rules as the Messages window (see dm_window).
+    if !exists && !((main_visible || app.hide_frames > 0) && !app.dm_create_blocked) {
+        return;
+    }
+    let builder = egui::ViewportBuilder::default()
+        .with_title("voxa-keepalive")
+        .with_inner_size([1.0, 1.0])
+        .with_decorations(false)
+        .with_taskbar(false)
+        .with_visible(false);
+    let made = guarded(|| ctx.show_viewport_immediate(vid, builder, |_ui, _| {}));
+    app.dm_create_blocked |= made.is_none();
+}
+
 /// The Messages window (like Steam's friends and chat window): your conversations and
 /// everyone on the server on the left, the selected chat on the right. Closing it keeps
 /// everything; it can also be open without a chat selected (People in the tray menu).
 pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
+    // Android has one window (direct messages are chat tabs there): an extra window would
+    // be drawn inside the app.
+    if cfg!(target_os = "android") {
+        return;
+    }
     let vid = egui::ViewportId::from_hash_of("voxa_messages");
     let popped = app.settings.dm_window;
     let shown = match &mut app.sess {
@@ -2246,9 +2551,14 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
     }
     if !shown {
         // Hidden, but kept alive so it can be shown from the tray later.
+        #[cfg(windows)]
+        if crate::msgwin::quiet() {
+            crate::msgwin::hide();
+        }
         if let Some(s) = &mut app.sess {
             s.dm_win.focused = false;
             s.dm_win.minimized = false;
+            s.dm_win.egui_shown = false;
         }
         let builder = messages_builder("Voxa Messages".into(), false);
         let made = guarded(|| ctx.show_viewport_immediate(vid, builder, |_ui, _| {}));
@@ -2267,24 +2577,80 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
         s.dm_win.sel = None;
     }
     let sel = s.dm_win.sel;
+    // eframe would show the window and minimize it after, activating it in between: that
+    // takes the keyboard from a full-screen game, which then minimizes. So on Windows it is
+    // put in the taskbar directly (minimized, not activated) while eframe keeps it hidden.
+    #[cfg(windows)]
+    let mut quiet = crate::msgwin::quiet();
+    #[cfg(not(windows))]
+    let quiet = false;
+    #[cfg(windows)]
+    if quiet {
+        match crate::msgwin::restored() {
+            // Opened from the taskbar: eframe takes over.
+            Some(true) => {
+                crate::msgwin::end_quiet();
+                quiet = false;
+                s.dm_win.minimized = false;
+            }
+            Some(false) => {}
+            // Gone: put it back once it exists again.
+            None => {
+                crate::msgwin::end_quiet();
+                quiet = false;
+                s.dm_win.show_minimized = true;
+            }
+        }
+    }
     if std::mem::take(&mut s.dm_win.show_minimized) {
         // A message while it was closed: it waits in the taskbar, flashing.
-        ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Minimized(true));
-        s.dm_win.minimized = true;
+        if s.dm_win.egui_shown {
+            ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Minimized(true));
+            s.dm_win.minimized = true;
+        } else {
+            #[cfg(windows)]
+            if exists && crate::msgwin::show_minimized_quietly() {
+                quiet = true;
+                s.dm_win.minimized = true;
+            } else {
+                // Made (hidden) in this frame first.
+                s.dm_win.show_minimized = true;
+            }
+            #[cfg(not(windows))]
+            {
+                ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Minimized(true));
+                s.dm_win.minimized = true;
+            }
+        }
     }
     if std::mem::take(&mut s.dm_win.focus_now) {
+        #[cfg(windows)]
+        if quiet {
+            crate::msgwin::restore();
+            quiet = false;
+        }
         ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::Focus);
         s.dm_win.minimized = false;
     }
     if std::mem::take(&mut s.dm_win.attention) {
+        #[cfg(windows)]
+        if quiet {
+            crate::msgwin::flash_taskbar();
+        } else {
+            ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+        }
+        #[cfg(not(windows))]
         ctx.send_viewport_cmd_to(vid, egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
     }
+    // Kept hidden for eframe while it waits quietly (or is about to).
+    let egui_shown = !quiet && !s.dm_win.show_minimized;
+    s.dm_win.egui_shown = egui_shown;
     let unread: usize = s.dms.iter().map(|d| d.log.unread).sum();
     let what = sel.map(|i| s.dm_name(i)).unwrap_or_else(|| "People".into());
     let title = if unread > 0 { format!("({unread}) {what} - Voxa Messages") } else { format!("{what} - Voxa Messages") };
-    let builder = messages_builder(title, true);
+    let builder = messages_builder(title, egui_shown);
     let t = theme();
     let VoxaApp { sess, actions, settings, previews, dm_create_blocked, .. } = app;
     let Some(s) = sess.as_mut() else { return };
@@ -2294,9 +2660,14 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
             // Hidden, not destroyed: making it again may not be possible from the tray.
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
             s.dm_win.open = false;
+            // Closed from the taskbar while waiting there: eframe has it hidden already.
+            #[cfg(windows)]
+            if quiet {
+                crate::msgwin::hide();
+            }
         }
         s.dm_win.focused = ui.input(|i| i.viewport().focused.unwrap_or(false));
-        s.dm_win.minimized = ui.input(|i| i.viewport().minimized.unwrap_or(false));
+        s.dm_win.minimized = quiet || ui.input(|i| i.viewport().minimized.unwrap_or(false));
         if let Some(g) = t.gradient {
             paint_gradient(ui.painter(), ui.ctx().content_rect(), g);
         }
@@ -2607,6 +2978,9 @@ fn conversation_view(s: &mut Session, ui: &mut Ui, sel: DmId, wa: &mut Vec<Actio
                         if icon_button(ui, "🗑", "Delete this chat's history from this PC", None).clicked() {
                             wa.push(Action::Dialog(dialogs::Open::ClearChat(TextTarget::Group(g.id))));
                         }
+                        if !left && icon_button(ui, "📞", "Start a call with this group (voice and video)", None).clicked() {
+                            wa.push(Action::StartCall(sel));
+                        }
                     });
                 }
                 None => {
@@ -2616,6 +2990,9 @@ fn conversation_view(s: &mut Session, ui: &mut Ui, sel: DmId, wa: &mut Vec<Actio
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if icon_button(ui, "🗑", "Delete this conversation from this PC", None).clicked() {
                             wa.push(Action::Dialog(dialogs::Open::ClearChat(TextTarget::Private(0))));
+                        }
+                        if online && icon_button(ui, "📞", "Start a call (voice and video)", None).clicked() {
+                            wa.push(Action::StartCall(sel));
                         }
                     });
                 }
@@ -2746,7 +3123,10 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
     let rect = row.rect.expand2(egui::vec2(0.0, 2.0));
     let click = row;
     // Image messages copy / show their file name rather than the raw image tag.
-    let shown = ImageRef::parse(&m.text).map(|r| format!("📷 {}", r.name)).unwrap_or_else(|| m.text.clone());
+    let shown = ImageRef::parse(&m.text)
+        .map(|r| format!("📷 {}", r.name))
+        .or_else(|| parse_call(&m.text).map(|_| "📞 Call".to_string()))
+        .unwrap_or_else(|| m.text.clone());
     let delete = |a: &mut Vec<Action>, shift: bool| {
         if shift {
             a.push(Action::DeleteMessage(target, m.id));
@@ -2880,7 +3260,7 @@ fn pinned_bar(ui: &mut Ui, pins: &[PinnedMessage], open: &mut bool, can_pin: boo
 }
 
 /// Chat message body: colour emoji font, and "jumbo" emoji for emoji-only messages.
-fn message_text(ui: &mut Ui, text: &str, salt: (u64, u64)) {
+pub fn message_text(ui: &mut Ui, text: &str, salt: (u64, u64)) {
     if crate::emoji::is_only_emoji(text) {
         ui.add(egui::Label::new(RichText::new(text).font(chat_font(34.0))).selectable(true).wrap());
     } else if crate::markdown::has_markup(text) {
@@ -3042,6 +3422,11 @@ fn message_body(
 ) {
     ui.vertical(|ui| match ImageRef::parse(text) {
         Some(r) => crate::chat_images::chat_image(ui, imgs, conn, bulk_ready, &r, dim),
+        None if parse_call(text).is_some() => {
+            if let Some((ch, pw)) = parse_call(text) {
+                call_card(ui, ch, pw, a);
+            }
+        }
         None => {
             message_text(ui, text, salt);
             if let Some(p) = previews.filter(|_| text.contains("http")) {
@@ -3302,6 +3687,277 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
     });
 }
 
+// ---------------------------------------------------------------- calls
+
+/// A call invite posted in a group chat or direct message: `[voxa-call:<channel>:<password>]`.
+pub fn parse_call(text: &str) -> Option<(ChannelId, String)> {
+    let start = text.find("[voxa-call:")? + "[voxa-call:".len();
+    let rest = &text[start..];
+    let (ch, pw) = rest[..rest.find(']')?].split_once(':')?;
+    if pw.is_empty() || pw.len() > 64 || !pw.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some((ch.trim().parse().ok()?, pw.to_string()))
+}
+
+fn call_card(ui: &mut Ui, ch: ChannelId, pw: String, a: &mut Vec<Action>) {
+    let t = theme();
+    Frame::new().fill(t.card).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("📞").size(24.0));
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Call").strong());
+                ui.label(RichText::new("Voice and video with this chat").small().color(t.dim));
+            });
+            ui.add_space(12.0);
+            if ui.add(egui::Button::new(RichText::new("Join call").color(Color32::WHITE)).fill(GREEN)).clicked() {
+                a.push(Action::JoinCall(ch, pw));
+            }
+        });
+    });
+}
+
+/// Starts a call with a conversation, like Teams: a private temporary channel (removed
+/// when everyone has left) with a random password, and a `Join call` card in the chat.
+/// Only the people of the conversation get the password.
+fn start_call(app: &mut VoxaApp, id: DmId) {
+    use rand::Rng;
+    let Some(s) = &mut app.sess else { return };
+    let target = s.dm_target(id);
+    if target == TextTarget::Private(0) {
+        s.log(EventKind::Error, "They are offline: calls need them online");
+        return;
+    }
+    if !s.me().is_some_and(|m| s.server_perms_of(m) & perm::CHANNEL_CREATE_TEMPORARY != 0) {
+        s.log(EventKind::Error, "Calls need the permission to create temporary channels on this server");
+        return;
+    }
+    let mut r = rand::thread_rng();
+    let pw: String = (0..20).map(|_| r.sample(rand::distributions::Alphanumeric) as char).collect();
+    let name = format!("📞 Call {:04x}", r.gen::<u16>());
+    s.conn.send(C2S::CreateChannel(ChannelEdit {
+        parent: None,
+        sort: 0,
+        name: name.clone(),
+        topic: "Private call".into(),
+        description: String::new(),
+        max_clients: None,
+        kind: ChannelKind::Temporary,
+        is_default: false,
+        codec_quality: 6,
+        needed_talk_power: 0,
+        needed_join_power: 0,
+        voice_encrypted: true,
+        password: PasswordChange::Set(pw.clone()),
+    }));
+    s.pending_call = Some((id, name, pw));
+    s.log(EventKind::Info, "Starting a call...");
+}
+
+// ---------------------------------------------------------------- video
+
+/// Turns the camera on (in a channel, with the permission) or off.
+fn toggle_camera(app: &mut VoxaApp) {
+    let ctx = app.ctx.clone();
+    let Some(s) = &mut app.sess else { return };
+    if s.camera.take().is_some() {
+        s.conn.send(C2S::StopCamera);
+        s.log(EventKind::Info, "You turned your camera off");
+        return;
+    }
+    let problem = if !s.supports("1.21.0") {
+        Some("Video needs Voxa Server 1.21.0 or newer on this server.")
+    } else if s.my_channel() == NO_CHANNEL {
+        Some("Join a channel to turn on your camera.")
+    } else if !s.bulk_ready {
+        Some("The video connection is not ready yet - try again in a moment.")
+    } else if s.perms() & perm::SCREEN_SHARE == 0 {
+        Some("You are not allowed to share video in this channel.")
+    } else {
+        None
+    };
+    if let Some(p) = problem {
+        s.log(EventKind::Error, p);
+        return;
+    }
+    let settings = app.settings.camera.clone();
+    let (w, h) = settings.size();
+    s.conn.send(C2S::StartCamera(CameraInfo { width: w, height: h, fps: settings.fps.clamp(5, CameraInfo::MAX_FPS) }));
+    let preview = crate::stream::PreviewSink { frames: s.camera_viewer.frames.clone(), me: s.me, ctx };
+    s.camera = Some(crate::stream::Streamer::start_camera(settings, s.conn.bulk_tx.clone(), preview));
+    s.camera_focus = None;
+    s.log(EventKind::Good, "Your camera is on: everyone in the channel sees it");
+}
+
+fn update_camera_texture(app: &mut VoxaApp, ctx: &egui::Context, id: ClientId) -> Option<(egui::TextureId, egui::Vec2)> {
+    let s = app.sess.as_ref()?;
+    let frames = s.camera_viewer.frames.lock();
+    let f = frames.get(&id)?;
+    let size = egui::vec2(f.image.size[0] as f32, f.image.size[1] as f32);
+    match app.camera_textures.get_mut(&id) {
+        Some((tex, ver)) => {
+            if *ver != f.version {
+                tex.set(f.image.clone(), egui::TextureOptions::LINEAR);
+                *ver = f.version;
+            }
+            Some((tex.id(), size))
+        }
+        None => {
+            let tex = ctx.load_texture(format!("camera{id}"), f.image.clone(), egui::TextureOptions::LINEAR);
+            let tid = tex.id();
+            app.camera_textures.insert(id, (tex, f.version));
+            Some((tid, size))
+        }
+    }
+}
+
+/// The cameras in my channel, like a Discord call: tiles in a grid (or one large), with
+/// the name and a green frame while someone talks. Shown above the chat.
+fn video_grid(app: &mut VoxaApp, ui: &mut Ui) {
+    let t = theme();
+    let ctx = ui.ctx().clone();
+    let Some(s) = &mut app.sess else { return };
+    // My camera stopped by itself (unplugged, in use, no permission).
+    if let Some(e) = s.camera.as_ref().and_then(|c| c.error.lock().clone()) {
+        s.camera = None;
+        s.conn.send(C2S::StopCamera);
+        s.log(EventKind::Error, format!("Camera: {e}"));
+    }
+    let ch = s.my_channel();
+    if ch == NO_CHANNEL {
+        return;
+    }
+    // Cameras on in my channel (mine counts while it runs).
+    let cams: Vec<ClientId> = s.cameras.keys().copied().filter(|id| *id != s.me && s.clients.get(id).is_some_and(|c| c.channel == ch)).collect();
+    app.camera_textures.retain(|id, _| cams.contains(id) || (*id == s.me && s.camera.is_some()));
+    if cams.is_empty() && s.camera.is_none() {
+        return;
+    }
+    // Like a Teams call: once there is video, everyone in the call gets a tile (cameras
+    // first, then the others with their initials); me first.
+    let mut ids: Vec<ClientId> = s.clients.values().filter(|c| c.channel == ch && c.id != s.me).map(|c| c.id).collect();
+    ids.sort_by_key(|id| (!cams.contains(id), s.client_name(*id).to_lowercase()));
+    ids.insert(0, s.me);
+    // Big calls: at most this many tiles, the rest as "+N".
+    const MAX_TILES: usize = 25;
+    let hidden = ids.len().saturating_sub(MAX_TILES);
+    ids.truncate(MAX_TILES);
+    // A full picture for cameras that show nothing yet (just joined, or turned on).
+    let have: std::collections::HashSet<ClientId> = s.camera_viewer.frames.lock().keys().copied().collect();
+    for id in cams.iter().filter(|id| !have.contains(id)) {
+        let due = s.camera_asked.get(id).map(|t| t.elapsed() > std::time::Duration::from_secs(2)).unwrap_or(true);
+        if due {
+            s.camera_asked.insert(*id, std::time::Instant::now());
+            let _ = s.conn.bulk_ctl.send(BulkC2S::RequestCameraKeyframe(*id));
+        }
+    }
+    let focus = s.camera_focus.filter(|f| ids.contains(f));
+    let me = s.me;
+    let my_cam = s.camera.is_some();
+    let colors: std::collections::HashMap<ClientId, Color32> = ids.iter().map(|id| (*id, name_color(s.clients.get(id).map(|c| c.uid.as_str()).unwrap_or_default()))).collect();
+    let names: Vec<(ClientId, String, bool, bool)> =
+        ids.iter().map(|id| (*id, s.client_name(*id), app.voice_shared.is_talking(*id), if *id == me { my_cam } else { cams.contains(id) })).collect();
+    let avail = ui.available_height();
+    let mobile = is_mobile(&ctx);
+    egui::Panel::top("videogrid")
+        .resizable(true)
+        .default_size(if mobile { avail * 0.42 } else { avail * 0.45 })
+        .min_size(120.0)
+        .max_size((avail - 160.0).max(140.0))
+        .frame(Frame::new().fill(Color32::from_rgb(0x10, 0x11, 0x14)).inner_margin(Margin::same(6)))
+        .show(ui, |ui| {
+            let area = ui.available_rect_before_wrap();
+            let shown: Vec<&(ClientId, String, bool, bool)> = match focus {
+                Some(f) => names.iter().filter(|n| n.0 == f).collect(),
+                None => names.iter().collect(),
+            };
+            let n = shown.len().max(1);
+            // The column count that gives the largest 16:9 tiles.
+            let gap = 6.0;
+            let mut best = (1usize, 0.0f32);
+            for cols in 1..=n {
+                let rows = n.div_ceil(cols);
+                let w = (area.width() - gap * (cols as f32 - 1.0)) / cols as f32;
+                let h = (area.height() - gap * (rows as f32 - 1.0)) / rows as f32;
+                let tile_w = w.min(h * 16.0 / 9.0);
+                if tile_w > best.1 {
+                    best = (cols, tile_w);
+                }
+            }
+            let cols = best.0;
+            let rows = n.div_ceil(cols);
+            let tw = best.1.max(40.0);
+            let th = tw * 9.0 / 16.0;
+            let total = egui::vec2(cols as f32 * tw + gap * (cols as f32 - 1.0), rows as f32 * th + gap * (rows as f32 - 1.0));
+            let origin = area.center() - total / 2.0;
+            let mut clicked = None;
+            for (i, (id, name, talking, has_cam)) in shown.iter().enumerate() {
+                let (r, c) = (i / cols, i % cols);
+                // The last row is centred.
+                let in_row = if r == rows - 1 { n - r * cols } else { cols };
+                let row_off = (cols - in_row) as f32 * (tw + gap) / 2.0;
+                let rect = egui::Rect::from_min_size(origin + egui::vec2(row_off + c as f32 * (tw + gap), r as f32 * (th + gap)), egui::vec2(tw, th));
+                let resp = ui.interact(rect, egui::Id::unique(("video_tile", *id)), Sense::click());
+                let p = ui.painter_at(rect.expand(3.0));
+                p.rect_filled(rect, CornerRadius::same(8), t.card);
+                let tex = if *has_cam { update_camera_texture(app, &ctx, *id) } else { None };
+                match tex {
+                    Some((tid, size)) => {
+                        // Fitted inside the tile (portrait phones get bars at the sides).
+                        let scale = (rect.width() / size.x).min(rect.height() / size.y);
+                        let img = egui::Rect::from_center_size(rect.center(), size * scale);
+                        p.image(tid, img, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    None => {
+                        // No video: their initials in a circle, like Teams.
+                        let rad = (th * 0.2).clamp(14.0, 56.0);
+                        p.circle_filled(rect.center(), rad, colors.get(id).copied().unwrap_or(t.hover));
+                        p.text(rect.center(), Align2::CENTER_CENTER, initials(name), FontId::proportional(rad * 0.8), Color32::WHITE);
+                        if *has_cam {
+                            p.text(rect.center() + egui::vec2(0.0, rad + 12.0), Align2::CENTER_CENTER, "Starting video...", FontId::proportional(12.0), t.dim);
+                        }
+                    }
+                }
+                let label = if *id == app.sess.as_ref().map(|s| s.me).unwrap_or_default() { format!("{name} (you)") } else { name.clone() };
+                let galley = p.layout_no_wrap(label, FontId::proportional(13.0), Color32::WHITE);
+                let lr = egui::Rect::from_min_size(rect.left_bottom() + egui::vec2(8.0, -galley.size().y - 12.0), galley.size() + egui::vec2(10.0, 4.0));
+                p.rect_filled(lr, CornerRadius::same(4), Color32::from_black_alpha(150));
+                p.galley(lr.min + egui::vec2(5.0, 2.0), galley, Color32::WHITE);
+                if *talking {
+                    p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(3.0, GREEN), egui::StrokeKind::Outside);
+                } else if resp.hovered() {
+                    p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, t.dim), egui::StrokeKind::Outside);
+                }
+                if resp.clicked() {
+                    clicked = Some(*id);
+                }
+                resp.on_hover_text(if focus.is_some() { "Click to show everyone" } else { "Click to show large" });
+            }
+            ui.allocate_rect(area, Sense::hover());
+            // Voice (UDP, ChaCha20-Poly1305 with a fresh key per connection) and video (the
+            // Noise-encrypted connection) are both encrypted on the way.
+            let lock = egui::Rect::from_min_size(area.left_top() + egui::vec2(4.0, 4.0), egui::vec2(110.0, 18.0));
+            ui.put(lock, egui::Label::new(RichText::new("🔒 Encrypted").small().color(Color32::from_gray(170))))
+                .on_hover_text("Voice and video are encrypted between every member and the server (like all Voxa traffic)");
+            if hidden > 0 && focus.is_none() {
+                let txt = format!("+{hidden} more in the call");
+                let r = egui::Rect::from_min_size(area.right_bottom() + egui::vec2(-150.0, -26.0), egui::vec2(146.0, 22.0));
+                ui.put(r, egui::Label::new(RichText::new(txt).small().color(Color32::WHITE)));
+            }
+            // Others in the call while one is shown large.
+            if focus.is_some() && names.len() > 1 {
+                let txt = format!("+{} more", names.len() - 1);
+                let r = egui::Rect::from_min_size(area.right_top() + egui::vec2(-90.0, 4.0), egui::vec2(84.0, 22.0));
+                if ui.put(r, egui::Button::new(RichText::new(txt).small())).clicked() {
+                    clicked = focus;
+                }
+            }
+            if let Some(id) = clicked {
+                app.actions.push(Action::FocusCamera(if focus == Some(id) { None } else { Some(id) }));
+            }
+        });
+}
+
 // ---------------------------------------------------------------- streams
 
 fn update_texture(app: &mut VoxaApp, ctx: &egui::Context, id: ClientId) -> Option<(egui::TextureId, egui::Vec2)> {
@@ -3478,6 +4134,12 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         Action::SetTab(k) => {
             if let Some(s) = &mut app.sess {
                 s.tab = k;
+                s.calendar_open = false;
+            }
+        }
+        Action::OpenCalendar => {
+            if let Some(s) = &mut app.sess {
+                s.calendar_open = true;
             }
         }
         Action::CloseTab(id) => {
@@ -3569,6 +4231,21 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
                 } else if let Some(s) = &app.sess {
                     app.dlg.open(dialogs::Open::TalkRequest, &app.settings, s);
                 }
+            }
+        }
+        Action::ToggleCamera => toggle_camera(app),
+        Action::StartCall(id) => start_call(app, id),
+        Action::JoinCall(ch, pw) => {
+            let Some(s) = &mut app.sess else { return };
+            if !s.channels.contains_key(&ch) {
+                s.log(EventKind::Info, "This call has ended");
+            } else if s.my_channel() != ch {
+                s.conn.send(C2S::SwitchChannel { channel: ch, password: Some(pw) });
+            }
+        }
+        Action::FocusCamera(id) => {
+            if let Some(s) = &mut app.sess {
+                s.camera_focus = id;
             }
         }
         Action::ShareScreen => {
@@ -3670,7 +4347,7 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         }
         Action::PlayVideo(v, title) => app.player.play(v, title),
         Action::PickImages(target) => {
-            let files = rfd::FileDialog::new().set_title("Send images").add_filter("Images", crate::chat_images::IMAGE_EXTENSIONS).pick_files();
+            let files = crate::files::pick(crate::files::PickKind::Images(target), "Send images", crate::chat_images::IMAGE_EXTENSIONS, true, false);
             for f in files.unwrap_or_default() {
                 apply(app, Action::SendImage(target, crate::chat_images::ImageSource::File(f)));
             }
@@ -3687,7 +4364,7 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         }
         Action::Attach => {
             let ch = app.sess.as_ref().map(|s| s.my_channel());
-            if let (Some(ch), Some(files)) = (ch, rfd::FileDialog::new().set_title("Upload to channel").pick_files()) {
+            if let (Some(ch), Some(files)) = (ch, crate::files::pick(crate::files::PickKind::Attach, "Upload to channel", &[], true, false)) {
                 for f in files {
                     app.start_upload(ch, "", f);
                 }

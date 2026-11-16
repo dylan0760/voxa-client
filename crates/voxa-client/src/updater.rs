@@ -88,6 +88,15 @@ impl Updater {
         if let Some(dir) = &self.notes_dir {
             save_pending_notes(dir, &rel);
         }
+        // Android installs apps itself: the APK downloads in the browser, and opening it
+        // installs the update over this one (your settings stay).
+        if cfg!(target_os = "android") {
+            *self.state.lock().unwrap() = UpdState::Available(rel.clone());
+            if rel.asset_url.starts_with("https://github.com/") {
+                crate::markdown::open_link(&rel.asset_url);
+            }
+            return;
+        }
         let (state, ctx) = (self.state.clone(), self.ctx.clone());
         std::thread::spawn(move || {
             let st = state.clone();
@@ -116,6 +125,13 @@ pub trait ShowFill {
 
 impl ShowFill for egui::Window<'_> {
     fn show_fill<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<Option<R>>> {
+        // Phones: every dialog fills the screen (above the system bars).
+        if crate::ui::is_mobile(ctx) {
+            // Content wider or taller than a phone scrolls.
+            return self.fixed_rect(crate::ui::safe_rect(ctx).shrink(4.0)).show(ctx, |ui| {
+                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, add).inner
+            });
+        }
         self.show(ctx, |ui| {
             let r = add(ui);
             // Measure what was drawn below a `fill_list` so it can leave exactly that much room next frame.

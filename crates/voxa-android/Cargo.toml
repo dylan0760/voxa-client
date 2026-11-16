@@ -1,0 +1,40 @@
+[package]
+name = "voxa-android"
+description = "Voxa for Android: the same client as on Windows, built into an APK"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The Android app is the Voxa client's own code (crates/voxa-client/src), built as the
+# library an Android NativeActivity loads. On other systems this crate is empty.
+[lib]
+name = "voxa"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+voxa-proto = { path = "../voxa-proto", features = ["update"] }
+anyhow = "1.0.104"
+cpal = "0.18.2"
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "wgpu", "android-native-activity"] }
+egui = "0.37.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+parking_lot = "0.12"
+rusty-opus = "1.0.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+rand = "0.8"
+skrifa = { version = "0.44.0", default-features = false, features = ["std"] }
+vello_cpu = { version = "0.2.0", default-features = false, features = ["std", "u8_pipeline", "text"] }
+tokio = { version = "1.54.1", features = ["full"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
+epaint = { version = "0.37.0", features = ["color_fonts"] }
+jni = "0.21"
+winit = { version = "0.30", default-features = false, features = ["android-native-activity", "rwh_06"] }
+ndk-context = "0.1"
+android_logger = "0.15"
+log = "0.4"

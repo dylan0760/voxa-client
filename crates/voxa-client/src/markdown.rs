@@ -383,6 +383,8 @@ pub fn open_link(url: &str) {
     if !(url.starts_with("https://") || url.starts_with("http://")) || url.chars().any(char::is_control) {
         return;
     }
+    #[cfg(target_os = "android")]
+    crate::mobile::open_url(url);
     #[cfg(windows)]
     {
         use windows::core::{w, HSTRING};

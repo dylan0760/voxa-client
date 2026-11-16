@@ -5,6 +5,8 @@
 mod gpu;
 mod app;
 mod audio;
+mod calendar;
+mod camera;
 mod autostart;
 mod chat_images;
 mod capture;
@@ -17,6 +19,7 @@ mod avatars;
 mod dialogs;
 mod dm_store;
 mod emoji;
+mod files;
 mod gamepad;
 mod hardware;
 mod highlight;
@@ -25,7 +28,10 @@ mod icon;
 mod instance;
 mod links;
 mod loopback;
+mod launch;
 mod markdown;
+#[cfg(windows)]
+mod msgwin;
 mod net;
 mod player;
 mod protect;
@@ -36,42 +42,7 @@ mod ui;
 mod weblogin;
 mod updater;
 
-/// A server to connect to from the command line.
-pub struct Link {
-    /// `host[:port]`.
-    pub target: String,
-    /// From a voxa:// link (web pages can open those): ask before connecting.
-    pub ask: bool,
-}
-
-impl Link {
-    /// What a second launch hands over in `pending-link.txt`.
-    fn to_file(&self) -> String {
-        format!("{}{}", if self.ask { "voxa://" } else { "" }, self.target)
-    }
-
-    pub fn from_file(text: &str) -> Option<Link> {
-        let t = text.trim();
-        let link = match t.strip_prefix("voxa://") {
-            Some(rest) => Link { target: rest.trim_end_matches('/').to_string(), ask: true },
-            None => Link { target: t.to_string(), ask: false },
-        };
-        (!link.target.is_empty()).then_some(link)
-    }
-}
-
-/// Link passed on the command line (`voxa://host[:port]` or `--connect host`).
-pub fn link_arg() -> Option<Link> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(t) = args.iter().position(|a| a == "--connect").and_then(|i| args.get(i + 1)) {
-        return Link::from_file(t).map(|l| Link { ask: false, ..l });
-    }
-    args.iter().find(|a| a.starts_with("voxa://")).and_then(|a| Link::from_file(a))
-}
-
-pub fn pending_link_file() -> std::path::PathBuf {
-    config::config_dir().join("pending-link.txt")
-}
+pub use launch::{link_arg, pending_link_file, Link};
 
 fn main() -> eframe::Result<()> {
     // Only one Voxa runs at a time; a second launch brings the first one to the front

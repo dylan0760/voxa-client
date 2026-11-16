@@ -2,6 +2,7 @@
 //! Windows. It is a native child window placed every frame over the area the UI
 //! reserved for it (`rect`), and hidden while a Voxa window / menu covers that area.
 
+#[cfg(windows)]
 use std::borrow::Cow;
 
 use crate::links::Video;
@@ -13,17 +14,32 @@ pub struct Player {
     /// The player fills the whole chat area instead of the stage.
     pub full: bool,
     pub error: Option<String>,
+    #[cfg(windows)]
     webview: Option<wry::WebView>,
+    #[cfg(windows)]
     loaded: Option<String>,
+    #[cfg(windows)]
     context: Option<wry::WebContext>,
 }
 
 impl Default for Player {
     fn default() -> Self {
-        Player { video: None, rect: None, full: false, error: None, webview: None, loaded: None, context: None }
+        Player {
+            video: None,
+            rect: None,
+            full: false,
+            error: None,
+            #[cfg(windows)]
+            webview: None,
+            #[cfg(windows)]
+            loaded: None,
+            #[cfg(windows)]
+            context: None,
+        }
     }
 }
 
+#[cfg(windows)]
 /// Page shown in the webview. YouTube only plays embeds that come from a real web
 /// page (with a referrer), so the embed is wrapped in this local page.
 fn page(id: &str, start: u32) -> String {
@@ -35,6 +51,7 @@ allow="autoplay; encrypted-media; picture-in-picture; fullscreen; clipboard-writ
     )
 }
 
+#[cfg(windows)]
 fn page_url(v: &Video) -> String {
     format!("https://voxa.localhost/yt/{}?start={}", v.id, v.start)
 }
@@ -47,13 +64,26 @@ impl Player {
 
     pub fn close(&mut self) {
         self.video = None;
-        self.webview = None;
-        self.loaded = None;
+        #[cfg(windows)]
+        {
+            self.webview = None;
+            self.loaded = None;
+        }
         self.full = false;
         self.error = None;
     }
 
+    /// Android: no player inside Voxa, the video opens in the YouTube app (or browser).
+    #[cfg(not(windows))]
+    pub fn sync(&mut self, _ctx: &egui::Context, _frame: &eframe::Frame) {
+        self.rect = None;
+        if let Some((v, _)) = self.video.take() {
+            crate::markdown::open_link(&format!("https://www.youtube.com/watch?v={}&t={}s", v.id, v.start));
+        }
+    }
+
     /// After the UI was drawn: create, move, show or hide the webview.
+    #[cfg(windows)]
     pub fn sync(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let rect = self.rect.take();
         let Some((video, _)) = self.video.clone() else {
@@ -95,6 +125,7 @@ impl Player {
         }
     }
 
+    #[cfg(windows)]
     fn create(&mut self, frame: &eframe::Frame, bounds: wry::Rect, url: &str) -> wry::Result<wry::WebView> {
         use wry::WebViewBuilderExtWindows;
         let dir = crate::config::config_dir().join("webview");
@@ -137,6 +168,7 @@ impl Player {
 }
 
 /// True if a window, menu or popup of Voxa lies over (part of) `r`.
+#[cfg(windows)]
 fn covered(ctx: &egui::Context, r: egui::Rect) -> bool {
     let mut covered = false;
     for i in 0..=4 {

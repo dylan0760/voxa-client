@@ -125,9 +125,8 @@ impl Previews {
 
 fn agent() -> ureq::Agent {
     // Trust the Windows certificate store (like a browser), not a built-in root list.
-    let tls = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls).root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
     let cfg = ureq::Agent::config_builder()
-        .tls_config(tls)
+        .tls_config(voxa_proto::update::tls_config(true))
         .timeout_global(Some(Duration::from_secs(15)))
         .user_agent(format!("Voxa/{}", voxa_proto::APP_VERSION))
         .build();

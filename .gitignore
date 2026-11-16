@@ -5,3 +5,6 @@
 *.wixpdb
 /devdata
 
+*.apk
+*.jks
+*.keystore

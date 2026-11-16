@@ -38,3 +38,10 @@ mod imp {
 
 #[cfg(windows)]
 pub use imp::{acquire, listen, Instance};
+
+/// Android runs one copy of an app by itself.
+#[cfg(not(windows))]
+pub struct Instance;
+
+#[cfg(not(windows))]
+pub fn listen(_inst: Instance, _on_signal: impl Fn() + Send + 'static) {}

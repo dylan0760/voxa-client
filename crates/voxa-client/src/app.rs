@@ -82,6 +82,8 @@ pub struct DmWindow {
     pub minimized: bool,
     /// Show it minimized (a message arrived while it was closed: it waits in the taskbar).
     pub show_minimized: bool,
+    /// eframe was last told to show it (not while it waits quietly in the taskbar).
+    pub egui_shown: bool,
     /// Filter of the people list.
     pub search: String,
     /// Starting a group chat, or adding people to one.
@@ -275,6 +277,26 @@ pub struct Session {
     pub voice: Option<Voice>,
     pub streamer: Option<Streamer>,
     pub viewer: Viewer,
+    /// Your camera while it is on (video in your channel, servers 1.21.0+).
+    pub camera: Option<Streamer>,
+    /// Cameras that are on (anyone's; shown for your channel), and their pictures.
+    pub cameras: HashMap<ClientId, CameraInfo>,
+    pub camera_viewer: Viewer,
+    /// When a full picture was last asked of a camera that shows nothing yet.
+    pub camera_asked: HashMap<ClientId, Instant>,
+    /// The video tile shown large (None: all tiles in a grid).
+    pub camera_focus: Option<ClientId>,
+    /// A call being started: (conversation, channel name, password); the invite is sent
+    /// once the server has put me in the new channel.
+    pub pending_call: Option<(DmId, String, String)>,
+    /// The channel calendar is shown instead of the chat (servers 1.21.0+).
+    pub calendar_open: bool,
+    /// Calendars of channels (the one I am in), as the server last sent them.
+    pub calendars: HashMap<ChannelId, crate::calendar::CalendarData>,
+    pub calendar_asked: Option<ChannelId>,
+    pub cal_ui: crate::calendar::CalendarUi,
+    /// Events I was already reminded of.
+    pub reminded: HashSet<EventId>,
     pub welcomed: bool,
     pub me: ClientId,
     pub my_uid: String,
@@ -668,6 +690,40 @@ impl Session {
         self.me().map(|m| self.server_perms_of(m) & perm::SERVER_EVENTS != 0).unwrap_or(false)
     }
 
+    /// The channel I am in has a calendar I may see (servers 1.21.0+).
+    pub fn sees_calendar(&self) -> bool {
+        self.supports("1.21.0") && self.my_channel() != NO_CHANNEL && self.perms() & perm::CALENDAR_VIEW != 0
+    }
+
+    /// Asks for my channel's calendar (once per channel), and reminds me of events I go to
+    /// that start in the next 10 minutes. Returns the reminders.
+    pub fn calendar_tick(&mut self) -> Vec<String> {
+        if !self.welcomed {
+            return Vec::new();
+        }
+        let ch = self.my_channel();
+        if !self.sees_calendar() {
+            self.calendar_open = false;
+            return Vec::new();
+        }
+        if self.calendar_asked != Some(ch) {
+            self.calendar_asked = Some(ch);
+            self.conn.send(C2S::GetCalendar(ch));
+        }
+        let now = now_unix();
+        let mut out = Vec::new();
+        if let Some(cal) = self.calendars.get(&ch) {
+            for e in &cal.events {
+                let mine = e.rsvps.iter().any(|r| r.uid == self.my_uid && r.answer == RsvpAnswer::Going);
+                if mine && e.start > now && e.start - now <= 600 && !self.reminded.contains(&e.id) {
+                    self.reminded.insert(e.id);
+                    out.push(format!("Starting soon ({}): {}", crate::calendar::when(e.start), e.title));
+                }
+            }
+        }
+        out
+    }
+
     /// Fetches the Server tab's history once you may see it (also when an admin gives you
     /// the permission later; personal permissions arrive after Welcome).
     pub fn server_events(&mut self) {
@@ -695,6 +751,8 @@ pub struct VoxaApp {
     pub voice_shared: Arc<VoiceShared>,
     pub last_request: Option<ConnectRequest>,
     pub textures: HashMap<ClientId, (egui::TextureHandle, u64)>,
+    /// Pictures of the cameras shown (video calls).
+    pub camera_textures: HashMap<ClientId, (egui::TextureHandle, u64)>,
     pub chat_input: String,
     pub offline_log: ChatLog,
     pub ctx: egui::Context,
@@ -707,6 +765,11 @@ pub struct VoxaApp {
     debug_done: bool,
     pub home: bool,
     pub show_members: bool,
+    /// Phones (Android): the page shown, one at a time.
+    pub mobile_page: crate::ui::MobilePage,
+    /// Phones: what the last frame had, to follow along (connected: channels; a direct
+    /// message opened: the chat).
+    pub mobile_seen: (bool, Option<ChatKey>),
     /// The right panel shows the People list instead of the info.
     pub people_view: bool,
     pub people_search: String,
@@ -757,13 +820,17 @@ pub const UPDATE_REPO: &str = match option_env!("VOXA_UPDATE_REPO") {
     None => "dylan0760/voxa-client",
 };
 
+/// The installer of this Voxa in a release: the MSI on Windows, the APK on Android.
 fn is_client_msi(name: &str) -> bool {
-    name.starts_with("Voxa-") && !name.starts_with("Voxa-Server") && name.ends_with("-x64.msi")
+    let kind = if cfg!(target_os = "android") { name.ends_with(".apk") } else { name.ends_with("-x64.msi") };
+    name.starts_with("Voxa-") && !name.starts_with("Voxa-Server") && kind
 }
 
 impl VoxaApp {
     pub fn new(cc: &eframe::CreationContext<'_>, inst: Option<crate::instance::Instance>) -> VoxaApp {
         let settings = Settings::load();
+        #[cfg(windows)]
+        crate::msgwin::remember_main(cc);
         crate::ui::install_fonts(&cc.egui_ctx);
         crate::ui::apply_style(&cc.egui_ctx, &settings);
         let (tray_tx, tray_rx) = std::sync::mpsc::channel();
@@ -792,6 +859,7 @@ impl VoxaApp {
             voice_shared,
             last_request: None,
             textures: HashMap::new(),
+            camera_textures: HashMap::new(),
             chat_input: String::new(),
             offline_log: ChatLog::default(),
             ctx: cc.egui_ctx.clone(),
@@ -801,6 +869,8 @@ impl VoxaApp {
             debug_done: false,
             home: false,
             show_members: true,
+            mobile_page: crate::ui::MobilePage::Home,
+            mobile_seen: (false, None),
             people_view: false,
             people_search: String::new(),
             tray: None,
@@ -883,6 +953,106 @@ impl VoxaApp {
             }
             // The Messages window with the people list (as from the tray menu).
             "people-window" => self.show_people(),
+            // Turns the camera on (waits until connected and the video connection is ready).
+            "camera-on" => match &self.sess {
+                Some(s) if s.welcomed && s.bulk_ready => self.actions.push(crate::ui::Action::ToggleCamera),
+                _ => self.debug_done = false,
+            },
+            // A channel of my own with a few events in its calendar, shown (for screenshots).
+            "calendar-demo" => {
+                static STEP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+                use std::sync::atomic::Ordering::Relaxed;
+                self.debug_done = false;
+                let Some(s) = &mut self.sess else { return };
+                if !s.welcomed {
+                    return;
+                }
+                let ch = s.my_channel();
+                let mine = s.channels.get(&ch).is_some_and(|c| c.name == "Game nights");
+                match STEP.load(Relaxed) {
+                    0 => {
+                        s.conn.send(C2S::CreateChannel(ChannelEdit {
+                            parent: None,
+                            sort: 0,
+                            name: "Game nights".into(),
+                            topic: String::new(),
+                            description: String::new(),
+                            max_clients: None,
+                            kind: ChannelKind::Temporary,
+                            is_default: false,
+                            codec_quality: 6,
+                            needed_talk_power: 0,
+                            needed_join_power: 0,
+                            voice_encrypted: true,
+                            password: PasswordChange::Keep,
+                        }));
+                        STEP.store(1, Relaxed);
+                    }
+                    1 if mine && s.calendars.contains_key(&ch) => {
+                        s.conn.send(C2S::CreateCalendar { channel: ch, name: "Raids".into() });
+                        s.conn.send(C2S::CreateCalendar { channel: ch, name: "Tournaments".into() });
+                        STEP.store(2, Relaxed);
+                    }
+                    2 if s.calendars.get(&ch).is_some_and(|c| c.calendars.len() == 2) => {
+                        let raids = s.calendars[&ch].calendars[0].id;
+                        let day = 86_400;
+                        let base = (now_unix() / day + 1) * day + 19 * 3600;
+                        for (i, (title, max)) in [("Raid night", Some(8)), ("Dungeon run", Some(5)), ("Chill games", None)].iter().enumerate() {
+                            let e = CalendarEvent {
+                                id: 0,
+                                calendar: raids,
+                                title: title.to_string(),
+                                description: "Voice in this channel. Bring snacks!".into(),
+                                start: base + i as u64 * 2 * day,
+                                duration_min: 120,
+                                max_people: *max,
+                                created_by: String::new(),
+                                created_uid: String::new(),
+                                rsvps: Vec::new(),
+                            };
+                            s.conn.send(C2S::SaveEvent { channel: ch, event: e });
+                        }
+                        STEP.store(3, Relaxed);
+                    }
+                    3 if s.calendars.get(&ch).is_some_and(|c| c.events.len() == 3) => {
+                        let first = s.calendars[&ch].events[0].id;
+                        s.conn.send(C2S::AnswerEvent { channel: ch, id: first, answer: Some(RsvpAnswer::Going) });
+                        s.calendar_open = true;
+                        s.cal_ui.month_view = std::env::var("VOXA_CAL_MONTH").is_ok();
+                        if std::env::var("VOXA_CAL_EVENT").is_ok() {
+                            s.cal_ui.open_event = Some(first);
+                        }
+                        self.debug_done = true;
+                    }
+                    _ => {}
+                }
+            }
+            // Starts a call with the first group chat (waits until there is one), and shows it.
+            "start-call" => {
+                let found = self.sess.as_ref().and_then(|s| s.dms.iter().position(|d| d.group.is_some()));
+                match found {
+                    Some(i) => {
+                        if let Some(s) = &mut self.sess {
+                            s.tab = ChatKey::Dm(i);
+                        }
+                        self.actions.push(crate::ui::Action::StartCall(i));
+                    }
+                    None => self.debug_done = false,
+                }
+            }
+            // Joins the first call someone invited me to (waits for the invite).
+            "join-call" => {
+                let call = self.sess.as_ref().and_then(|s| {
+                    s.dms.iter().flat_map(|d| d.log.lines.iter()).find_map(|l| match l {
+                        ChatLine::Msg(m) => crate::ui::parse_call(&m.text),
+                        _ => None,
+                    })
+                });
+                match call {
+                    Some((ch, pw)) => self.actions.push(crate::ui::Action::JoinCall(ch, pw)),
+                    None => self.debug_done = false,
+                }
+            }
             // The main window on the Server tab (waits until connected).
             "server-tab" => match &mut self.sess {
                 Some(s) if s.welcomed => s.tab = ChatKey::Server,
@@ -1425,6 +1595,17 @@ impl VoxaApp {
             voice: None,
             streamer: None,
             viewer: Viewer::new(self.ctx.clone()),
+            camera: None,
+            cameras: HashMap::new(),
+            camera_viewer: Viewer::new(self.ctx.clone()),
+            camera_asked: HashMap::new(),
+            camera_focus: None,
+            pending_call: None,
+            calendar_open: false,
+            calendars: HashMap::new(),
+            calendar_asked: None,
+            cal_ui: Default::default(),
+            reminded: HashSet::new(),
             welcomed: false,
             me: 0,
             my_uid: String::new(),
@@ -1711,6 +1892,16 @@ impl VoxaApp {
                     st.keyframe.store(true, Ordering::Relaxed);
                 }
             }
+            BulkS2C::CameraFrame { from, frame } => {
+                if s.cameras.contains_key(&from) && s.clients.get(&from).is_some_and(|c| c.channel == s.my_channel()) {
+                    s.camera_viewer.push(from, frame);
+                }
+            }
+            BulkS2C::CameraKeyframeRequested => {
+                if let Some(c) = &s.camera {
+                    c.keyframe.store(true, Ordering::Relaxed);
+                }
+            }
             BulkS2C::UploadReady { id } => {
                 // Only for an upload that is waiting for the server (never twice).
                 if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.upload && matches!(t.state, TransferState::Waiting)) {
@@ -1952,6 +2143,8 @@ impl VoxaApp {
                 s.watching.remove(&id);
                 s.presences.remove(&id);
                 s.viewer.clear(id);
+                s.cameras.remove(&id);
+                s.camera_viewer.clear(id);
                 self.textures.remove(&id);
                 shared.talking.lock().remove(&id);
                 if s.selected == Selection::Client(id) {
@@ -1972,6 +2165,13 @@ impl VoxaApp {
                         None if channel == NO_CHANNEL => s.log(EventKind::Info, "You left the channel (still on the server)".to_string()),
                         None => s.log(EventKind::Info, format!("You switched to channel \"{cname}\"")),
                     }
+                    // Pictures of the old channel's cameras go (the server turned mine off).
+                    let cams: Vec<ClientId> = s.cameras.keys().copied().collect();
+                    for c in cams {
+                        s.camera_viewer.clear(c);
+                    }
+                    s.camera_asked.clear();
+                    s.camera_focus = None;
                     // Stop watching streams from the old channel.
                     let ids: Vec<ClientId> = s.watching.drain().collect();
                     for w in ids {
@@ -1979,6 +2179,13 @@ impl VoxaApp {
                         self.textures.remove(&w);
                     }
                     s.pins_open = false;
+                    // A call I started: its channel is ready, invite the conversation.
+                    if s.pending_call.as_ref().is_some_and(|p| s.channels.get(&channel).is_some_and(|c| c.name == p.1)) {
+                        if let Some((dm, _, pw)) = s.pending_call.take() {
+                            let target = s.dm_target(dm);
+                            s.conn.send(C2S::SendText { target, text: format!("📞 I started a call (join it with Voxa 1.29.0 or newer)\n[voxa-call:{channel}:{pw}]") });
+                        }
+                    }
                     if channel == NO_CHANNEL {
                         // On the server, in no channel: only the server chat and messages.
                         if s.tab == ChatKey::Channel {
@@ -2193,6 +2400,38 @@ impl VoxaApp {
                     d.log.lines.push(ChatLine::Event { ts: now_unix(), text: "You left this group chat".into(), kind: EventKind::Info });
                 }
             }
+            S2C::Calendar { channel, calendars, events } => {
+                // New events in my channel are announced in its chat.
+                if channel == s.my_channel() {
+                    if let Some(old) = s.calendars.get(&channel) {
+                        for e in events.iter().filter(|e| !old.events.iter().any(|o| o.id == e.id)) {
+                            let text = format!("{} arranged \"{}\" for {}", e.created_by, e.title, crate::calendar::when(e.start));
+                            s.channel_logs.entry(channel).or_default().lines.push(ChatLine::Event { ts: now_unix(), text, kind: EventKind::Good });
+                        }
+                    }
+                }
+                s.calendars.insert(channel, crate::calendar::CalendarData { calendars, events });
+            }
+            S2C::Cameras(list) => {
+                s.cameras = list.into_iter().collect();
+            }
+            S2C::CameraChanged { client, camera } => match camera {
+                Some(info) => {
+                    s.cameras.insert(client, info);
+                }
+                None => {
+                    s.cameras.remove(&client);
+                    s.camera_viewer.clear(client);
+                    s.camera_asked.remove(&client);
+                    if s.camera_focus == Some(client) {
+                        s.camera_focus = None;
+                    }
+                    // The server turned mine off (I left the channel).
+                    if client == s.me && s.camera.take().is_some() {
+                        s.log(EventKind::Info, "Your camera was turned off".to_string());
+                    }
+                }
+            },
             S2C::ClientPresence { id, presence } => {
                 if presence == Presence::Online {
                     s.presences.remove(&id);
@@ -2559,6 +2798,10 @@ impl eframe::App for VoxaApp {
         self.startup_retry(ctx);
         if let Some(s) = &mut self.sess {
             s.server_events();
+            for r in s.calendar_tick() {
+                s.channel_logs.entry(s.my_channel()).or_default().lines.push(ChatLine::Event { ts: now_unix(), text: format!("Reminder - {r}"), kind: EventKind::Warn });
+                self.voice_shared.play_tones(MESSAGE_TONES);
+            }
         }
         if self.hide_frames > 0 {
             self.hide_frames -= 1;
@@ -2582,7 +2825,12 @@ impl eframe::App for VoxaApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Android: the microphone permission, and the on-screen keyboard while typing.
+        #[cfg(target_os = "android")]
+        crate::mobile::ask_startup_permissions();
         crate::ui::draw(self, ui);
+        #[cfg(target_os = "android")]
+        crate::mobile::keyboard(ui.ctx().text_edit_focused());
         self.player.sync(ui.ctx(), frame);
         let actions: Vec<crate::ui::Action> = std::mem::take(&mut self.actions);
         for a in actions {

@@ -1,10 +1,18 @@
 //! System tray icon with a context menu (Windows notification area).
 
 use std::sync::mpsc::Sender;
+#[cfg(windows)]
 use std::sync::Mutex;
 
+#[cfg(windows)]
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+#[cfg(windows)]
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+
+/// Android has no tray.
+#[cfg(not(windows))]
+#[derive(Clone, PartialEq)]
+pub struct MenuId;
 
 pub enum RawTray {
     Menu(MenuId),
@@ -26,6 +34,7 @@ pub enum TrayCmd {
 
 /// Routes tray clicks and menu selections into `tx` and wakes the UI. The handlers are
 /// process-global, so this is called once.
+#[cfg(windows)]
 pub fn install_handlers(tx: Sender<RawTray>, ctx: egui::Context) {
     let tx_icon = Mutex::new(tx.clone());
     let ctx_icon = ctx.clone();
@@ -47,6 +56,7 @@ pub fn install_handlers(tx: Sender<RawTray>, ctx: egui::Context) {
     }));
 }
 
+#[cfg(windows)]
 pub struct Tray {
     _icon: TrayIcon,
     open: MenuItem,
@@ -59,6 +69,7 @@ pub struct Tray {
     state: Option<(bool, bool, bool)>,
 }
 
+#[cfg(windows)]
 impl Tray {
     pub fn new(tooltip: &str, rgba: Vec<u8>, size: u32, app_name: &str) -> Option<Tray> {
         let open = MenuItem::new(format!("Open {app_name}"), true, None);
@@ -122,4 +133,23 @@ impl Tray {
         self.speakers.set_checked(speakers_muted);
         let _ = self._icon.set_tooltip(Some(tooltip));
     }
+}
+
+#[cfg(not(windows))]
+pub fn install_handlers(_tx: Sender<RawTray>, _ctx: egui::Context) {}
+
+#[cfg(not(windows))]
+pub struct Tray;
+
+#[cfg(not(windows))]
+impl Tray {
+    pub fn new(_tooltip: &str, _rgba: Vec<u8>, _size: u32, _app_name: &str) -> Option<Tray> {
+        None
+    }
+
+    pub fn map(&self, _raw: RawTray) -> Option<TrayCmd> {
+        None
+    }
+
+    pub fn sync(&mut self, _connected: bool, _mic_muted: bool, _speakers_muted: bool, _tooltip: &str) {}
 }

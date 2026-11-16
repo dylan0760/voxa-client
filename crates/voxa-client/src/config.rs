@@ -239,6 +239,36 @@ impl Default for StreamSettings {
     }
 }
 
+/// Your camera in video calls.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct CameraSettings {
+    /// The camera (empty: the default one; on phones the front camera).
+    pub device: String,
+    /// Picture height: 360, 480 or 720.
+    pub height: u32,
+    pub fps: u8,
+    pub quality: u8,
+}
+
+impl Default for CameraSettings {
+    fn default() -> Self {
+        CameraSettings { device: String::new(), height: 360, fps: 15, quality: 60 }
+    }
+}
+
+impl CameraSettings {
+    /// The wanted picture size (16:9).
+    pub fn size(&self) -> (u32, u32) {
+        let h = match self.height {
+            0..=400 => 360,
+            401..=600 => 480,
+            _ => 720,
+        };
+        (h * 16 / 9, h)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Settings {
@@ -251,6 +281,7 @@ pub struct Settings {
     pub recent: Vec<String>,
     pub audio: AudioSettings,
     pub stream: StreamSettings,
+    pub camera: CameraSettings,
     /// Kept in step with `theme` so older versions still pick dark or light.
     pub dark_theme: bool,
     /// None in settings from before 1.13 (then `dark_theme` decides).
@@ -305,6 +336,7 @@ impl Default for Settings {
             recent: Vec::new(),
             audio: AudioSettings::default(),
             stream: StreamSettings::default(),
+            camera: CameraSettings::default(),
             dark_theme: true,
             theme: None,
             theme_v2: None,
@@ -359,6 +391,12 @@ impl Settings {
         }
         if !(0.5..=3.0).contains(&s.ui_scale) {
             s.ui_scale = 1.0;
+        }
+        // Android has one window: direct messages are chat tabs there, and there is no tray.
+        #[cfg(target_os = "android")]
+        {
+            s.dm_window = false;
+            s.minimize_to_tray = false;
         }
         s
     }

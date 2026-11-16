@@ -268,6 +268,81 @@ impl Streamer {
     }
 }
 
+impl Streamer {
+    /// Video calls: sends your camera's pictures to your channel (encoded like screen
+    /// sharing). Your own picture is shown through `preview` every frame.
+    pub fn start_camera(settings: crate::config::CameraSettings, bulk: tokio::sync::mpsc::Sender<BulkC2S>, preview: PreviewSink) -> Streamer {
+        let stop = Arc::new(AtomicBool::new(false));
+        let keyframe = Arc::new(AtomicBool::new(true));
+        let error = Arc::new(Mutex::new(None));
+        let preview_on = Arc::new(AtomicBool::new(true));
+        let s = Streamer { stop: stop.clone(), keyframe: keyframe.clone(), error: error.clone(), preview_on: preview_on.clone(), _audio: None, audio_error: None };
+        std::thread::Builder::new()
+            .name("voxa-camera".into())
+            .spawn(move || {
+                let (want_w, want_h) = settings.size();
+                let fps = settings.fps.clamp(5, voxa_proto::CameraInfo::MAX_FPS);
+                let mut cam = match crate::camera::Camera::open(&settings.device, want_w, want_h, fps as u32) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        *error.lock() = Some(e);
+                        preview.ctx.request_repaint();
+                        return;
+                    }
+                };
+                let interval = Duration::from_secs_f32(1.0 / fps as f32);
+                let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(1, 4);
+                let mut prev: Option<Scaled> = None;
+                let mut last_key = Instant::now();
+                let mut failures = 0;
+                let mut next_frame = Instant::now();
+                let mut version = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
+                while !stop.load(Ordering::Relaxed) {
+                    let Some(cap) = cam.grab() else {
+                        failures += 1;
+                        if failures > 5 {
+                            *error.lock() = Some("The camera stopped (it may be in use by another app, or was unplugged)".into());
+                            preview.ctx.request_repaint();
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(200));
+                        continue;
+                    };
+                    failures = 0;
+                    // At most the wanted size, keeping the camera's shape (portrait on phones).
+                    let long = want_w.max(want_h);
+                    let max_w = if cap.w >= cap.h { long } else { (long as u64 * cap.w as u64 / cap.h.max(1) as u64) as u32 };
+                    let img = scale(cap, max_w.min(voxa_proto::CameraInfo::MAX_LONG));
+                    if preview_on.load(Ordering::Relaxed) {
+                        version += 1;
+                        preview.frames.lock().insert(preview.me, ViewerFrame { image: preview_image(&img), version });
+                        preview.ctx.request_repaint();
+                    }
+                    let dims_changed = prev.as_ref().map(|p| p.w != img.w || p.h != img.h).unwrap_or(true);
+                    let key = keyframe.swap(false, Ordering::Relaxed) || dims_changed || last_key.elapsed() > Duration::from_secs(10);
+                    if key {
+                        last_key = Instant::now();
+                    }
+                    let tiles = changed_tiles(&img, prev.as_ref(), key, settings.quality.clamp(20, 90), threads);
+                    if !tiles.is_empty() {
+                        let frame = StreamFrame { width: img.w, height: img.h, keyframe: key, tiles };
+                        match bulk.try_send(BulkC2S::CameraFrame(frame)) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(_)) => keyframe.store(true, Ordering::Relaxed),
+                            Err(TrySendError::Closed(_)) => break,
+                        }
+                    }
+                    prev = Some(img);
+                    pace(&mut next_frame, interval);
+                }
+                preview.frames.lock().remove(&preview.me);
+                preview.ctx.request_repaint();
+            })
+            .expect("spawn camera thread");
+        s
+    }
+}
+
 pub struct ViewerFrame {
     pub image: egui::ColorImage,
     pub version: u64,

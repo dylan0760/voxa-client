@@ -405,6 +405,12 @@ impl Capturer {
     pub fn grab(&mut self) -> Option<Captured> {
         capture(&self.0)
     }
+    pub fn fast(&self) -> bool {
+        false
+    }
+    pub fn new_images(&self) -> u64 {
+        0
+    }
 }
 
 #[cfg(not(windows))]

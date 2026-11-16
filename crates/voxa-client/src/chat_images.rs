@@ -304,7 +304,7 @@ pub fn viewer(ctx: &egui::Context, imgs: &mut ChatImages) {
         if !name.to_lowercase().ends_with(&format!(".{ext}")) && !(ext == "jpg" && name.to_lowercase().ends_with(".jpeg")) {
             name = format!("{name}.{ext}");
         }
-        if let Some(p) = rfd::FileDialog::new().set_file_name(&name).save_file() {
+        if let Some(p) = crate::files::save_as(&name) {
             let _ = std::fs::write(p, bytes.as_slice());
         }
     }

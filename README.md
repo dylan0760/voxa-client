@@ -1,10 +1,11 @@
 # Voxa (client)
 
-Voxa is free, open source voice chat with persistent encrypted text chat and screen
-sharing. It is written in Rust for Windows and has a TeamSpeak-6-style interface. There
-are no license keys, accounts, registrations or fees.
+Voxa is free, open source voice chat with persistent encrypted text chat, video calls,
+screen sharing and channel calendars. It is written in Rust for **Windows and Android**
+and has a TeamSpeak-6-style interface. There are no license keys, accounts,
+registrations or fees.
 
-This repository is the **desktop client**. The server lives at
+This repository is the **client** (Windows and Android). The server lives at
 [dylan0760/voxa-server](https://github.com/dylan0760/voxa-server).
 
 Voxa is an independent clean-room implementation. It contains no TeamSpeak code or
@@ -15,6 +16,9 @@ Get `Voxa-<version>-x64.msi` from the
 [latest release](https://github.com/dylan0760/voxa-client/releases/latest) and run it.
 The MSI is not code-signed. If Windows SmartScreen warns you, choose
 **More info → Run anyway**.
+
+**Android** (8.0 or newer): get `Voxa-<version>.apk` from the same release, open it on
+the phone and allow installing it (Android asks once). See [Android](#android).
 
 Servers running Voxa Server 1.10.0 or newer normally require the newest Voxa. If a
 server needs a newer version, Voxa tells you and opens the update window.
@@ -217,6 +221,44 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   * *Clear entire chat history* adds a 🗑 button in the chat header that wipes a whole
     channel or server chat.
 
+### Video calls (Voxa Server 1.21.0+)
+* **Your camera in your channel**, like Discord: 📷 in the voice card or above the chat
+  turns it on or off. Everyone in the channel sees it; leaving the channel turns it off.
+* **Group video like Teams:** as soon as a camera is on, everyone in the call gets a tile
+  above the chat: cameras first, the others with their initials, a green frame around
+  whoever talks. Click a tile to show it large, click again for everyone. Calls with
+  more than 25 people show the first 25 and how many more are there. Drag the edge to
+  make the video bigger or smaller.
+* **Options â–¸ Video:** which camera, picture size (360p, 480p or 720p), frame rate and
+  image quality. Phones send upright (portrait) pictures.
+* **Calls with a group chat or someone you message:** 📞 in the chat's header starts a
+  call. Voxa makes a private, password-protected temporary channel for it and posts a
+  **Join call** card in the chat; only the people in that chat get the password. The
+  channel disappears when everyone has left. Calls need the permission to create
+  temporary channels (normal members have it).
+* **Encrypted:** voice and video are encrypted between every member and the server (see
+  [Security](#security)). 🔒 in the corner of the video says so.
+* Needs the *Share screen / applications and camera* permission in the channel.
+
+### Channel calendar (Voxa Server 1.21.0+)
+* **📅 Calendar** next to the channel's chat tab: what is arranged in this channel,
+  e.g. a game on Monday at 8 pm for 8 players.
+* **Several calendars per channel** (tabs), e.g. *Raids* and *Tournaments*.
+* **Upcoming** lists what is coming, day by day; **Month** shows a month grid
+  (double-click a day to arrange something on it).
+* **An event** has a title, day and time (your local time), length, details and
+  optionally a maximum number of people. Open it to answer **Going**, **Maybe** or
+  **Can't** and to see who answered. When it is full, nobody else can say they are going.
+* **Reminders:** 10 minutes before an event you are going to, Voxa reminds you with a
+  sound. New events are announced in the channel chat.
+* **Who may do what** is up to the server's permissions, per channel:
+  * *See the channel calendar* (everyone by default);
+  * *Answer calendar invitations* (normal members by default);
+  * *Create and edit calendar events* and *Create, rename and delete calendars* (the
+    channel's admins by default).
+* Only the people in the channel see its calendar, so a password channel's calendar stays
+  inside it.
+
 ### Screen sharing
 * **What you can share:** a whole screen or a single application, up to **60 fps**.
   Streams are relayed through the server, never peer-to-peer.
@@ -231,7 +273,7 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   * Only the stream you look at is received, so hidden ones use no bandwidth and play
     no sound.
   * Close a stream with ✖ and it stays closed until it ends.
-  * Turn automatic opening off in **Options ▸ Screen Share**.
+  * Turn automatic opening off in **Options ▸ Video**.
 * **Sound** (Voxa Server 1.6.0+, Windows 10 2004+):
   * A shared screen sends everything your PC plays except Voxa.
   * A shared application sends only its own sound.
@@ -322,6 +364,32 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   hours (**Options ▸ Application ▸ Updates**). Click the green ⬆ button, or **About ▸
   Check for updates**, to install. Voxa closes, upgrades and restarts by itself.
 
+## Android
+The same Voxa as on Windows, for phones and tablets (Android 8.0 or newer; arm64, and
+x86_64 for Chromebooks).
+* **One page at a time** on a phone: **Home** (servers, bookmarks, settings), **Channels**,
+  **Chat** and **People** at the bottom. Android's back button goes back a page; from Home
+  Voxa goes to the background and stays connected. Tablets in landscape get the Windows
+  layout.
+* **Everything else works like on Windows:** voice, chat, direct and group messages,
+  pictures, files, video calls, the calendar, watching screen shares, themes, bookmarks
+  and identities. Dialogs fill the screen.
+* **Push-to-talk** is a big **Hold to talk** button (voice activation is the default).
+* **Pictures, uploads and your avatar** are chosen in Voxa's own file browser. The first
+  time, Voxa asks for **All files access** (Android 11+) or the storage permission.
+  Downloads and saved pictures go to `Download/Voxa`.
+* **Permissions:** the microphone when Voxa starts, the camera when you first turn it on,
+  and notifications on Android 13+.
+* **voxa:// links** from web pages open Voxa.
+* **Updates:** Voxa finds new versions like on Windows; **Update** downloads the APK in
+  the browser, and opening it installs the update over the old one (settings stay).
+* **Not on phones:** sharing your screen (you can watch others'), global hotkeys, the
+  tray and starting with Windows. Android may stop the microphone while Voxa is in the
+  background, so keep it open while you talk.
+* **Your data** (identity, settings, direct messages) is in Voxa's private app storage,
+  which other apps can't read. Android backups are turned off for Voxa so your identity
+  key never leaves the phone that way.
+
 ## Network
 The client connects to the server on **TCP and UDP 9987** (or the port in the address).
 No inbound ports are needed on the client side.
@@ -333,9 +401,15 @@ Lossless channels need about 0.8–1.5 Mbit/s per listener, sent by the server.
   * Your identity key defines your unique ID.
   * The server's key is pinned on first connect, and a changed key is reported.
   * The second connection (files, screen share, images) must reach the same server.
-* **Voice:** ChaCha20-Poly1305 with a per-session key and replay protection.
+* **Voice:** every packet is encrypted and authenticated with ChaCha20-Poly1305, under a
+  fresh random 256-bit key per connection that comes over the encrypted connection,
+  with replay protection. This is always on, whatever a channel's setting says.
+* **Video and screen sharing** go over the second (Noise-encrypted) connection, so they
+  are encrypted too. The server relays them to the people in your channel only.
+* **Calls** started from a chat use a private channel with a random 20-character
+  password that only that chat's members get.
 * **Your identity and saved passwords** are encrypted in `settings.json` with Windows
-  data protection for your user account.
+  data protection for your user account (on Android: kept in Voxa's private app storage).
 * **Direct messages** are stored in `%APPDATA%\Voxa\dm`, encrypted with ChaCha20-Poly1305
   under a random key that Windows data protection guards for your account. Each file is
   bound to its server, so it can't be read under another server or by another user.
@@ -355,8 +429,16 @@ Lossless channels need about 0.8–1.5 Mbit/s per listener, sent by the server.
 Requirements: Rust (rustup) and PowerShell.
 
 ```powershell
-.\build.ps1
+.\build.ps1        # Windows: dist\Voxa-<version>-x64.msi
+.\build-apk.ps1    # Android: dist\Voxa-<version>.apk
 ```
+
+The Android build needs the Rust targets `aarch64-linux-android` and
+`x86_64-linux-android`, the Android NDK (`ANDROID_NDK_HOME`), the SDK with build-tools
+and a platform (`ANDROID_HOME`) and Java (for `apksigner`). Every version must be
+signed with the same key (`VOXA_APK_KEYSTORE` / `VOXA_APK_KEYPASS`), or Android refuses
+to update the app. The Android app is `crates/voxa-android`: it builds the client's own
+code as the library an Android NativeActivity loads.
 
 The script installs the `stable-x86_64-pc-windows-gnullvm` toolchain if needed and
 downloads portable LLVM-MinGW and WiX 3.14 into `%LOCALAPPDATA%\voxa-build-tools`. It
@@ -372,6 +454,7 @@ Tests:
   * `smoke`, `image_test`, `pin_test` and `security_test`;
   * `feature_test` (codecs and the version requirement);
   * `spacer_test` (separators);
+  * `group_test`, `video_test` and `calendar_test` (group chats, video, calendar);
   * `stream_rate` (frame rate of a screen share).
 
 ## Releasing an update

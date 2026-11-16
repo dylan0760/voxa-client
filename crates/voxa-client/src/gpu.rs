@@ -68,6 +68,19 @@ fn pick(adapters: &[wgpu::Adapter], surface: Option<&wgpu::Surface<'_>>) -> Resu
 pub fn wgpu_options() -> egui_wgpu::WgpuConfiguration {
     let mut setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
     setup.native_adapter_selector = Some(Arc::new(pick));
+    // Phones (and the emulator) often can't give desktop limits: ask for the mobile-safe
+    // ones, with the largest textures the GPU allows (up to 8192).
+    #[cfg(target_os = "android")]
+    {
+        setup.device_descriptor = Arc::new(|adapter| wgpu::DeviceDescriptor {
+            label: Some("voxa device"),
+            required_limits: wgpu::Limits {
+                max_texture_dimension_2d: adapter.limits().max_texture_dimension_2d.min(8192),
+                ..wgpu::Limits::downlevel_webgl2_defaults()
+            },
+            ..Default::default()
+        });
+    }
     egui_wgpu::WgpuConfiguration {
         surface: egui_wgpu::SurfaceConfig::LOW_LATENCY,
         wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(setup),

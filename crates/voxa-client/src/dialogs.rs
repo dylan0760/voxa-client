@@ -69,6 +69,9 @@ pub struct OptionsDlg {
     pub tab: u8,
     pub audio: AudioSettings,
     pub stream: StreamSettings,
+    pub camera: crate::config::CameraSettings,
+    /// The cameras found when the dialog opened.
+    pub cameras: Vec<crate::camera::CameraDevice>,
     pub nickname: String,
     pub theme: crate::config::ThemeKind,
     pub scale: f32,
@@ -460,6 +463,8 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         tab: 0,
         audio: s.audio.clone(),
         stream: s.stream.clone(),
+        camera: s.camera.clone(),
+        cameras: crate::camera::devices(),
         nickname: s.nickname.clone(),
         theme: s.theme_kind(),
         scale: s.ui_scale,
@@ -744,8 +749,12 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut close = false;
     let mut apply = false;
     egui::Window::new("Options").open(&mut open).collapsible(false).resizable(true).default_size([600.0, 480.0]).show_fill(ctx, |ui| {
-        ui.horizontal(|ui| {
-            for (i, t) in ["Capture", "Playback", "Screen Share", "Hotkeys", "Application"].iter().enumerate() {
+        ui.horizontal_wrapped(|ui| {
+            for (i, t) in ["Capture", "Playback", "Video", "Hotkeys", "Application"].iter().enumerate() {
+                // Android: no global hotkeys.
+                if cfg!(target_os = "android") && i == 3 {
+                    continue;
+                }
                 if ui.selectable_label(d.tab == i as u8, *t).clicked() {
                     d.tab = i as u8;
                 }
@@ -908,26 +917,66 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 });
             }
             2 => {
-                egui::Grid::new("ss").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                    form_row(ui, "Watching:", |ui| {
-                        ui.checkbox(&mut d.auto_watch, "Open screen shares in my channel automatically")
-                            .on_hover_text("When someone in your channel starts sharing, their screen opens above the chat. With several streams, use the tabs to switch.");
+                ui.label(RichText::new("Camera").strong());
+                egui::Grid::new("cam").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                    form_row(ui, "Camera:", |ui| {
+                        let current = d.cameras.iter().find(|c| c.id == d.camera.device).map(|c| c.name.clone());
+                        let label = match (&current, d.camera.device.is_empty()) {
+                            (_, true) => "Default".to_string(),
+                            (Some(n), _) => n.clone(),
+                            (None, _) => "(not connected)".to_string(),
+                        };
+                        egui::ComboBox::from_id_salt("camdev").selected_text(label).width(260.0).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut d.camera.device, String::new(), "Default");
+                            for c in &d.cameras {
+                                ui.selectable_value(&mut d.camera.device, c.id.clone(), &c.name);
+                            }
+                        });
+                        if d.cameras.is_empty() {
+                            ui.label(RichText::new("No camera found").weak());
+                        }
                     });
-                    form_row(ui, "Frame rate:", |ui| {
-                        ui.add(egui::Slider::new(&mut d.stream.fps, 1..=60).suffix(" fps"));
-                    });
-                    form_row(ui, "Maximum width:", |ui| {
-                        egui::ComboBox::from_id_salt("ssw").selected_text(format!("{} px", d.stream.max_width)).show_ui(ui, |ui| {
-                            for w in [854u32, 1280, 1600, 1920, 2560, 3840] {
-                                ui.selectable_value(&mut d.stream.max_width, w, format!("{w} px"));
+                    form_row(ui, "Picture size:", |ui| {
+                        egui::ComboBox::from_id_salt("camres").selected_text(format!("{}p", d.camera.size().1)).show_ui(ui, |ui| {
+                            for h in [360u32, 480, 720] {
+                                ui.selectable_value(&mut d.camera.height, h, format!("{h}p"));
                             }
                         });
                     });
+                    form_row(ui, "Frame rate:", |ui| {
+                        ui.add(egui::Slider::new(&mut d.camera.fps, 5..=30).suffix(" fps"));
+                    });
                     form_row(ui, "Image quality:", |ui| {
-                        ui.add(egui::Slider::new(&mut d.stream.quality, 20..=95));
+                        ui.add(egui::Slider::new(&mut d.camera.quality, 20..=90));
                     });
                 });
-                ui.label(RichText::new("Screen shares are relayed through the server to viewers in your channel.").weak());
+                ui.label(RichText::new("Turn your camera on with the camera button while you are in a channel: everyone in the channel sees it (needs Voxa Server 1.21.0). Bigger pictures and more frames need a faster connection.").weak());
+                // Phones only watch screen shares.
+                if cfg!(windows) {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(RichText::new("Screen sharing").strong());
+                    egui::Grid::new("ss").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+                        form_row(ui, "Watching:", |ui| {
+                            ui.checkbox(&mut d.auto_watch, "Open screen shares in my channel automatically")
+                                .on_hover_text("When someone in your channel starts sharing, their screen opens above the chat. With several streams, use the tabs to switch.");
+                        });
+                        form_row(ui, "Frame rate:", |ui| {
+                            ui.add(egui::Slider::new(&mut d.stream.fps, 1..=60).suffix(" fps"));
+                        });
+                        form_row(ui, "Maximum width:", |ui| {
+                            egui::ComboBox::from_id_salt("ssw").selected_text(format!("{} px", d.stream.max_width)).show_ui(ui, |ui| {
+                                for w in [854u32, 1280, 1600, 1920, 2560, 3840] {
+                                    ui.selectable_value(&mut d.stream.max_width, w, format!("{w} px"));
+                                }
+                            });
+                        });
+                        form_row(ui, "Image quality:", |ui| {
+                            ui.add(egui::Slider::new(&mut d.stream.quality, 20..=95));
+                        });
+                    });
+                    ui.label(RichText::new("Screen shares are relayed through the server to viewers in your channel.").weak());
+                }
             }
             3 => {
                 use crate::hotkeys::{Binding, HotkeyAction, HotkeyEntry};
@@ -1101,6 +1150,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         app.settings.auto_watch_streams = d.auto_watch;
         app.settings.audio = d.audio.clone();
         app.settings.stream = d.stream.clone();
+        app.settings.camera = d.camera.clone();
         if !d.nickname.trim().is_empty() {
             app.settings.nickname = d.nickname.trim().to_string();
         }
@@ -1830,14 +1880,21 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 if ui.button("⟲ Refresh").clicked() {
                     refresh(&mut d);
                 }
+                // Android: what was chosen in Voxa's file browser.
+                if let Some((kind, files)) = crate::files::take(|k| matches!(k, crate::files::PickKind::Upload | crate::files::PickKind::UploadFolder)) {
+                    match kind {
+                        crate::files::PickKind::UploadFolder => ops.extend(files.into_iter().take(1).map(FileOp::UploadFolder)),
+                        _ => ops.push(FileOp::UploadFiles(files)),
+                    }
+                }
                 ui.separator();
                 if ui.button("📄 Upload Files...").clicked() {
-                    if let Some(files) = rfd::FileDialog::new().set_title("Upload files").pick_files() {
+                    if let Some(files) = crate::files::pick(crate::files::PickKind::Upload, "Upload files", &[], true, false) {
                         ops.push(FileOp::UploadFiles(files));
                     }
                 }
                 if ui.button("📂 Upload Folder...").on_hover_text("Uploads a whole folder including its sub-folders").clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().set_title("Upload folder").pick_folder() {
+                    if let Some(folder) = crate::files::pick(crate::files::PickKind::UploadFolder, "Upload folder", &[], false, true).and_then(|f| f.into_iter().next()) {
                         ops.push(FileOp::UploadFolder(folder));
                     }
                 }
@@ -1856,10 +1913,10 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         .collect();
                     if items.len() == 1 && !items[0].1 {
                         let name = items[0].0.rsplit('/').next().unwrap_or(&items[0].0).to_string();
-                        if let Some(p) = rfd::FileDialog::new().set_file_name(&name).save_file() {
+                        if let Some(p) = crate::files::save_as(&name) {
                             ops.push(FileOp::DownloadOne(items[0].0.clone(), p));
                         }
-                    } else if let Some(dest) = rfd::FileDialog::new().set_title("Download into folder").pick_folder() {
+                    } else if let Some(dest) = crate::files::save_folder("Download into folder") {
                         ops.push(FileOp::DownloadMany(items, dest));
                     }
                 }

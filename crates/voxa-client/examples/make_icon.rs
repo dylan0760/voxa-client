@@ -21,4 +21,12 @@ fn main() {
         image::save_buffer(&png, &icon::icon_rgba(256, server), 256, 256, ExtendedColorType::Rgba8).unwrap();
         println!("wrote {name}");
     }
+    // The Android app's launcher icons.
+    let res = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../voxa-android/res");
+    for (dir, s) in [("mipmap-mdpi", 48u32), ("mipmap-hdpi", 72), ("mipmap-xhdpi", 96), ("mipmap-xxhdpi", 144), ("mipmap-xxxhdpi", 192)] {
+        let d = res.join(dir);
+        std::fs::create_dir_all(&d).unwrap();
+        image::save_buffer(d.join("ic_launcher.png"), &icon::icon_rgba(s, false), s, s, ExtendedColorType::Rgba8).unwrap();
+    }
+    println!("wrote the Android icons");
 }
