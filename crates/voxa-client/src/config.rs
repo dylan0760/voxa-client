@@ -97,10 +97,12 @@ pub enum ThemeKind {
     PinkLemonade,
     Aurora,
     Woodland,
+    /// A Miami-style sunset: orange into magenta, with a hot pink accent.
+    ViceCity,
 }
 
 impl ThemeKind {
-    pub const ALL: [ThemeKind; 24] = [
+    pub const ALL: [ThemeKind; 25] = [
         ThemeKind::Dark,
         ThemeKind::Light,
         ThemeKind::Sakura,
@@ -125,6 +127,7 @@ impl ThemeKind {
         ThemeKind::PinkLemonade,
         ThemeKind::Aurora,
         ThemeKind::Woodland,
+        ThemeKind::ViceCity,
     ];
 
     pub fn name(self) -> &'static str {
@@ -153,6 +156,7 @@ impl ThemeKind {
             ThemeKind::PinkLemonade => "Pink Lemonade",
             ThemeKind::Aurora => "Aurora",
             ThemeKind::Woodland => "Woodland",
+            ThemeKind::ViceCity => "Vice City",
         }
     }
 
@@ -160,7 +164,7 @@ impl ThemeKind {
         use ThemeKind::*;
         matches!(
             self,
-            Dark | Crimson | Midnight | Slate | Obsidian | Raincloud | Afterglow | BloodMoon | Nightshade | Twilight | Synthwave | PinkLemonade | Aurora | Woodland
+            Dark | Crimson | Midnight | Slate | Obsidian | Raincloud | Afterglow | BloodMoon | Nightshade | Twilight | Synthwave | PinkLemonade | Aurora | Woodland | ViceCity
         )
     }
 
@@ -376,10 +380,19 @@ impl Settings {
     pub fn load() -> Settings {
         let path = config_dir().join("settings.json");
         let fresh = !path.exists();
-        let mut s: Settings = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
+        let text = std::fs::read_to_string(&path).ok();
+        let mut s: Settings = match text.as_deref().map(serde_json::from_str::<Settings>) {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => {
+                // Unreadable (damaged): keep a copy before the defaults are saved over it,
+                // since it holds the identities.
+                let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                let _ = std::fs::copy(&path, config_dir().join(format!("settings.damaged-{stamp}.json")));
+                eprintln!("settings.json could not be read ({e}); a copy was kept and defaults are used");
+                Settings::default()
+            }
+            None => Settings::default(),
+        };
         s.fresh = fresh;
         if s.identities.is_empty() {
             s.identities.push(Identity::generate("Default"));

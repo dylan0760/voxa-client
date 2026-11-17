@@ -44,6 +44,8 @@ pub enum Open {
     ClientPerms(ClientId),
     /// The avatar editor for an identity.
     Avatar(usize),
+    /// Remove someone who is offline from the server (uid, nickname).
+    ForgetClient(String, String),
 }
 
 /// Someone who sent direct messages while you were offline.
@@ -256,6 +258,8 @@ pub struct Dialogs {
     pub about: bool,
     pub update: bool,
     pub delete_msg: Option<(TextTarget, MessageId, String, String)>,
+    /// Removing someone from the server: (uid, nickname).
+    pub forget: Option<(String, String)>,
     pub clear_chat: Option<TextTarget>,
     /// The chat a delete / clear confirmation was opened for (the selected tab may change,
     /// or it came from the Messages window).
@@ -290,7 +294,7 @@ impl Dialogs {
                 }
             )*};
         }
-        close!(error, link_prompt, web_login, fingerprint, delete_msg, clear_chat, channel_password, away, talk_request, nickname, description);
+        close!(error, link_prompt, web_login, fingerprint, delete_msg, forget, clear_chat, channel_password, away, talk_request, nickname, description);
         close!(ban_client, kick, poke, privkey_use, privkey_create, delete_channel, clone_channel, client_perms, avatar, share, offline, files);
         if self.transfers || self.conn_info || self.about || self.update {
             (self.transfers, self.conn_info, self.about, self.update) = (false, false, false, false);
@@ -300,8 +304,23 @@ impl Dialogs {
         false
     }
 
+    /// A dialog is open (the same ones `close_one` closes).
+    pub fn any_open(&self) -> bool {
+        macro_rules! open {
+            ($($f:ident),*) => { false $(|| self.$f.is_some())* };
+        }
+        open!(error, link_prompt, web_login, fingerprint, delete_msg, forget, clear_chat, channel_password, away, talk_request, nickname, description)
+            || open!(ban_client, kick, poke, privkey_use, privkey_create, delete_channel, clone_channel, client_perms, avatar, share, offline, files)
+            || self.transfers
+            || self.conn_info
+            || self.about
+            || self.update
+            || open!(bans, groups, server, channel, identities, bookmarks, options, connect)
+    }
+
     pub fn close_session_dialogs(&mut self) {
         self.delete_msg = None;
+        self.forget = None;
         self.clear_chat = None;
         self.client_perms = None;
         self.channel = None;
@@ -464,6 +483,7 @@ impl Dialogs {
                 self.chat_key = Some(s.tab);
                 self.clear_chat = Some(t);
             }
+            Open::ForgetClient(uid, name) => self.forget = Some((uid, name)),
             Open::ClientPerms(id) => {
                 if let Some(c) = s.clients.get(&id) {
                     s.conn.send(C2S::GetClientPerms(c.uid.clone()));
@@ -2341,6 +2361,31 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
 // ---------------------------------------------------------------- small prompts
 
 fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
+    // Remove someone from the server (Voxa Server 1.23.0+).
+    if let Some((uid, name)) = app.dlg.forget.take() {
+        let mut open = true;
+        let mut close = false;
+        window("Remove from Server").open(&mut open).show_fill(ctx, |ui| {
+            ui.set_max_width(440.0);
+            ui.label(RichText::new(&name).strong());
+            ui.label(RichText::new(&uid).small().monospace().weak());
+            ui.add_space(4.0);
+            ui.label("The server forgets them: their server groups, personal permissions, channel groups, picture and messages waiting for them. Their chat messages stay.");
+            ui.label(RichText::new("If they connect again they start fresh, like someone new (to keep them out, ban them instead).").small().weak());
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(RichText::new("Remove").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
+                    app.send_mut(C2S::ForgetClient(uid.clone()));
+                    close = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if open && !close {
+            app.dlg.forget = Some((uid, name));
+        }
+    }
     // Delete a single message.
     if let Some((target, id, author, text)) = app.dlg.delete_msg.take() {
         let mut open = true;

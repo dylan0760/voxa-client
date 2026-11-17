@@ -46,6 +46,12 @@ pub enum Action {
     FocusCamera(Option<ClientId>),
     /// Starts a call with a group chat or direct message conversation.
     StartCall(DmId),
+    /// Shows the server calendar (a tab of its own).
+    OpenServerCalendar,
+    /// Phones: slides a side panel in (or out).
+    MobileDrawer(Drawer),
+    /// 📞 on someone in a people list: opens your conversation with them and calls them.
+    CallPerson(String, String),
     /// Joins a call someone started (its channel and password).
     JoinCall(ChannelId, String),
     /// Shows the channel calendar instead of the chat.
@@ -219,6 +225,7 @@ fn solid_palette(kind: ThemeKind) -> Theme {
         ThemeKind::PinkLemonade => two_tone(true, (0xAF, 0x1A, 0x6C), (0xE7, 0xA5, 0x25), (0xB0, 0x22, 0x6A)),
         ThemeKind::Aurora => two_tone(true, (0x06, 0x20, 0x53), (0x10, 0xB6, 0xB6), (0x0B, 0x84, 0x90)),
         ThemeKind::Woodland => two_tone(true, (0x14, 0x22, 0x15), (0x5A, 0x7C, 0x58), (0x4A, 0x75, 0x3A)),
+        ThemeKind::ViceCity => two_tone(true, (0xFF, 0x8A, 0x3D), (0x8E, 0x1E, 0x8C), (0xFF, 0x2E, 0x88)),
         // Mustard yellow (#FFDB58) with a deep mustard accent and brown text.
         ThemeKind::Mustard => Theme {
             rail: c(0xFF, 0xDB, 0x58),
@@ -700,11 +707,18 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
         .frame(Frame::new().fill(t.rail).inner_margin(Margin::symmetric(0, 10)))
         .show(ui, |ui| rail(app, ui));
 
+    // A narrow window (or a big UI scale) shrinks the side columns, so the chat in the
+    // middle keeps room and nothing overlaps.
+    // Too narrow for both side columns: the info panel waits until there is room again.
+    let room = (ctx.content_rect().width() - 68.0 - 380.0).max(0.0);
+    let info_on = show_server && app.show_members && app.fullscreen_stream.is_none() && !(app.player.full && app.player.video.is_some()) && room >= 170.0 + 220.0;
+    let info_w = if room < 170.0 + 290.0 { 220.0 } else { 290.0 };
+    let side_max = if info_on { room - info_w } else { room }.clamp(170.0, 480.0);
     egui::Panel::left("side")
         .resizable(true)
-        .default_size(290.0)
-        .min_size(230.0)
-        .max_size(480.0)
+        .default_size(290.0f32.min(side_max))
+        .min_size(170.0f32.min(side_max))
+        .max_size(side_max)
         .frame(Frame::new().fill(t.side))
         .show(ui, |ui| {
             if show_server {
@@ -720,11 +734,12 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
             app.fullscreen_stream = None;
         }
     }
-    if show_server && app.show_members && app.fullscreen_stream.is_none() && !(app.player.full && app.player.video.is_some()) {
-        egui::Panel::right("info")
-            .resizable(true)
-            .default_size(290.0)
-            .min_size(220.0)
+    if info_on {
+        // When tight, a fixed width: a width remembered from a smaller window (e.g. the
+        // first frames after starting) would cut its content off.
+        let panel = egui::Panel::right("info");
+        let panel = if info_w < 290.0 { panel.resizable(false).exact_size(info_w) } else { panel.resizable(true).default_size(info_w).min_size(220.0).max_size((room - 170.0).max(220.0)) };
+        panel
             .frame(Frame::new().fill(t.side).inner_margin(Margin::same(14)))
             .show(ui, |ui| info_panel(app, ui));
     }
@@ -752,16 +767,18 @@ pub const SERVER_ICON: &str = if cfg!(target_os = "android") { "🖥" } else { "
 
 // ---------------------------------------------------------------- phones
 
-/// The page a phone shows (one at a time, picked in the bar at the bottom).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MobilePage {
-    Home,
-    Channels,
-    Chat,
-    People,
+/// The side panel slid over the chat on a phone, like Discord: the servers and channels
+/// on the left, the info and people on the right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Drawer {
+    #[default]
+    None,
+    Left,
+    Right,
 }
 
-/// A phone-sized screen (Android): one page at a time instead of side-by-side columns.
+/// A phone-sized screen (Android): the chat fills the screen, with side panels that slide
+/// over it instead of side-by-side columns.
 pub fn is_mobile(ctx: &egui::Context) -> bool {
     cfg!(target_os = "android") && ctx.content_rect().width() < 720.0
 }
@@ -781,83 +798,89 @@ pub fn safe_rect(ctx: &egui::Context) -> egui::Rect {
     full
 }
 
-/// The phone layout: Home, Channels, Chat and People as pages, chosen at the bottom.
+/// The phone layout, like Discord's app: the chat (or Home) fills the screen; ☰ at the top
+/// left (or a swipe to the right) slides in the servers and channels, 👥 at the top right
+/// (or a swipe to the left) the info and people.
 fn mobile_layout(app: &mut VoxaApp, ui: &mut Ui, show_server: bool) {
     let t = theme();
     let ctx = ui.ctx().clone();
     let full = ctx.content_rect();
     let safe = safe_rect(&ctx);
-    // Follow along: connecting shows the channels, opening a direct message its chat.
-    let connected = app.sess.as_ref().is_some_and(|s| s.welcomed);
-    let tab = app.sess.as_ref().map(|s| s.tab);
-    if connected && !app.mobile_seen.0 {
-        app.mobile_page = MobilePage::Channels;
+    // Follow along: joining a channel or opening a conversation shows its chat, and
+    // picking someone in the channel list shows who they are.
+    let seen = app.sess.as_ref().map(|s| (s.my_channel(), s.tab, s.selected));
+    if seen != app.mobile_seen {
+        if let (Some((ch, tab, sel)), Some((old_ch, old_tab, old_sel))) = (seen, app.mobile_seen) {
+            if ch != old_ch || tab != old_tab {
+                app.mobile_drawer = Drawer::None;
+            } else if sel != old_sel && matches!(sel, Selection::Client(_)) && app.mobile_drawer == Drawer::Left {
+                app.people_view = false;
+                app.mobile_drawer = Drawer::Right;
+            }
+        }
+        app.mobile_seen = seen;
     }
-    if matches!(tab, Some(ChatKey::Dm(_))) && tab != app.mobile_seen.1 {
-        app.mobile_page = MobilePage::Chat;
+    // Dialogs open as pages above the chat (a panel would cover them).
+    if app.dlg.any_open() || app.whats_new.is_some() {
+        app.mobile_drawer = Drawer::None;
     }
-    app.mobile_seen = (connected, tab);
-    if !show_server {
-        app.mobile_page = MobilePage::Home;
+    // Nothing on the right before connecting.
+    if !show_server && app.mobile_drawer == Drawer::Right {
+        app.mobile_drawer = Drawer::None;
     }
-    // Android's back button: one page back; from Home, Voxa goes to the background (and
-    // stays connected).
+    // Android's back button: an open menu, page (dialog, file browser, calendar event) or
+    // the right panel closes first; from the chat it opens the channels, and from there
+    // Voxa goes to the background (it stays connected).
     let back = ctx.input(|i| i.key_pressed(egui::Key::BrowserBack));
-    // An open menu, then page (dialog, file browser, calendar event) closes first.
     let closed = back
         && (egui::Popup::is_any_open(&ctx) && {
             egui::Popup::close_all(&ctx);
             true
         } || crate::files::close_browser()
             || app.dlg.close_one()
-            || app.sess.as_mut().is_some_and(|s| s.cal_ui.form.take().is_some() || s.cal_ui.open_event.take().is_some()));
+            || app.whats_new.take().is_some()
+            || app.sess.as_mut().is_some_and(|s| {
+                let cal = if s.server_calendar_open { &mut s.server_cal_ui } else { &mut s.cal_ui };
+                cal.form.take().is_some() || cal.open_event.take().is_some()
+            }));
     if back && !closed {
-        match app.mobile_page {
-            MobilePage::Chat | MobilePage::People => app.mobile_page = MobilePage::Channels,
-            MobilePage::Channels => {
-                app.mobile_page = MobilePage::Home;
-                app.actions.push(Action::Home(true));
-            }
-            MobilePage::Home => {
+        match app.mobile_drawer {
+            Drawer::Right => app.mobile_drawer = Drawer::None,
+            Drawer::None if show_server => app.mobile_drawer = Drawer::Left,
+            _ => {
+                app.mobile_drawer = Drawer::None;
                 #[cfg(target_os = "android")]
                 crate::mobile::to_background();
             }
         }
     }
+    // Swipes: right opens the channels (or closes the info), left opens the info (or
+    // closes the channels). Mostly sideways, so scrolling the chat never opens a panel.
+    let (origin, latest, down) = ctx.input(|i| (i.pointer.press_origin(), i.pointer.latest_pos(), i.pointer.primary_down()));
+    if down && !app.dlg.any_open() && !egui::Popup::is_any_open(&ctx) {
+        if let (Some(o), Some(p)) = (origin, latest) {
+            let d = p - o;
+            if !app.mobile_swiped && d.x.abs() > 70.0 && d.y.abs() < d.x.abs() * 0.4 {
+                app.mobile_swiped = true;
+                app.mobile_drawer = match (app.mobile_drawer, d.x > 0.0) {
+                    (Drawer::None, true) => Drawer::Left,
+                    (Drawer::None, false) if show_server => Drawer::Right,
+                    (Drawer::Left, false) | (Drawer::Right, true) => Drawer::None,
+                    (now, _) => now,
+                };
+            }
+        }
+    } else {
+        app.mobile_swiped = false;
+    }
 
     egui::Panel::top("m_inset_top").exact_size((safe.top() - full.top()).max(0.0)).frame(Frame::new().fill(t.rail)).show(ui, |_| {});
     egui::Panel::bottom("m_inset_bottom").exact_size((full.bottom() - safe.bottom()).max(0.0)).frame(Frame::new().fill(t.rail)).show(ui, |_| {});
     let keyboard_up = full.bottom() - safe.bottom() > 150.0;
-    // The page bar (hidden while typing, to leave room for the chat).
-    if !keyboard_up {
-        let unread: usize = app.sess.as_ref().map(|s| s.dms.iter().map(|d| d.log.unread).sum::<usize>() + s.server_log.unread).unwrap_or(0);
-        egui::Panel::bottom("m_nav").frame(Frame::new().fill(t.rail).inner_margin(Margin::symmetric(4, 6))).show(ui, |ui| {
-            ui.columns(4, |cols| {
-                let pages = [
-                    (MobilePage::Home, "🏠", "Home".to_string()),
-                    (MobilePage::Channels, "#", "Channels".to_string()),
-                    (MobilePage::Chat, "💬", if unread > 0 { format!("Chat ({unread})") } else { "Chat".to_string() }),
-                    (MobilePage::People, "👥", "People".to_string()),
-                ];
-                for (col, (page, icon, label)) in cols.iter_mut().zip(pages) {
-                    let enabled = page == MobilePage::Home || app.sess.is_some();
-                    let on = app.mobile_page == page;
-                    let text = RichText::new(format!("{icon}\n{label}")).size(13.0).color(if on { accent() } else { t.dim });
-                    let b = egui::Button::new(text).frame(false).min_size(egui::vec2(64.0, 48.0));
-                    let clicked = col.vertical_centered(|ui| ui.add_enabled(enabled, b).clicked()).inner;
-                    if clicked {
-                        app.mobile_page = page;
-                        app.actions.push(Action::Home(page == MobilePage::Home));
-                    }
-                }
-            });
-        });
-    }
-    let page = app.mobile_page;
     // Push-to-talk on a phone: a big button to hold (there is no key for it).
     let in_channel = app.sess.as_ref().is_some_and(|s| s.welcomed && s.my_channel() != NO_CHANNEL);
     let mut ptt_held = false;
-    if in_channel && !keyboard_up && app.settings.audio.mode == crate::config::VoiceMode::PushToTalk && matches!(page, MobilePage::Channels | MobilePage::People) {
+    if show_server && in_channel && !keyboard_up && app.settings.audio.mode == crate::config::VoiceMode::PushToTalk {
         egui::Panel::bottom("m_ptt").frame(Frame::new().fill(t.rail).inner_margin(Margin::symmetric(12, 8))).show(ui, |ui| {
             let held_before = app.voice_shared.ptt_button.load(Ordering::Relaxed);
             let (fill, label) = if held_before { (GREEN, "🎤  Talking...") } else { (accent(), "🎤  Hold to talk") };
@@ -868,31 +891,100 @@ fn mobile_layout(app: &mut VoxaApp, ui: &mut Ui, show_server: bool) {
     if app.voice_shared.ptt_button.swap(ptt_held, Ordering::Relaxed) != ptt_held {
         ctx.request_repaint();
     }
-    egui::CentralPanel::default().frame(Frame::new().fill(if page == MobilePage::Chat { t.main } else { t.side })).show(ui, |ui| match page {
-        MobilePage::Home => {
-            Frame::new().fill(t.rail).inner_margin(Margin::symmetric(8, 8)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                mobile_home_bar(app, ui);
+    egui::CentralPanel::default().frame(Frame::new().fill(t.main)).show(ui, |ui| {
+        if !show_server {
+            mobile_home(app, ui);
+        } else if app.player.full && app.player.video.is_some() {
+            Frame::new().inner_margin(Margin::same(6)).show(ui, |ui| player_view(app, ui));
+        } else if let Some(id) = app.fullscreen_stream {
+            Frame::new().inner_margin(Margin::same(6)).show(ui, |ui| stream_view(app, ui, id, true));
+        } else {
+            main_view(app, ui);
+        }
+    });
+
+    // The side panels, sliding in over a dimmed chat.
+    let left = ctx.animate_bool_with_time(egui::Id::unique("m_drawer_left"), app.mobile_drawer == Drawer::Left, 0.18);
+    let right = ctx.animate_bool_with_time(egui::Id::unique("m_drawer_right"), app.mobile_drawer == Drawer::Right, 0.18);
+    let shown = left.max(right);
+    if shown <= 0.0 {
+        return;
+    }
+    egui::Area::new(egui::Id::unique("m_shade")).order(egui::Order::Foreground).fixed_pos(safe.min).show(&ctx, |ui| {
+        let (r, resp) = ui.allocate_exact_size(safe.size(), Sense::click());
+        ui.painter().rect_filled(r, 0, Color32::from_black_alpha((160.0 * shown) as u8));
+        if resp.clicked() {
+            app.mobile_drawer = Drawer::None;
+        }
+    });
+    let w = (safe.width() * 0.86).min(400.0);
+    let drawer = |x: f32, id: &str| egui::Area::new(egui::Id::unique(id)).order(egui::Order::Foreground).fixed_pos(egui::pos2(x, safe.top()));
+    if left > 0.0 {
+        drawer(safe.left() - w * (1.0 - left), "m_left").show(&ctx, |ui| {
+            let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(w, safe.height()));
+            ui.painter().rect_filled(rect, 0, t.side);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                ui.set_min_size(rect.size());
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    // The servers (and Home) like Discord's rail.
+                    let rail_rect = egui::Rect::from_min_size(rect.min, egui::vec2(68.0, rect.height()));
+                    ui.painter().rect_filled(rail_rect, 0, t.rail);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rail_rect.shrink2(egui::vec2(0.0, 10.0))), |ui| rail(app, ui));
+                    let rest = egui::Rect::from_min_max(egui::pos2(rail_rect.right(), rect.top()), rect.max);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(rest), |ui| {
+                        if show_server {
+                            server_column(app, ui);
+                        } else {
+                            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| home_column(app, ui));
+                        }
+                    });
+                });
             });
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| home_column(app, ui));
-        }
-        MobilePage::Channels => server_column(app, ui),
-        MobilePage::Chat => {
-            if app.player.full && app.player.video.is_some() {
-                Frame::new().inner_margin(Margin::same(6)).show(ui, |ui| player_view(app, ui));
-            } else if let Some(id) = app.fullscreen_stream {
-                Frame::new().inner_margin(Margin::same(6)).show(ui, |ui| stream_view(app, ui, id, true));
-            } else {
-                main_view(app, ui);
+        });
+    }
+    if right > 0.0 {
+        drawer(safe.right() - w * right, "m_right").show(&ctx, |ui| {
+            let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(w, safe.height()));
+            ui.painter().rect_filled(rect, 0, t.side);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(12.0)), |ui| {
+                ui.set_min_size(rect.shrink(12.0).size());
+                info_panel(app, ui);
+            });
+        });
+    }
+}
+
+/// The phone's Home screen (not on a server): a bar like the chat's, with ☰ for the
+/// servers, then bookmarks and recent servers.
+fn mobile_home(app: &mut VoxaApp, ui: &mut Ui) {
+    let t = theme();
+    egui::Panel::top("m_home_head").frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin::symmetric(10, 8))).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            if icon_button(ui, "☰", "Servers and channels", None).clicked() {
+                app.mobile_drawer = Drawer::Left;
             }
-        }
-        MobilePage::People => {
-            Frame::new().inner_margin(Margin::same(12)).show(ui, |ui| info_panel(app, ui));
-        }
+            ui.label(RichText::new("Voxa").strong().size(18.0));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if icon_button(ui, "⚙", "Settings", None).clicked() {
+                    app.actions.push(Action::Dialog(dialogs::Open::Options));
+                }
+                if icon_button(ui, "➕", "Connect to a server", None).clicked() {
+                    app.actions.push(Action::Dialog(dialogs::Open::Connect));
+                }
+            });
+        });
+    });
+    egui::CentralPanel::default().frame(Frame::new().fill(t.inner(t.side))).show(ui, |ui| {
+        Frame::new().inner_margin(Margin::symmetric(8, 8)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            mobile_home_bar(app, ui);
+        });
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| home_column(app, ui));
     });
 }
 
-/// The phone's Home page: what the server rail holds on Windows.
+/// The phone's Home buttons: what the server rail holds on Windows.
 fn mobile_home_bar(app: &mut VoxaApp, ui: &mut Ui) {
     let a = &mut app.actions;
     ui.horizontal_wrapped(|ui| {
@@ -901,20 +993,13 @@ fn mobile_home_bar(app: &mut VoxaApp, ui: &mut Ui) {
             let name = s.server.as_ref().map(|i| i.name.clone()).unwrap_or(s.req.label.clone());
             if ui.add(egui::Button::new(RichText::new(format!("{SERVER_ICON} {name}")).color(Color32::WHITE)).fill(accent())).clicked() {
                 a.push(Action::Home(false));
-                app.mobile_page = MobilePage::Channels;
             }
-        }
-        if ui.button("➕ Connect").clicked() {
-            a.push(Action::Dialog(dialogs::Open::Connect));
         }
         if ui.button("📑 Bookmarks").clicked() {
             a.push(Action::Dialog(dialogs::Open::Bookmarks));
         }
         if ui.button("👤 Identities").clicked() {
             a.push(Action::Dialog(dialogs::Open::Identities));
-        }
-        if ui.button("⚙ Settings").clicked() {
-            a.push(Action::Dialog(dialogs::Open::Options));
         }
         if ui.button("? About").clicked() {
             a.push(Action::Dialog(dialogs::Open::About));
@@ -1193,46 +1278,78 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
     let me = s.me().cloned();
     if s.welcomed {
         // Voice connected card.
-        ui.horizontal(|ui| {
+        let srv = s.server.as_ref().map(|i| i.name.clone()).unwrap_or_default();
+        let in_channel = s.my_channel() != NO_CHANNEL;
+        let (title, sub) = if in_channel {
+            let ch = s.channels.get(&s.my_channel()).map(|c| c.name.clone()).unwrap_or_default();
+            ("📶 Voice Connected", format!("{ch} / {srv}"))
+        } else {
+            ("🌐 Connected", format!("Not in a channel / {srv}"))
+        };
+        let sharing = s.streamer.is_some();
+        let cam_on = s.camera.is_some();
+        // Leave the channel but stay on the server (servers 1.17.0+).
+        let show_leave = in_channel && s.supports("1.17.0");
+        let show_preview = s.streamer.as_ref().map(|st| !st.preview_on.load(Ordering::Relaxed)).unwrap_or(false);
+        // Video: your camera for everyone in the channel (servers 1.21.0+).
+        let show_cam = (in_channel || cam_on) && s.supports("1.21.0");
+        // Screens are shared with a channel, so not outside one (phones can watch streams,
+        // but not share their screen).
+        let show_share = CAN_SHARE && (in_channel || sharing);
+        let vping = shared.ping_ms.load(Ordering::Relaxed);
+        let ping = format!("{} ms", if vping > 0 { vping } else { s.tcp_ping });
+        let buttons = |ui: &mut Ui, a: &mut Vec<Action>, show_ping: bool| {
+            if icon_button(ui, "⏏", "Disconnect from the server", Some(RED)).clicked() {
+                a.push(Action::Disconnect);
+            }
+            if show_leave && icon_button(ui, "🚪", "Leave the channel (stay connected to the server)", None).clicked() {
+                a.push(Action::Send(C2S::SwitchChannel { channel: NO_CHANNEL, password: None }));
+            }
+            if show_preview && icon_button(ui, "👁", "Show the preview of your own stream", None).clicked() {
+                a.push(Action::Watch(s.me, true));
+            }
+            if show_cam && icon_button(ui, "📷", if cam_on { "Turn your camera off" } else { "Turn your camera on (video for everyone in the channel)" }, cam_on.then_some(GREEN)).clicked() {
+                a.push(Action::ToggleCamera);
+            }
+            if show_share && icon_button(ui, "🖥", if sharing { "Stop sharing your screen" } else { "Share your screen or an application" }, sharing.then_some(RED)).clicked() {
+                a.push(Action::ShareScreen);
+            }
+            if show_ping {
+                ui.label(RichText::new(&ping).small().color(t.dim)).on_hover_text("Voice ping. All traffic is end-to-server encrypted.");
+            }
+        };
+        // Side by side when it fits, otherwise the buttons go on a row of their own (a
+        // narrow channel list, a big UI scale, long channel names).
+        let gap = ui.spacing().item_spacing.x;
+        let n = 1 + [show_leave, show_preview, show_cam, show_share].iter().filter(|b| **b).count();
+        let small = egui::TextStyle::Small.resolve(ui.style());
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        let width = |text: &str, font: FontId| ui.painter().layout_no_wrap(text.to_string(), font, Color32::WHITE).size().x;
+        let buttons_w = n as f32 * (30.0 + gap) + width(&ping, small.clone()) + gap;
+        let text_w = width(title, body).max(width(&sub, small));
+        let status = |ui: &mut Ui| {
             ui.vertical(|ui| {
-                let srv = s.server.as_ref().map(|i| i.name.clone()).unwrap_or_default();
-                if s.my_channel() == NO_CHANNEL {
-                    ui.label(RichText::new("🌐 Connected").color(GREEN).strong());
-                    ui.label(RichText::new(format!("Not in a channel / {srv}")).small().color(t.dim));
-                } else {
-                    ui.label(RichText::new("📶 Voice Connected").color(GREEN).strong());
-                    let ch = s.channels.get(&s.my_channel()).map(|c| c.name.clone()).unwrap_or_default();
-                    ui.label(RichText::new(format!("{ch} / {srv}")).small().color(t.dim));
-                }
+                ui.add(egui::Label::new(RichText::new(title).color(GREEN).strong()).truncate());
+                ui.add(egui::Label::new(RichText::new(&sub).small().color(t.dim)).truncate()).on_hover_text(format!("{sub}
+{ping} voice ping"));
             });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, "⏏", "Disconnect from the server", Some(RED)).clicked() {
-                    a.push(Action::Disconnect);
-                }
-                let in_channel = s.my_channel() != NO_CHANNEL;
-                // Leave the channel but stay on the server (servers 1.17.0+).
-                if in_channel && s.supports("1.17.0") && icon_button(ui, "🚪", "Leave the channel (stay connected to the server)", None).clicked() {
-                    a.push(Action::Send(C2S::SwitchChannel { channel: NO_CHANNEL, password: None }));
-                }
-                let sharing = s.streamer.is_some();
-                if s.streamer.as_ref().map(|st| !st.preview_on.load(Ordering::Relaxed)).unwrap_or(false) && icon_button(ui, "👁", "Show the preview of your own stream", None).clicked() {
-                    a.push(Action::Watch(s.me, true));
-                }
-                // Screens are shared with a channel, so not outside one.
-                // Video: your camera for everyone in the channel (servers 1.21.0+).
-                let cam_on = s.camera.is_some();
-                if (in_channel || cam_on) && s.supports("1.21.0") && icon_button(ui, "📷", if cam_on { "Turn your camera off" } else { "Turn your camera on (video for everyone in the channel)" }, cam_on.then_some(GREEN)).clicked() {
-                    a.push(Action::ToggleCamera);
-                }
-                // (Phones can watch streams, but not share their screen.)
-                if CAN_SHARE && (in_channel || sharing) && icon_button(ui, "🖥", if sharing { "Stop sharing your screen" } else { "Share your screen or an application" }, sharing.then_some(RED)).clicked() {
-                    a.push(Action::ShareScreen);
-                }
-                let vping = shared.ping_ms.load(Ordering::Relaxed);
-                ui.label(RichText::new(format!("{} ms", if vping > 0 { vping } else { s.tcp_ping })).small().color(t.dim))
-                    .on_hover_text("Voice ping. All traffic is end-to-server encrypted.");
+        };
+        if text_w + buttons_w + gap <= ui.available_width() {
+            ui.horizontal(|ui| {
+                status(ui);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| buttons(ui, a, true));
             });
-        });
+        } else {
+            status(ui);
+            // Very narrow: closer buttons, and the ping only in the tooltip above.
+            let show_ping = buttons_w <= ui.available_width();
+            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 30.0), Layout::right_to_left(Align::Center), |ui| {
+                if !show_ping {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                }
+                buttons(ui, a, show_ping)
+            });
+        }
         if let Some(m) = &me {
             if !s.can_talk(m) {
                 ui.label(RichText::new("✋ You need talk power to speak here").small().color(YELLOW));
@@ -1265,10 +1382,20 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
             Some(_) => ("Online".to_string(), GREEN),
             None => ("Connecting".to_string(), t.dim),
         };
-        let menu = ui.vertical(|ui| {
+        // Room for the buttons on the right whatever the name's length. Narrow: the buttons
+        // closer together, and no ⚙ (Settings is in the rail on the left too).
+        let narrow = ui.available_width() - 3.0 * 38.0 - 8.0 < 70.0;
+        if narrow {
+            ui.spacing_mut().item_spacing.x = 2.0;
+        }
+        let gear = !narrow || is_mobile(ui.ctx());
+        let gap = ui.spacing().item_spacing.x;
+        let n = if gear { 3.0 } else { 2.0 };
+        let name_w = (ui.available_width() - n * (30.0 + gap) - gap).max(40.0);
+        let menu = ui.allocate_ui_with_layout(egui::vec2(name_w, 32.0), Layout::top_down(Align::Min), |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(RichText::new(&name).strong());
-            ui.label(RichText::new(format!("● {}", status.0)).small().color(status.1));
+            ui.add(egui::Label::new(RichText::new(&name).strong()).truncate().selectable(false));
+            ui.add(egui::Label::new(RichText::new(format!("● {}", status.0)).small().color(status.1)).truncate().selectable(false));
         });
         let resp = r.union(menu.response.interact(Sense::click()));
         egui::Popup::menu(&resp).show(|ui| {
@@ -1331,7 +1458,7 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
             }
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, "⚙", "Settings", None).clicked() {
+            if gear && icon_button(ui, "⚙", "Settings", None).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Options));
             }
             let spk = me.as_ref().map(|m| m.output_muted).unwrap_or(false);
@@ -1922,7 +2049,8 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
 fn grid_row(ui: &mut Ui, k: &str, v: impl Into<egui::WidgetText>) {
     let t = theme();
     ui.label(RichText::new(k).color(t.dim));
-    ui.label(v);
+    // Wrapped: a long value (the fingerprint) must not widen the panel past the window.
+    ui.add(egui::Label::new(v).wrap());
     ui.end_row();
 }
 
@@ -2015,6 +2143,8 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
     }
     offline.retain(|(uid, name, _)| *uid != s.my_uid && matches(name));
     offline.sort_by(|a, b| b.2.cmp(&a.2).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    let can_call = s.me().is_some_and(|m| s.server_perms_of(m) & perm::CHANNEL_CREATE_TEMPORARY != 0);
+    let can_forget = s.supports("1.23.0") && s.my_server_perms() & perm::GROUP_MANAGE != 0;
     let a = &mut app.actions;
     let now = now_unix();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -2033,6 +2163,14 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
                         });
                         ui.label(RichText::new(sub).small().color(t.dim));
                     });
+                    // Calls need them online (the call's channel password goes to them).
+                    if online && can_call {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if icon_button(ui, "📞", "Call (voice, camera optional)", None).clicked() {
+                                a.push(Action::CallPerson(uid.to_string(), name.to_string()));
+                            }
+                        });
+                    }
                 });
             });
             let tip = if online { "Send a direct message" } else { "Send a message: it is delivered when they come online" };
@@ -2040,6 +2178,21 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
             if r.clicked() {
                 a.push(Action::OpenDm(uid.to_string(), name.to_string()));
             }
+            r.context_menu(|ui| {
+                ui.label(RichText::new(name).strong());
+                if ui.button("💬  Send message").clicked() {
+                    a.push(Action::OpenDm(uid.to_string(), name.to_string()));
+                    ui.close();
+                }
+                if online && can_call && ui.button("📞  Call").clicked() {
+                    a.push(Action::CallPerson(uid.to_string(), name.to_string()));
+                    ui.close();
+                }
+                if !online && can_forget && ui.button(RichText::new("🗑  Remove from server…").color(RED)).on_hover_text("Forget them: groups, permissions, picture (they start fresh if they come back)").clicked() {
+                    a.push(Action::Dialog(dialogs::Open::ForgetClient(uid.to_string(), name.to_string())));
+                    ui.close();
+                }
+            });
         };
         section(ui, &format!("Online — {}", online.len()));
         for c in &online {
@@ -2265,15 +2418,13 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
             ),
         },
     };
+    let (title, topic) = if s.server_calendar_open && s.sees_server_calendar() { ("📆  Server calendar".to_string(), "Game nights and events of the whole server".to_string()) } else { (title, topic) };
     let my_channel = s.my_channel();
     let a = &mut app.actions;
     egui::Panel::top("mainhead").frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin::symmetric(14, 8))).show(ui, |ui| {
+        // The buttons first (right to left), then the title and topic in the space left,
+        // shortened with … when it is narrow (so nothing overlaps).
         ui.horizontal(|ui| {
-            ui.label(RichText::new(title).strong().size(16.0));
-            if !topic.is_empty() {
-                ui.separator();
-                ui.label(RichText::new(topic).color(t.dim));
-            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_button(ui, "👥", "Show / hide info panel", app.show_members.then_some(accent())).clicked() {
                     a.push(Action::ToggleMembers);
@@ -2309,13 +2460,25 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                         a.push(Action::Dialog(dialogs::Open::ClearChat(tg)));
                     }
                 }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    // Phones: ☰ at the top left slides in the servers and channels.
+                    if is_mobile(ui.ctx()) && icon_button(ui, "☰", "Servers and channels", None).clicked() {
+                        a.push(Action::MobileDrawer(Drawer::Left));
+                    }
+                    ui.add(egui::Label::new(RichText::new(&title).strong().size(16.0)).truncate()).on_hover_text(&title);
+                    if !topic.is_empty() && ui.available_width() > 60.0 {
+                        ui.separator();
+                        ui.add(egui::Label::new(RichText::new(&topic).color(t.dim)).truncate()).on_hover_text(&topic);
+                    }
+                });
             });
         });
         // Conversation tabs.
         ui.horizontal_wrapped(|ui| {
             let mut open_cal = false;
+            let mut open_server_cal = false;
             let mut tab = |ui: &mut Ui, key: ChatKey, label: String, unread: usize| {
-                let sel = s.tab == key && !s.calendar_open;
+                let sel = s.tab == key && !s.calendar_open && !s.server_calendar_open;
                 let text = if unread > 0 { format!("{label}  {unread}") } else { label };
                 let mut rt = RichText::new(text).small();
                 if sel {
@@ -2340,6 +2503,14 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 }
             }
             tab(ui, ChatKey::Server, format!("{SERVER_ICON} Server"), s.server_log.unread);
+            // The server calendar: whatever channel I am in (servers 1.23.0+).
+            if s.sees_server_calendar() {
+                let on = s.server_calendar_open;
+                let b = egui::Button::new(RichText::new("📆 Server calendar").small().color(if on { Color32::WHITE } else { t.dim })).fill(if on { accent() } else { t.card }).corner_radius(12);
+                if ui.add(b).on_hover_text("The whole server's calendar: game nights and the channel to meet in").clicked() {
+                    open_server_cal = true;
+                }
+            }
             if app.settings.dm_window {
                 // Direct messages are in the Messages window: one button for it.
                 let unread: usize = s.dms.iter().map(|d| d.log.unread).sum();
@@ -2364,6 +2535,9 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
             }
             if open_cal {
                 a.push(Action::OpenCalendar);
+            }
+            if open_server_cal {
+                a.push(Action::OpenServerCalendar);
             }
             if let ChatKey::Dm(id) = s.tab {
                 if ui.small_button("✖").on_hover_text("Close conversation").clicked() {
@@ -2450,9 +2624,17 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
             });
     }
     let Some(s) = &mut app.sess else { return };
-    // The channel calendar instead of the chat.
+    // The server calendar, or the channel calendar, instead of the chat.
+    if s.server_calendar_open && s.sees_server_calendar() {
+        crate::calendar::view(s, ui, SERVER_CALENDAR);
+        if let Some(ch) = s.server_cal_ui.join.take() {
+            app.actions.push(Action::Join(ch));
+        }
+        return;
+    }
     if s.calendar_open && s.sees_calendar() {
-        crate::calendar::view(s, ui);
+        let ch = s.my_channel();
+        crate::calendar::view(s, ui, ch);
         return;
     }
     // Images dragged in from Explorer are sent to the open chat (unless the file browser
@@ -2685,6 +2867,7 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
     let VoxaApp { sess, actions, settings, previews, dm_create_blocked, .. } = app;
     let Some(s) = sess.as_mut() else { return };
     let mut chat_actions: Vec<Action> = Vec::new();
+    let mut calls: Vec<Action> = Vec::new();
     let made = guarded(|| ctx.show_viewport_immediate(vid, builder, |ui, _class| {
         if ui.input(|i| i.viewport().close_requested()) {
             // Hidden, not destroyed: making it again may not be possible from the tray.
@@ -2704,6 +2887,12 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
         egui::Panel::left("dm_list").resizable(false).exact_size(250.0).frame(Frame::new().fill(t.side).inner_margin(Margin::same(8))).show(ui, |ui| {
             messages_sidebar(s, ui, &open_ids, sel);
         });
+        if let Some(id) = s.dm_win.call.take() {
+            calls.push(Action::StartCall(id));
+        }
+        if let Some((uid, name)) = s.dm_win.forget.take() {
+            calls.push(Action::Dialog(dialogs::Open::ForgetClient(uid, name)));
+        }
         egui::CentralPanel::default().frame(Frame::new().fill(t.main)).show(ui, |ui| {
             if s.dm_win.compose.is_some() {
                 group_compose(s, ui);
@@ -2720,6 +2909,7 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
         });
     }));
     *dm_create_blocked |= made.is_none();
+    actions.append(&mut calls);
     // Everything the chat asked for applies to its conversation.
     if let Some(sel) = sel {
         actions.extend(chat_actions.into_iter().map(|a| Action::InDm(sel, Box::new(a))));
@@ -2827,8 +3017,8 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
                 (None, Some(Presence::Invisible)) => (Color32::GRAY, "Invisible".to_string()),
                 _ => (GREEN, s.clients.get(&cid).and_then(|c| s.channels.get(&c.channel)).map(|ch| format!("in {}", ch.name)).unwrap_or_else(|| "on the server".into())),
             };
-            let r = messages_row(ui, false, (&name, &uid), Some(dot), &name, (&status, t.dim), 0).on_hover_text("Click to chat, right-click for more");
-            person_menu(s, &r, &uid, &name, groups_ok);
+            let r = messages_row(ui, false, (&name, &uid), Some(dot), &name, (&status, t.dim), 0).on_hover_text("Click to chat, right-click to call and more");
+            person_menu(s, &r, &uid, &name, groups_ok, true);
             if r.clicked() {
                 let id = s.dm_open(&uid, &name);
                 s.dm_win.sel = Some(id);
@@ -2843,7 +3033,7 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
         for (uid, name, seen) in offline {
             let sub = if seen == 0 { "Offline".to_string() } else { format!("Seen {} ago", fmt_duration(now.saturating_sub(seen))) };
             let r = messages_row(ui, false, (&name, &uid), None, &name, (&sub, t.dim), 0).on_hover_text("Messages are delivered when they come online");
-            person_menu(s, &r, &uid, &name, groups_ok);
+            person_menu(s, &r, &uid, &name, groups_ok, false);
             if r.clicked() {
                 let id = s.dm_open(&uid, &name);
                 s.dm_win.sel = Some(id);
@@ -2854,13 +3044,24 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
 }
 
 /// Right-click menu of a person in the Messages window.
-fn person_menu(s: &mut Session, r: &egui::Response, uid: &str, name: &str, groups_ok: bool) {
+fn person_menu(s: &mut Session, r: &egui::Response, uid: &str, name: &str, groups_ok: bool, online: bool) {
     r.context_menu(|ui| {
         ui.label(RichText::new(name).strong());
         if ui.button("💬  Send message").clicked() {
             let id = s.dm_open(uid, name);
             s.dm_win.sel = Some(id);
             s.dm_win.compose = None;
+            ui.close();
+        }
+        if online && ui.button("📞  Call").on_hover_text("Voice, camera optional").clicked() {
+            let id = s.dm_open(uid, name);
+            s.dm_win.sel = Some(id);
+            s.dm_win.compose = None;
+            s.dm_win.call = Some(id);
+            ui.close();
+        }
+        if !online && s.supports("1.23.0") && s.my_server_perms() & perm::GROUP_MANAGE != 0 && ui.button(RichText::new("🗑  Remove from server…").color(RED)).clicked() {
+            s.dm_win.forget = Some((uid.to_string(), name.to_string()));
             ui.close();
         }
         if !groups_ok {
@@ -4165,11 +4366,19 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
             if let Some(s) = &mut app.sess {
                 s.tab = k;
                 s.calendar_open = false;
+                s.server_calendar_open = false;
             }
         }
         Action::OpenCalendar => {
             if let Some(s) = &mut app.sess {
                 s.calendar_open = true;
+                s.server_calendar_open = false;
+            }
+        }
+        Action::OpenServerCalendar => {
+            if let Some(s) = &mut app.sess {
+                s.server_calendar_open = true;
+                s.calendar_open = false;
             }
         }
         Action::CloseTab(id) => {
@@ -4265,6 +4474,16 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         }
         Action::ToggleCamera => toggle_camera(app),
         Action::StartCall(id) => start_call(app, id),
+        Action::CallPerson(uid, name) => {
+            let popped = app.settings.dm_window;
+            let Some(s) = &mut app.sess else { return };
+            if uid == s.my_uid {
+                return;
+            }
+            let dm = s.dm_open(&uid, &name);
+            show_dm(s, dm, popped);
+            start_call(app, dm);
+        }
         Action::JoinCall(ch, pw) => {
             let Some(s) = &mut app.sess else { return };
             if !s.channels.contains_key(&ch) {
@@ -4364,6 +4583,15 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
             None => app.dlg.open_offline(o, &app.settings),
         },
         Action::Home(h) => app.home = h,
+        Action::MobileDrawer(d) => app.mobile_drawer = d,
+        // Phones: the info and people slide in from the right instead.
+        Action::ToggleMembers if is_mobile(&app.ctx) => {
+            app.mobile_drawer = if app.mobile_drawer == Drawer::Right { Drawer::None } else { Drawer::Right };
+        }
+        Action::People if is_mobile(&app.ctx) => {
+            app.people_view = true;
+            app.mobile_drawer = Drawer::Right;
+        }
         Action::ToggleMembers => app.show_members = !app.show_members,
         Action::People => {
             let showing = app.show_members && app.people_view;

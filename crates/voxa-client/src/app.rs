@@ -92,6 +92,10 @@ pub struct DmWindow {
     pub pending_group: bool,
     /// Renaming the selected group chat (the new name being typed).
     pub rename: Option<String>,
+    /// 📞 was picked on someone in the people list: call them (their conversation).
+    pub call: Option<DmId>,
+    /// Remove from server was picked on someone (uid, nickname).
+    pub forget: Option<(String, String)>,
 }
 
 /// The "New group chat" / "Add people" form in the Messages window.
@@ -295,8 +299,12 @@ pub struct Session {
     pub calendars: HashMap<ChannelId, crate::calendar::CalendarData>,
     pub calendar_asked: Option<ChannelId>,
     pub cal_ui: crate::calendar::CalendarUi,
-    /// Events I was already reminded of.
-    pub reminded: HashSet<EventId>,
+    /// The server calendar is shown (servers 1.23.0+): a tab seen from any channel.
+    pub server_calendar_open: bool,
+    pub server_calendar_asked: bool,
+    pub server_cal_ui: crate::calendar::CalendarUi,
+    /// Events I was already reminded of (calendar, event: each calendar counts its own).
+    pub reminded: HashSet<(ChannelId, EventId)>,
     pub welcomed: bool,
     pub me: ClientId,
     pub my_uid: String,
@@ -695,28 +703,71 @@ impl Session {
         self.supports("1.21.0") && self.my_channel() != NO_CHANNEL && self.perms() & perm::CALENDAR_VIEW != 0
     }
 
-    /// Asks for my channel's calendar (once per channel), and reminds me of events I go to
-    /// that start in the next 10 minutes. Returns the reminders.
+    /// My server-wide permissions: those of my server groups and my own (e.g. for the
+    /// server calendar).
+    pub fn my_server_perms(&self) -> u64 {
+        self.me().map(|m| self.server_perms_of(m)).unwrap_or(0)
+    }
+
+    /// The server calendar is there and I may see it (servers 1.23.0+).
+    pub fn sees_server_calendar(&self) -> bool {
+        self.supports("1.23.0") && self.my_server_perms() & perm::CALENDAR_VIEW != 0
+    }
+
+    /// Channels one can meet in (not separators), in the order of the channel list, with
+    /// their names.
+    pub fn channel_choices(&self) -> Vec<(ChannelId, String)> {
+        let mut out = Vec::new();
+        fn walk(s: &Session, parent: Option<ChannelId>, depth: usize, out: &mut Vec<(ChannelId, String)>) {
+            let mut kids: Vec<&ChannelInfo> = s.channels.values().filter(|c| c.parent == parent).collect();
+            kids.sort_by_key(|c| (c.sort, c.id));
+            for c in kids {
+                if voxa_proto::spacer(&c.name).is_none() {
+                    out.push((c.id, format!("{}{}", "   ".repeat(depth), c.name)));
+                }
+                if depth < 16 {
+                    walk(s, Some(c.id), depth + 1, out);
+                }
+            }
+        }
+        walk(self, None, 0, &mut out);
+        out
+    }
+
+    /// Asks for my channel's calendar (once per channel) and the server calendar, and
+    /// reminds me of events I go to that start in the next 10 minutes. Returns the reminders.
     pub fn calendar_tick(&mut self) -> Vec<String> {
         if !self.welcomed {
             return Vec::new();
         }
         let ch = self.my_channel();
-        if !self.sees_calendar() {
+        let mut watched = Vec::new();
+        if self.sees_calendar() {
+            if self.calendar_asked != Some(ch) {
+                self.calendar_asked = Some(ch);
+                self.conn.send(C2S::GetCalendar(ch));
+            }
+            watched.push(ch);
+        } else {
             self.calendar_open = false;
-            return Vec::new();
         }
-        if self.calendar_asked != Some(ch) {
-            self.calendar_asked = Some(ch);
-            self.conn.send(C2S::GetCalendar(ch));
+        if self.sees_server_calendar() {
+            if !self.server_calendar_asked {
+                self.server_calendar_asked = true;
+                self.conn.send(C2S::GetCalendar(SERVER_CALENDAR));
+            }
+            watched.push(SERVER_CALENDAR);
+        } else {
+            self.server_calendar_open = false;
         }
         let now = now_unix();
         let mut out = Vec::new();
-        if let Some(cal) = self.calendars.get(&ch) {
+        for c in watched {
+            let Some(cal) = self.calendars.get(&c) else { continue };
             for e in &cal.events {
                 let mine = e.rsvps.iter().any(|r| r.uid == self.my_uid && r.answer == RsvpAnswer::Going);
-                if mine && e.start > now && e.start - now <= 600 && !self.reminded.contains(&e.id) {
-                    self.reminded.insert(e.id);
+                if mine && e.start > now && e.start - now <= 600 && !self.reminded.contains(&(c, e.id)) {
+                    self.reminded.insert((c, e.id));
                     out.push(format!("Starting soon ({}): {}", crate::calendar::when(e.start), e.title));
                 }
             }
@@ -765,11 +816,14 @@ pub struct VoxaApp {
     debug_done: bool,
     pub home: bool,
     pub show_members: bool,
-    /// Phones (Android): the page shown, one at a time.
-    pub mobile_page: crate::ui::MobilePage,
-    /// Phones: what the last frame had, to follow along (connected: channels; a direct
-    /// message opened: the chat).
-    pub mobile_seen: (bool, Option<ChatKey>),
+    /// Phones (Android): the side panel slid over the chat, like Discord (channels on the
+    /// left, info / people on the right).
+    pub mobile_drawer: crate::ui::Drawer,
+    /// Phones: what the last frame had, to follow along (joining a channel or opening a
+    /// conversation shows its chat; picking someone shows their info).
+    pub mobile_seen: Option<(ChannelId, ChatKey, Selection)>,
+    /// Phones: the swipe in progress already opened / closed a panel.
+    pub mobile_swiped: bool,
     /// Android: long press as right-click, the clipboard and the text editing bar.
     #[cfg(target_os = "android")]
     pub touch: crate::mobile::Touch,
@@ -872,8 +926,9 @@ impl VoxaApp {
             debug_done: false,
             home: false,
             show_members: true,
-            mobile_page: crate::ui::MobilePage::Home,
-            mobile_seen: (false, None),
+            mobile_drawer: Default::default(),
+            mobile_seen: None,
+            mobile_swiped: false,
             #[cfg(target_os = "android")]
             touch: Default::default(),
             people_view: false,
@@ -975,6 +1030,60 @@ impl VoxaApp {
                 }
                 _ => self.debug_done = false,
             },
+            // The server calendar with a few game nights, one meeting in a channel (for
+            // screenshots; VOXA_PRIVKEY makes me an admin first).
+            "server-calendar" => {
+                static STEP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+                use std::sync::atomic::Ordering::Relaxed;
+                self.debug_done = false;
+                let Some(s) = &mut self.sess else { return };
+                if !s.welcomed {
+                    return;
+                }
+                let game = s.channels.values().find(|c| c.name == "Game nights").map(|c| c.id);
+                match STEP.load(Relaxed) {
+                    0 => {
+                        if let Ok(k) = std::env::var("VOXA_PRIVKEY") {
+                            s.conn.send(C2S::UsePrivilegeKey(k));
+                        }
+                        let mut e = ChannelEdit::new_default(None);
+                        e.name = "Game nights".into();
+                        s.conn.send(C2S::CreateChannel(e));
+                        STEP.store(1, Relaxed);
+                    }
+                    1 if game.is_some() && s.my_server_perms() & perm::CALENDAR_EVENTS != 0 && s.calendars.contains_key(&SERVER_CALENDAR) => {
+                        let day = 86_400;
+                        let base = (now_unix() / day + 1) * day + 20 * 3600;
+                        for (i, (title, meet)) in [("Game night: racing", game), ("Raid with the guild", game), ("Movie night", None)].iter().enumerate() {
+                            let event = CalendarEvent {
+                                id: 0,
+                                calendar: 0,
+                                title: title.to_string(),
+                                description: "Everyone welcome.".into(),
+                                start: base + i as u64 * 3 * day,
+                                duration_min: 180,
+                                max_people: if i == 1 { Some(10) } else { None },
+                                created_by: String::new(),
+                                created_uid: String::new(),
+                                rsvps: Vec::new(),
+                            };
+                            s.conn.send(C2S::SaveServerEvent { event, meet: *meet });
+                        }
+                        STEP.store(2, Relaxed);
+                    }
+                    2 if s.calendars.get(&SERVER_CALENDAR).is_some_and(|c| c.events.len() == 3) => {
+                        let first = s.calendars[&SERVER_CALENDAR].events[0].id;
+                        s.conn.send(C2S::AnswerEvent { channel: SERVER_CALENDAR, id: first, answer: Some(RsvpAnswer::Going) });
+                        s.server_calendar_open = true;
+                        if std::env::var("VOXA_CAL_EVENT").is_ok() {
+                            s.server_cal_ui.open_event = Some(first);
+                        }
+                        STEP.store(3, Relaxed);
+                        self.debug_done = true;
+                    }
+                    _ => {}
+                }
+            }
             // A channel of my own with a few events in its calendar, shown (for screenshots).
             "calendar-demo" => {
                 static STEP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -1619,6 +1728,9 @@ impl VoxaApp {
             camera_focus: None,
             pending_call: None,
             calendar_open: false,
+            server_calendar_open: false,
+            server_calendar_asked: false,
+            server_cal_ui: Default::default(),
             calendars: HashMap::new(),
             calendar_asked: None,
             cal_ui: Default::default(),
@@ -2427,7 +2539,17 @@ impl VoxaApp {
                         }
                     }
                 }
-                s.calendars.insert(channel, crate::calendar::CalendarData { calendars, events });
+                s.calendars.insert(channel, crate::calendar::CalendarData { calendars, events, meet: Default::default() });
+            }
+            S2C::ServerCalendar { calendars, events, meet } => {
+                // New events are announced (in the open chat), like a channel's.
+                if let Some(old) = s.calendars.get(&SERVER_CALENDAR) {
+                    let new: Vec<String> = events.iter().filter(|e| !old.events.iter().any(|o| o.id == e.id)).map(|e| format!("{} arranged \"{}\" for {} in the server calendar", e.created_by, e.title, crate::calendar::when(e.start))).collect();
+                    for text in new {
+                        s.log(EventKind::Good, &text);
+                    }
+                }
+                s.calendars.insert(SERVER_CALENDAR, crate::calendar::CalendarData { calendars, events, meet: meet.into_iter().collect() });
             }
             S2C::Cameras(list) => {
                 s.cameras = list.into_iter().collect();

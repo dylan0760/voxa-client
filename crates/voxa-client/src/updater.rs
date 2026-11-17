@@ -292,15 +292,22 @@ pub fn whats_new_window(ctx: &egui::Context, wn: &WhatsNew, product: &str, rende
     let mut open = true;
     let mut close = false;
     let center = ctx.content_rect().center();
-    egui::Window::new(format!("🎉 What's new in {product}"))
+    let mut window = egui::Window::new(format!("🎉 What's new in {product}"))
         .id(egui::Id::unique("voxa_whats_new"))
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
         .min_size([420.0, 260.0])
-        .default_size([720.0, 480.0])
-        .pivot(egui::Align2::CENTER_CENTER)
-        .default_pos(center)
+        .default_size([720.0, 480.0]);
+    // Phones: a full-screen page like the other dialogs (no pivot: it would move the page).
+    if !crate::ui::is_mobile(ctx) {
+        window = window.pivot(egui::Align2::CENTER_CENTER).default_pos(center);
+    } else {
+        let style = ctx.global_style();
+        let page = egui::Frame::window(&style).corner_radius(0).stroke(egui::Stroke::NONE).shadow(egui::Shadow::NONE).fill(style.visuals.panel_fill).inner_margin(egui::Margin::symmetric(12, 8));
+        window = window.frame(page).min_size([100.0, 100.0]).fixed_rect(crate::ui::safe_rect(ctx));
+    }
+    window
         .show(ctx, |ui| {
             // The body gets exactly the height that is left after the footer; the footer
             // (and spacing) is measured every frame rather than guessed, since a guess

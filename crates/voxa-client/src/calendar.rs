@@ -4,6 +4,10 @@
 //!
 //! Who may see it, answer, arrange events and manage the calendars are permissions of
 //! the channel (`perm::CALENDAR_*`); the server checks them all.
+//!
+//! The server calendar (servers 1.23.0+) is the same page in a tab of its own, seen from
+//! any channel (permissions of the server groups). Its events can name a channel to meet
+//! in, with a Join button.
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone, Timelike};
 use egui::{Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke, Ui};
@@ -16,6 +20,8 @@ use crate::ui::{accent, theme, GREEN, YELLOW};
 pub struct CalendarData {
     pub calendars: Vec<CalendarInfo>,
     pub events: Vec<CalendarEvent>,
+    /// The server calendar: the channel each event meets in.
+    pub meet: std::collections::HashMap<EventId, ChannelId>,
 }
 
 /// What the calendar tab shows.
@@ -33,6 +39,8 @@ pub struct CalendarUi {
     pub new_calendar: Option<String>,
     pub rename: Option<String>,
     pub confirm_delete: bool,
+    /// Join was clicked on an event's meeting channel (the caller joins it).
+    pub join: Option<ChannelId>,
 }
 
 /// Creating or changing an event.
@@ -47,15 +55,17 @@ pub struct EventForm {
     pub duration_min: u32,
     pub limit: bool,
     pub max_people: u32,
+    /// The server calendar: the channel to meet in.
+    pub meet: Option<ChannelId>,
     pub error: Option<String>,
 }
 
 impl EventForm {
     fn new(calendar: CalendarId, date: NaiveDate) -> EventForm {
-        EventForm { id: 0, calendar, title: String::new(), description: String::new(), date, hour: 20, minute: 0, duration_min: 120, limit: false, max_people: 8, error: None }
+        EventForm { id: 0, calendar, title: String::new(), description: String::new(), date, hour: 20, minute: 0, duration_min: 120, limit: false, max_people: 8, meet: None, error: None }
     }
 
-    fn from_event(e: &CalendarEvent) -> EventForm {
+    fn from_event(e: &CalendarEvent, meet: Option<ChannelId>) -> EventForm {
         let t = local(e.start);
         EventForm {
             id: e.id,
@@ -68,6 +78,7 @@ impl EventForm {
             duration_min: e.duration_min,
             limit: e.max_people.is_some(),
             max_people: e.max_people.unwrap_or(8),
+            meet,
             error: None,
         }
     }
@@ -108,11 +119,11 @@ fn answer_label(a: RsvpAnswer) -> &'static str {
     }
 }
 
-/// The calendar tab of my channel.
-pub fn view(s: &mut Session, ui: &mut Ui) {
+/// A calendar tab: my channel's, or the server calendar (`SERVER_CALENDAR`).
+pub fn view(s: &mut Session, ui: &mut Ui, ch: ChannelId) {
     let t = theme();
-    let ch = s.my_channel();
-    let perms = s.perms();
+    let server = ch == SERVER_CALENDAR;
+    let perms = if server { s.my_server_perms() } else { s.perms() };
     let can_rsvp = perms & perm::CALENDAR_RSVP != 0;
     let can_events = perms & perm::CALENDAR_EVENTS != 0;
     let can_manage = perms & perm::CALENDAR_MANAGE != 0;
@@ -123,7 +134,9 @@ pub fn view(s: &mut Session, ui: &mut Ui) {
         return;
     };
     let my_uid = s.my_uid.clone();
-    let ui_state = &mut s.cal_ui;
+    // Channels to meet in (the server calendar), in the order of the channel list.
+    let places: Vec<(ChannelId, String)> = if server { s.channel_choices() } else { Vec::new() };
+    let ui_state = if server { &mut s.server_cal_ui } else { &mut s.cal_ui };
     // The calendars: a channel without any shows one called General (made with the first event).
     let calendars: Vec<CalendarInfo> = if data.calendars.is_empty() { vec![CalendarInfo { id: 0, name: "General".into() }] } else { data.calendars.clone() };
     if !calendars.iter().any(|c| c.id == ui_state.sel) {
@@ -158,7 +171,7 @@ pub fn view(s: &mut Session, ui: &mut Ui) {
                         }
                     }
                     None => {
-                        if ui.button("➕ Calendar").on_hover_text("Add a calendar to this channel").clicked() {
+                        if ui.button("➕ Calendar").on_hover_text(if server { "Add a calendar to the server calendar" } else { "Add a calendar to this channel" }).clicked() {
                             ui_state.new_calendar = Some(String::new());
                         }
                     }
@@ -235,7 +248,7 @@ pub fn view(s: &mut Session, ui: &mut Ui) {
             if ui_state.month_view {
                 month_grid(ui, &events, ui_state, can_events, sel);
             } else {
-                upcoming(ui, &events, ui_state, &my_uid);
+                upcoming(ui, &events, ui_state, &my_uid, &data.meet, &places);
             }
         });
     });
@@ -244,12 +257,15 @@ pub fn view(s: &mut Session, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     if let Some(id) = ui_state.open_event {
         match data.events.iter().find(|e| e.id == id) {
-            Some(e) => event_window(&ctx, e, ui_state, &my_uid, can_rsvp, can_events, ch, &mut send),
+            Some(e) => {
+                let meet = data.meet.get(&e.id).and_then(|m| places.iter().find(|(id, _)| id == m)).cloned();
+                event_window(&ctx, e, ui_state, &my_uid, (can_rsvp, can_events), ch, meet, &mut send)
+            }
             None => ui_state.open_event = None,
         }
     }
     if ui_state.form.is_some() {
-        form_window(&ctx, ui_state, &calendars, ch, &mut send);
+        form_window(&ctx, ui_state, &calendars, ch, &places, &mut send);
     }
     for m in send {
         s.conn.send(m);
@@ -260,7 +276,7 @@ fn my_answer(e: &CalendarEvent, uid: &str) -> Option<RsvpAnswer> {
     e.rsvps.iter().find(|r| r.uid == uid).map(|r| r.answer)
 }
 
-fn upcoming(ui: &mut Ui, events: &[&CalendarEvent], st: &mut CalendarUi, uid: &str) {
+fn upcoming(ui: &mut Ui, events: &[&CalendarEvent], st: &mut CalendarUi, uid: &str, meet: &std::collections::HashMap<EventId, ChannelId>, places: &[(ChannelId, String)]) {
     let t = theme();
     let now = now();
     let list: Vec<&&CalendarEvent> = events.iter().filter(|e| e.start + e.duration_min as u64 * 60 >= now).collect();
@@ -293,6 +309,9 @@ fn upcoming(ui: &mut Ui, events: &[&CalendarEvent], st: &mut CalendarUi, uid: &s
                         None => format!("👥 {} going", e.going()),
                     };
                     ui.label(RichText::new(format!("{} · {people} · by {}", duration_text(e.duration_min), e.created_by)).small().color(t.dim));
+                    if let Some((_, place)) = meet.get(&e.id).and_then(|m| places.iter().find(|(id, _)| id == m)) {
+                        ui.label(RichText::new(format!("📍 {place}")).small().color(accent()));
+                    }
                 });
                 if let Some(a) = my_answer(e, uid) {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -371,7 +390,7 @@ fn month_grid(ui: &mut Ui, events: &[&CalendarEvent], st: &mut CalendarUi, can_e
 }
 
 #[allow(clippy::too_many_arguments)]
-fn event_window(ctx: &egui::Context, e: &CalendarEvent, st: &mut CalendarUi, uid: &str, can_rsvp: bool, can_events: bool, ch: ChannelId, send: &mut Vec<C2S>) {
+fn event_window(ctx: &egui::Context, e: &CalendarEvent, st: &mut CalendarUi, uid: &str, (can_rsvp, can_events): (bool, bool), ch: ChannelId, meet: Option<(ChannelId, String)>, send: &mut Vec<C2S>) {
     use crate::updater::ShowFill;
     let t = theme();
     let mut open = true;
@@ -379,6 +398,14 @@ fn event_window(ctx: &egui::Context, e: &CalendarEvent, st: &mut CalendarUi, uid
     egui::Window::new(format!("📅 {}", e.title)).open(&mut open).collapsible(false).resizable(true).default_width(420.0).show_fill(ctx, |ui| {
         ui.label(RichText::new(format!("{} · {}", when(e.start), duration_text(e.duration_min))).strong());
         ui.label(RichText::new(format!("Arranged by {}", e.created_by)).small().color(t.dim));
+        if let Some((place, name)) = &meet {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("📍 Meet in {name}")).strong());
+                if ui.button("➡ Join").on_hover_text("Go to this channel").clicked() {
+                    st.join = Some(*place);
+                }
+            });
+        }
         if !e.description.is_empty() {
             ui.add_space(6.0);
             crate::ui::message_text(ui, &e.description, (e.id, 7));
@@ -418,7 +445,7 @@ fn event_window(ctx: &egui::Context, e: &CalendarEvent, st: &mut CalendarUi, uid
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button("✏ Edit").clicked() {
-                    st.form = Some(EventForm::from_event(e));
+                    st.form = Some(EventForm::from_event(e, meet.as_ref().map(|m| m.0)));
                 }
                 if ui.button("🗑 Delete").clicked() {
                     send.push(C2S::DeleteEvent { channel: ch, id: e.id });
@@ -432,7 +459,7 @@ fn event_window(ctx: &egui::Context, e: &CalendarEvent, st: &mut CalendarUi, uid
     }
 }
 
-fn form_window(ctx: &egui::Context, st: &mut CalendarUi, calendars: &[CalendarInfo], ch: ChannelId, send: &mut Vec<C2S>) {
+fn form_window(ctx: &egui::Context, st: &mut CalendarUi, calendars: &[CalendarInfo], ch: ChannelId, places: &[(ChannelId, String)], send: &mut Vec<C2S>) {
     use crate::updater::ShowFill;
     let Some(f) = &mut st.form else { return };
     let mut open = true;
@@ -491,6 +518,18 @@ fn form_window(ctx: &egui::Context, st: &mut CalendarUi, calendars: &[CalendarIn
                 }
             });
             ui.end_row();
+            // The server calendar: where to meet (a game night in a channel).
+            if ch == SERVER_CALENDAR {
+                ui.label("Meet in:");
+                let cur = f.meet.and_then(|m| places.iter().find(|(id, _)| *id == m)).map(|(_, n)| n.clone()).unwrap_or_else(|| "No channel".into());
+                egui::ComboBox::from_id_salt("evmeet").selected_text(cur).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut f.meet, None, "No channel");
+                    for (id, name) in places {
+                        ui.selectable_value(&mut f.meet, Some(*id), name);
+                    }
+                });
+                ui.end_row();
+            }
             ui.label("People:");
             ui.horizontal(|ui| {
                 ui.checkbox(&mut f.limit, "At most");
@@ -514,9 +553,7 @@ fn form_window(ctx: &egui::Context, st: &mut CalendarUi, calendars: &[CalendarIn
             None => f.error = Some("That time does not exist on that day (clock change)".into()),
             Some(start) if f.id == 0 && start + 300 < now() => f.error = Some("That time has passed".into()),
             Some(start) => {
-                send.push(C2S::SaveEvent {
-                    channel: ch,
-                    event: CalendarEvent {
+                let event = CalendarEvent {
                         id: f.id,
                         calendar: f.calendar,
                         title: f.title.trim().to_string(),
@@ -527,8 +564,8 @@ fn form_window(ctx: &egui::Context, st: &mut CalendarUi, calendars: &[CalendarIn
                         created_by: String::new(),
                         created_uid: String::new(),
                         rsvps: Vec::new(),
-                    },
-                });
+                };
+                send.push(if ch == SERVER_CALENDAR { C2S::SaveServerEvent { event, meet: f.meet } } else { C2S::SaveEvent { channel: ch, event } });
                 st.form = None;
             }
         }

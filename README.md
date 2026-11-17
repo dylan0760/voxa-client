@@ -41,7 +41,8 @@ server needs a newer version, Voxa tells you and opens the update window.
   * **Two-tone:** one colour blends into another behind see-through panels, in the spirit
     of Discord's gradient themes. Light: Citrus, Candyfloss, Spearmint, Lo-fi and Dune.
     Dark: Raincloud, Afterglow, Blood Moon, Nightshade, Twilight, Synthwave,
-    Pink Lemonade, Aurora and Woodland.
+    Pink Lemonade, Aurora, Woodland and 🌴 Vice City (1.31.0: a Miami sunset, orange into
+    magenta with hot pink).
   * Older Voxa versions still read your settings: they use Dark or Light instead of a
     theme they don't know.
 * **Avatars** (Voxa Server 1.15.0+): click your name ▸ **Change Avatar…**.
@@ -56,6 +57,11 @@ server needs a newer version, Voxa tells you and opens the update window.
   * Moderators (*Edit client descriptions*) can remove an offensive picture; it can't be
     used on that server again.
 * **Windows:** dialogs can be moved and resized.
+* **Fits any width** (1.31.0): on a narrow window or a big UI scale the side columns get
+  narrower so the chat keeps room, the info panel steps aside when there is no space,
+  and nothing overlaps: the voice card's buttons move to a row of their own, long
+  channel and server names are shortened with "…" (hover for the whole name), and long
+  values such as the server fingerprint wrap.
 * **Frame rate limit:** set it under **Options ▸ Application** (60 fps by default) to
   save GPU on fast monitors.
 
@@ -229,13 +235,16 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   whoever talks. Click a tile to show it large, click again for everyone. Calls with
   more than 25 people show the first 25 and how many more are there. Drag the edge to
   make the video bigger or smaller.
-* **Options â–¸ Video:** which camera, picture size (360p, 480p or 720p), frame rate and
+* **Options ▸ Video:** which camera, picture size (360p, 480p or 720p), frame rate and
   image quality. Phones send upright (portrait) pictures.
 * **Calls with a group chat or someone you message:** 📞 in the chat's header starts a
   call. Voxa makes a private, password-protected temporary channel for it and posts a
   **Join call** card in the chat; only the people in that chat get the password. The
   channel disappears when everyone has left. Calls need the permission to create
   temporary channels (normal members have it).
+* **Call someone from the People list** (1.31.0): 📞 next to anyone online in 👥 People
+  (or right-click them, also in the Messages window) opens your conversation with them
+  and starts a call the same way. It is a voice call; turn your camera on if you like.
 * **Encrypted:** voice and video are encrypted between every member and the server (see
   [Security](#security)). 🔒 in the corner of the video says so.
 * Needs the *Share screen / applications and camera* permission in the channel.
@@ -258,6 +267,17 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
     channel's admins by default).
 * Only the people in the channel see its calendar, so a password channel's calendar stays
   inside it.
+
+### Server calendar (Voxa Server 1.23.0+, Voxa 1.31.0)
+* **📆 Server calendar** next to the Server tab: one calendar for the whole server, there
+  whatever channel you are in (or none). It works like a channel's calendar: several
+  calendars (tabs), Upcoming and Month, answers, limits and reminders.
+* **Where to meet:** an event can name a channel, e.g. *Game night, Friday 8 pm in
+  Racing*. Events show 📍 and the channel; **➡ Join** in the event takes you there.
+* **Who may do what** is set by the same four calendar permissions, taken from your
+  server groups (and personal permissions) rather than a channel: by default everyone
+  sees it, normal members answer, and Server Admins arrange events. Give *Create and edit
+  calendar events* to a server group to let its members arrange game nights.
 
 ### Screen sharing
 * **What you can share:** a whole screen or a single application, up to **60 fps**.
@@ -322,6 +342,12 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
     nothing to other servers and cannot be turned back into the addresses.
 * **Personal permissions:** right-click a user ▸ **Permissions…** to grant individual
   permissions on top of their groups (needs *Manage groups*).
+* **Remove someone from the server** (Voxa Server 1.23.0+): right-click someone offline
+  in 👥 People (or the Messages window) ▸ **Remove from server…**. The server forgets
+  their groups, personal permissions, channel groups, picture and waiting messages; their
+  chat messages stay, and they start fresh if they come back (ban them to keep them out).
+  Needs *Create, edit and delete groups*, and only works on people without permissions
+  you lack.
 * **Permission search** (1.30.0): type in the 🔍 box above a permission list (groups and
   personal permissions) to show only the matching permissions, e.g. `calendar` or
   `chat delete`; the words can be in any order. The Groups dialog opens on the first group.
@@ -370,10 +396,19 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
 ## Android
 The same Voxa as on Windows, for phones and tablets (Android 8.0 or newer; arm64, and
 x86_64 for Chromebooks).
-* **One page at a time** on a phone: **Home** (servers, bookmarks, settings), **Channels**,
-  **Chat** and **People** at the bottom. Android's back button goes back a page; from Home
-  Voxa goes to the background and stays connected. Tablets in landscape get the Windows
-  layout.
+* **Laid out like Discord's app** (1.31.0): the chat fills the screen.
+  * **☰ at the top left** (or swiping right) slides in the servers (🏠 Home, your
+    servers, ➕, bookmarks, identities, settings) next to the channel list, with the
+    voice card and your own panel at the bottom.
+  * **👥 at the top right** (or swiping left) slides in the info and 👥 People.
+  * Tap the dimmed chat or swipe back to close a panel. Joining a channel or opening a
+    conversation closes it by itself; tapping someone in the channel list shows who they
+    are.
+  * **Android's back button:** closes a menu, page or the right panel first; from the
+    chat it opens the channels; from there Voxa goes to the background and stays
+    connected.
+  * Not on a server: the Home screen (bookmarks and recent servers) with the same ☰.
+  * Tablets in landscape get the Windows layout.
 * **Everything else works like on Windows:** voice, chat, direct and group messages,
   pictures, files, video calls, the calendar, watching screen shares, themes, bookmarks
   and identities. Dialogs open as full-screen pages with finger-sized buttons, ticks and
@@ -387,7 +422,8 @@ x86_64 for Chromebooks).
     Voxa and other apps). **Copy text** in a message's menu copies it too. Voxa only reads
     the clipboard when you tap Paste;
   * closing the keyboard ends typing, so the bar never covers the page.
-* **Push-to-talk** is a big **Hold to talk** button (voice activation is the default).
+* **Push-to-talk** is a big **Hold to talk** button under the chat while you are in a
+  channel (voice activation is the default).
 * **Pictures, uploads and your avatar** are chosen in Voxa's own file browser. The first
   time, Voxa asks for **All files access** (Android 11+) or the storage permission.
   Downloads and saved pictures go to `Download/Voxa`.
@@ -423,6 +459,8 @@ Lossless channels need about 0.8–1.5 Mbit/s per listener, sent by the server.
   password that only that chat's members get.
 * **Your identity and saved passwords** are encrypted in `settings.json` with Windows
   data protection for your user account (on Android: kept in Voxa's private app storage).
+  If `settings.json` is ever damaged, Voxa keeps a copy (`settings.damaged-<time>.json`,
+  next to it) before starting with defaults, so your identities can be recovered.
 * **Direct messages** are stored in `%APPDATA%\Voxa\dm`, encrypted with ChaCha20-Poly1305
   under a random key that Windows data protection guards for your account. Each file is
   bound to its server, so it can't be read under another server or by another user.
