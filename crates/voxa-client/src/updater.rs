@@ -15,6 +15,10 @@ pub enum UpdState {
     Downloading(Release, u64, u64),
     /// The installer has been started; the app should exit now.
     Installing,
+    /// Android: the installer is open and asks to confirm the update (Voxa keeps running
+    /// until Android replaces it).
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    InstallerOpened(Release),
     Failed(String),
 }
 
@@ -88,16 +92,39 @@ impl Updater {
         if let Some(dir) = &self.notes_dir {
             save_pending_notes(dir, &rel);
         }
-        // Android installs apps itself: the APK downloads in the browser, and opening it
-        // installs the update over this one (your settings stay).
-        if cfg!(target_os = "android") {
-            *self.state.lock().unwrap() = UpdState::Available(rel.clone());
-            if rel.asset_url.starts_with("https://github.com/") {
-                crate::markdown::open_link(&rel.asset_url);
-            }
+        let (state, ctx) = (self.state.clone(), self.ctx.clone());
+        // Android: the APK is downloaded and verified here, then Android's installer asks
+        // you to confirm and updates Voxa in place (your settings stay). If that cannot
+        // work, the APK downloads in the browser instead.
+        #[cfg(target_os = "android")]
+        {
+            std::thread::spawn(move || {
+                let st = state.clone();
+                let c = ctx.clone();
+                let r2 = rel.clone();
+                let res = update::download_in(&crate::mobile::cache_dir(), &rel, move |done, total| {
+                    *st.lock().unwrap() = UpdState::Downloading(r2.clone(), done, total);
+                    c.request_repaint();
+                })
+                .and_then(|apk| {
+                    let r = crate::mobile::install_apk(&apk);
+                    if let Some(dir) = apk.parent() {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
+                    r
+                });
+                *state.lock().unwrap() = match res {
+                    Ok(()) => UpdState::InstallerOpened(rel),
+                    Err(e) => {
+                        log::warn!("update failed: {e}");
+                        crate::markdown::open_link(&rel.asset_url);
+                        UpdState::Failed(format!("{e}. The update is downloading in your browser instead: open it when it is done to install it."))
+                    }
+                };
+                ctx.request_repaint();
+            });
             return;
         }
-        let (state, ctx) = (self.state.clone(), self.ctx.clone());
         std::thread::spawn(move || {
             let st = state.clone();
             let c = ctx.clone();
@@ -420,7 +447,7 @@ pub fn ui(updater: &mut Updater, ui: &mut egui::Ui, product: &str) {
             ui.label(RichText::new(format!("⬆ {product} {} is available!", rel.version)).strong().color(Color32::from_rgb(0x3B, 0xA5, 0x5D)));
             if !rel.notes.trim().is_empty() {
                 egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                    ui.label(&rel.notes);
+                    crate::markdown::render(ui, &rel.notes, 13.0, (0, 11));
                 });
             }
             ui.horizontal(|ui| {
@@ -432,7 +459,20 @@ pub fn ui(updater: &mut Updater, ui: &mut egui::Ui, product: &str) {
                     open_url(&rel.page_url);
                 }
             });
-            ui.label(RichText::new(format!("{} will close while the update installs and start again afterwards.", product)).small().color(dim));
+            let note = if cfg!(target_os = "android") {
+                "The first time, Android asks you to allow Voxa to install apps (turn it on, then go back). Then Android asks you to confirm the update; your settings stay.".to_string()
+            } else {
+                format!("{product} will close while the update installs and start again afterwards.")
+            };
+            ui.label(RichText::new(note).small().color(dim));
+        }
+        UpdState::InstallerOpened(rel) => {
+            ui.label(RichText::new(format!("⬆ Installing {product} {}", rel.version)).strong());
+            ui.label("Tap Update (or Install) in Android's window to finish. If Android asks, allow Voxa to install apps, then go back and tap \"Install again\".");
+            ui.label(RichText::new("A copy is also in Downloads/Voxa.").small().color(dim));
+            if ui.button("Install again").clicked() {
+                updater.install(rel.clone());
+            }
         }
         UpdState::Downloading(rel, done, total) => {
             let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };

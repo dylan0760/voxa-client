@@ -1019,6 +1019,14 @@ impl VoxaApp {
                 _ => self.debug_done = false,
             },
             // Server Groups with a permission search typed in (VOXA_PERM_SEARCH).
+            // Options ▸ Application ▸ Themes (for screenshots).
+            "themes" => {
+                crate::ui::apply(self, crate::ui::Action::Dialog(crate::dialogs::Open::Options));
+                if let Some(d) = &mut self.dlg.options {
+                    d.tab = 4;
+                    d.app_tab = 1;
+                }
+            }
             "groups" => match &self.sess {
                 Some(s) if s.welcomed && !s.groups.is_empty() => {
                     let q = std::env::var("VOXA_PERM_SEARCH").unwrap_or_default();

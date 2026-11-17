@@ -19,6 +19,8 @@ pub enum PickKind {
     UploadFolder,
     /// A picture for your avatar.
     Avatar,
+    /// The picture of the "Your picture" theme.
+    Background,
 }
 
 /// Asks for files (`folder`: one folder). Windows: the chosen paths, None if cancelled.

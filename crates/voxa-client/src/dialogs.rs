@@ -76,6 +76,11 @@ pub struct OptionsDlg {
     pub cameras: Vec<crate::camera::CameraDevice>,
     pub nickname: String,
     pub theme: crate::config::ThemeKind,
+    /// The "Your picture" theme: the picture (a copy in Voxa's folder), how dark, and why
+    /// a picture could not be used.
+    pub background: Option<String>,
+    pub background_dim: f32,
+    pub background_error: Option<String>,
     pub scale: f32,
     pub max_fps: u32,
     pub timestamps: bool,
@@ -538,6 +543,9 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         cameras: crate::camera::devices(),
         nickname: s.nickname.clone(),
         theme: s.theme_kind(),
+        background: s.background_image.clone(),
+        background_dim: s.background_dim,
+        background_error: None,
         scale: s.ui_scale,
         max_fps: s.max_fps,
         timestamps: s.show_timestamps,
@@ -1114,10 +1122,12 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 // A plain ScrollArea that fills the window stops it from being resized.
                 crate::updater::fill_list(ui, "themes", 60.0, 120.0, |ui| {
                     ui.set_width(ui.available_width());
+                    background_picker(ui, &mut d);
+                    ui.add_space(10.0);
                     let all = crate::config::ThemeKind::ALL;
                     for (title, note, kinds) in [
                         ("Solid", "One colour family per theme.", all.iter().filter(|k| !k.is_gradient()).copied().collect::<Vec<_>>()),
-                        ("Two-tone", "A colour that blends into another, behind see-through panels.", all.iter().filter(|k| k.is_gradient()).copied().collect()),
+                        ("Two-tone", "A colour that blends into another, behind see-through panels.", all.iter().filter(|k| k.is_gradient() && **k != crate::config::ThemeKind::OwnPicture).copied().collect()),
                     ] {
                         ui.label(RichText::new(title).strong());
                         ui.label(RichText::new(note).small().weak());
@@ -1125,7 +1135,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
                             for k in kinds {
-                                theme_tile(ui, &mut d.theme, k);
+                                theme_tile(ui, &mut d.theme, k, None);
                             }
                         });
                         ui.add_space(10.0);
@@ -1226,6 +1236,9 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             app.settings.nickname = d.nickname.trim().to_string();
         }
         app.settings.set_theme(d.theme);
+        app.settings.background_image = d.background.clone();
+        app.settings.background_dim = d.background_dim.clamp(0.0, 0.8);
+        forget_old_backgrounds(d.background.as_deref());
         app.settings.ui_scale = d.scale;
         app.settings.max_fps = d.max_fps;
         app.settings.show_timestamps = d.timestamps;
@@ -3001,9 +3014,89 @@ fn app_tabs(ui: &mut Ui, tab: &mut u8) {
     ui.add_space(6.0);
 }
 
+/// Options ▸ Themes ▸ Your picture: any picture of yours behind see-through panels.
+fn background_picker(ui: &mut Ui, d: &mut OptionsDlg) {
+    use crate::config::ThemeKind;
+    // Android: the picture chosen in Voxa's file browser.
+    if let Some((_, files)) = crate::files::take(|k| *k == crate::files::PickKind::Background) {
+        use_background(d, files.first());
+    }
+    ui.label(RichText::new("Your picture").strong());
+    ui.label(RichText::new("Any picture of yours behind see-through panels. It is copied into Voxa's folder and stays on this device.").small().weak());
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        theme_tile(ui, &mut d.theme, ThemeKind::OwnPicture, d.background.as_deref());
+        ui.vertical(|ui| {
+            if ui.button("🖼 Choose picture…").clicked() {
+                if let Some(files) = crate::files::pick(crate::files::PickKind::Background, "Background picture", crate::chat_images::IMAGE_EXTENSIONS, false, false) {
+                    use_background(d, files.first());
+                }
+            }
+            if d.background.is_some() && ui.button("Remove picture").clicked() {
+                d.background = None;
+            }
+            ui.add(egui::Slider::new(&mut d.background_dim, 0.0..=0.8).text("Darken").custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
+                .on_hover_text("Darkens the picture so text stays easy to read");
+            if let Some(e) = &d.background_error {
+                ui.label(RichText::new(e).small().color(Color32::from_rgb(0xED, 0x42, 0x45)));
+            }
+        });
+    });
+}
+
+/// Takes a chosen picture for the "Your picture" theme (and picks the theme).
+fn use_background(d: &mut OptionsDlg, file: Option<&std::path::PathBuf>) {
+    let Some(file) = file else { return };
+    match import_background(file) {
+        Ok(path) => {
+            d.background = Some(path);
+            d.background_error = None;
+            d.theme = crate::config::ThemeKind::OwnPicture;
+        }
+        Err(e) => d.background_error = Some(e),
+    }
+}
+
+/// Copies a picture into Voxa's folder (so it still shows if the original moves), after
+/// checking it is a picture of a sensible size. Returns the copy's path.
+fn import_background(src: &std::path::Path) -> Result<String, String> {
+    let len = std::fs::metadata(src).map_err(|e| e.to_string())?.len();
+    if len > crate::ui::BACKGROUND_MAX_BYTES {
+        return Err("That picture is larger than 40 MB.".into());
+    }
+    let (w, h) = image::image_dimensions(src).map_err(|_| "That file is not a picture Voxa can show.".to_string())?;
+    if w < 16 || h < 16 || w > 16_000 || h > 16_000 {
+        return Err("That picture is too small or too large.".into());
+    }
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .filter(|e| crate::chat_images::IMAGE_EXTENSIONS.contains(&e.as_str()))
+        .unwrap_or_else(|| "png".into());
+    let dir = crate::config::config_dir().join("backgrounds");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let dest = dir.join(format!("background-{stamp}.{ext}"));
+    std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+/// Deletes the copies of pictures that are no longer the background.
+fn forget_old_backgrounds(keep: Option<&str>) {
+    let dir = crate::config::config_dir().join("backgrounds");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if keep != Some(p.to_string_lossy().as_ref()) && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("background-")) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// A clickable miniature of a theme: rail, sidebar and chat with a message bubble, the
 /// accent colour and the theme's name.
-fn theme_tile(ui: &mut Ui, current: &mut crate::config::ThemeKind, kind: crate::config::ThemeKind) {
+fn theme_tile(ui: &mut Ui, current: &mut crate::config::ThemeKind, kind: crate::config::ThemeKind, picture: Option<&str>) {
     use egui::{pos2, vec2, Rect};
     let p = crate::ui::palette(kind);
     let (rect, resp) = ui.allocate_exact_size(vec2(112.0, 86.0), egui::Sense::click());
@@ -3011,7 +3104,9 @@ fn theme_tile(ui: &mut Ui, current: &mut crate::config::ThemeKind, kind: crate::
     let pic = Rect::from_min_size(rect.min, vec2(rect.width(), 62.0));
     let base = if p.gradient.is_some() { Color32::BLACK } else { p.main };
     painter.rect_filled(pic, 6, base);
-    if let Some(g) = p.gradient {
+    if let Some(tex) = picture.and_then(|path| crate::ui::background_texture(ui.ctx(), path)) {
+        crate::ui::paint_picture(&painter, pic.shrink(1.0), &tex, 0.2);
+    } else if let Some(g) = p.gradient {
         crate::ui::paint_gradient(&painter, pic.shrink(1.0), g);
     }
     let rail = Rect::from_min_max(pic.min, pos2(pic.min.x + 14.0, pic.max.y));

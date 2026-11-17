@@ -99,10 +99,12 @@ pub enum ThemeKind {
     Woodland,
     /// A Miami-style sunset: orange into magenta, with a hot pink accent.
     ViceCity,
+    /// Your own picture behind see-through panels (`Settings::background_image`).
+    OwnPicture,
 }
 
 impl ThemeKind {
-    pub const ALL: [ThemeKind; 25] = [
+    pub const ALL: [ThemeKind; 26] = [
         ThemeKind::Dark,
         ThemeKind::Light,
         ThemeKind::Sakura,
@@ -128,6 +130,7 @@ impl ThemeKind {
         ThemeKind::Aurora,
         ThemeKind::Woodland,
         ThemeKind::ViceCity,
+        ThemeKind::OwnPicture,
     ];
 
     pub fn name(self) -> &'static str {
@@ -157,6 +160,7 @@ impl ThemeKind {
             ThemeKind::Aurora => "Aurora",
             ThemeKind::Woodland => "Woodland",
             ThemeKind::ViceCity => "Vice City",
+            ThemeKind::OwnPicture => "Your picture",
         }
     }
 
@@ -164,7 +168,7 @@ impl ThemeKind {
         use ThemeKind::*;
         matches!(
             self,
-            Dark | Crimson | Midnight | Slate | Obsidian | Raincloud | Afterglow | BloodMoon | Nightshade | Twilight | Synthwave | PinkLemonade | Aurora | Woodland | ViceCity
+            Dark | Crimson | Midnight | Slate | Obsidian | Raincloud | Afterglow | BloodMoon | Nightshade | Twilight | Synthwave | PinkLemonade | Aurora | Woodland | ViceCity | OwnPicture
         )
     }
 
@@ -296,6 +300,10 @@ pub struct Settings {
     #[serde(deserialize_with = "lenient_theme")]
     pub theme_v2: Option<ThemeKind>,
     pub ui_scale: f32,
+    /// The "Your picture" theme: the picture (a copy in Voxa's folder) and how much it is
+    /// darkened (0 to 0.8) so text stays readable.
+    pub background_image: Option<String>,
+    pub background_dim: f32,
     pub show_timestamps: bool,
     pub download_dir: Option<String>,
     /// Per-uid local volume adjustments.
@@ -345,6 +353,8 @@ impl Default for Settings {
             theme: None,
             theme_v2: None,
             ui_scale: 1.0,
+            background_image: None,
+            background_dim: 0.35,
             show_timestamps: true,
             download_dir: None,
             client_volumes: HashMap::new(),

@@ -474,6 +474,99 @@ pub fn device_id() -> Option<String> {
     .filter(|s| s.len() >= 8)
 }
 
+/// Voxa's private cache folder (downloaded updates wait here before they are installed).
+pub fn cache_dir() -> std::path::PathBuf {
+    APP.get().and_then(|a| a.internal_data_path()).unwrap_or_else(crate::config::config_dir).join("cache")
+}
+
+const APK_MIME: &str = "application/vnd.android.package-archive";
+/// Remembers the update copied to Downloads, so it is removed once it is installed.
+const LAST_APK_FILE: &str = "update-apk-uri.txt";
+
+/// Hands a downloaded (and verified) APK to Android's installer, which asks you to
+/// confirm and then updates Voxa in place (settings and identities stay).
+///
+/// The app has no Java code, so it cannot share a private file with the installer. On
+/// Android 10+ the APK is copied into Downloads/Voxa (MediaStore), and the installer gets
+/// read access to that item; Android 8 and 9 get a file link to Voxa's external folder.
+pub fn install_apk(apk: &std::path::Path) -> Result<(), String> {
+    let name = apk.file_name().and_then(|n| n.to_str()).unwrap_or("Voxa.apk").to_string();
+    let result = with_env(|env, act| {
+        let uri = if sdk_int() >= 29 {
+            let bytes = match std::fs::read(apk) {
+                Ok(b) => b,
+                Err(e) => return Ok(Err(e.to_string())),
+            };
+            let resolver = env.call_method(act, "getContentResolver", "()Landroid/content/ContentResolver;", &[])?.l()?;
+            let values = env.new_object("android/content/ContentValues", "()V", &[])?;
+            for (k, v) in [("_display_name", name.as_str()), ("mime_type", APK_MIME), ("relative_path", "Download/Voxa")] {
+                let (k, v) = (env.new_string(k)?, env.new_string(v)?);
+                env.call_method(&values, "put", "(Ljava/lang/String;Ljava/lang/String;)V", &[JValue::Object(&k), JValue::Object(&v)])?;
+            }
+            let downloads = env.get_static_field("android/provider/MediaStore$Downloads", "EXTERNAL_CONTENT_URI", "Landroid/net/Uri;")?.l()?;
+            let uri = env
+                .call_method(&resolver, "insert", "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;", &[JValue::Object(&downloads), JValue::Object(&values)])?
+                .l()?;
+            if uri.is_null() {
+                return Ok(Err("Android could not save the update in Downloads".to_string()));
+            }
+            let out = env.call_method(&resolver, "openOutputStream", "(Landroid/net/Uri;)Ljava/io/OutputStream;", &[JValue::Object(&uri)])?.l()?;
+            for chunk in bytes.chunks(1 << 20) {
+                let arr = env.byte_array_from_slice(chunk)?;
+                env.call_method(&out, "write", "([B)V", &[JValue::Object(&arr)])?;
+                env.delete_local_ref(arr)?;
+            }
+            env.call_method(&out, "close", "()V", &[])?;
+            let s = env.call_method(&uri, "toString", "()Ljava/lang/String;", &[])?.l()?;
+            let s: String = env.get_string(&s.into())?.into();
+            let _ = std::fs::write(crate::config::config_dir().join(LAST_APK_FILE), s);
+            uri
+        } else {
+            // Android 8/9: the installer may read Voxa's external folder, and file links are
+            // allowed once Android's check for them is relaxed.
+            let Some(dir) = APP.get().and_then(|a| a.external_data_path()) else {
+                return Ok(Err("No storage for the update".to_string()));
+            };
+            let dest = dir.join("update").join(&name);
+            if let Err(e) = std::fs::create_dir_all(dest.parent().unwrap()).and_then(|_| std::fs::copy(apk, &dest)) {
+                return Ok(Err(e.to_string()));
+            }
+            let lax = env.get_static_field("android/os/StrictMode$VmPolicy", "LAX", "Landroid/os/StrictMode$VmPolicy;")?.l()?;
+            env.call_static_method("android/os/StrictMode", "setVmPolicy", "(Landroid/os/StrictMode$VmPolicy;)V", &[JValue::Object(&lax)])?;
+            let s = env.new_string(format!("file://{}", dest.display()))?;
+            env.call_static_method("android/net/Uri", "parse", "(Ljava/lang/String;)Landroid/net/Uri;", &[JValue::Object(&s)])?.l()?
+        };
+        let action = env.new_string("android.intent.action.VIEW")?;
+        let intent = env.new_object("android/content/Intent", "(Ljava/lang/String;)V", &[JValue::Object(&action)])?;
+        let mime = env.new_string(APK_MIME)?;
+        env.call_method(&intent, "setDataAndType", "(Landroid/net/Uri;Ljava/lang/String;)Landroid/content/Intent;", &[JValue::Object(&uri), JValue::Object(&mime)])?;
+        // FLAG_GRANT_READ_URI_PERMISSION | FLAG_ACTIVITY_NEW_TASK
+        env.call_method(&intent, "addFlags", "(I)Landroid/content/Intent;", &[JValue::Int(0x0000_0001 | 0x1000_0000)])?;
+        env.call_method(act, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(&intent)])?;
+        Ok(Ok(()))
+    });
+    result.unwrap_or_else(|| Err("Android's installer could not be opened".to_string()))
+}
+
+/// Removes the update copied to Downloads by `install_apk` (called at startup, once it
+/// has been installed).
+pub fn remove_installed_apk() {
+    let file = crate::config::config_dir().join(LAST_APK_FILE);
+    let Ok(uri) = std::fs::read_to_string(&file) else { return };
+    let _ = std::fs::remove_file(&file);
+    if !uri.starts_with("content://") {
+        return;
+    }
+    with_env(|env, act| {
+        let resolver = env.call_method(act, "getContentResolver", "()Landroid/content/ContentResolver;", &[])?.l()?;
+        let s = env.new_string(&uri)?;
+        let uri = env.call_static_method("android/net/Uri", "parse", "(Ljava/lang/String;)Landroid/net/Uri;", &[JValue::Object(&s)])?.l()?;
+        let none = JObject::null();
+        env.call_method(&resolver, "delete", "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I", &[JValue::Object(&uri), JValue::Object(&none), JValue::Object(&none)])?;
+        Ok(())
+    });
+}
+
 /// Where downloads go: Download/Voxa on the phone's storage, or Voxa's own folder there
 /// if that cannot be written.
 pub fn downloads_dir() -> std::path::PathBuf {

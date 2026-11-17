@@ -43,6 +43,11 @@ server needs a newer version, Voxa tells you and opens the update window.
     Dark: Raincloud, Afterglow, Blood Moon, Nightshade, Twilight, Synthwave,
     Pink Lemonade, Aurora, Woodland and 🌴 Vice City (1.31.0: a Miami sunset, orange into
     magenta with hot pink).
+  * **Your picture** (1.32.0): any picture of yours behind see-through panels, like a
+    wallpaper. **Options ▸ Application ▸ Themes ▸ Choose picture…** (PNG, JPEG, GIF, WebP
+    or BMP, up to 40 MB). Voxa keeps a copy in its own folder, so it still shows if the
+    original moves, and **Darken** keeps text easy to read. The picture stays on your
+    device.
   * Older Voxa versions still read your settings: they use Dark or Light instead of a
     theme they don't know.
 * **Avatars** (Voxa Server 1.15.0+): click your name ▸ **Change Avatar…**.
@@ -269,8 +274,9 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   inside it.
 
 ### Server calendar (Voxa Server 1.23.0+, Voxa 1.31.0)
-* **📆 Server calendar** next to the Server tab: one calendar for the whole server, there
-  whatever channel you are in (or none). It works like a channel's calendar: several
+* **📆 Server calendar** next to the Server tab, and 📆 in the voice card at the bottom
+  left (1.32.0): one calendar for the whole server, independent of the channel calendars,
+  there whatever channel you are in, or when you are in none. It works like a channel's calendar: several
   calendars (tabs), Upcoming and Month, answers, limits and reminders.
 * **Where to meet:** an event can name a channel, e.g. *Game night, Friday 8 pm in
   Racing*. Events show 📍 and the channel; **➡ Join** in the event takes you there.
@@ -430,8 +436,12 @@ x86_64 for Chromebooks).
 * **Permissions:** the microphone when Voxa starts, the camera when you first turn it on,
   and notifications on Android 13+.
 * **voxa:// links** from web pages open Voxa.
-* **Updates:** Voxa finds new versions like on Windows; **Update** downloads the APK in
-  the browser, and opening it installs the update over the old one (settings stay).
+* **Updates:** Voxa finds new versions like on Windows (**About ▸ Check for updates**).
+  **Download and install** fetches the newest APK from GitHub, checks it against GitHub's
+  checksum and hands it to Android's installer, which updates Voxa in place (settings
+  stay). The first time, Android asks you to allow Voxa to install apps: turn it on and go
+  back. (Voxa 1.31.0 and older could not install updates themselves and opened the
+  download in the browser; from 1.32.0 it works in the app.)
 * **Not on phones:** sharing your screen (you can watch others'), global hotkeys, the
   tray and starting with Windows. Android may stop the microphone while Voxa is in the
   background, so keep it open while you talk.

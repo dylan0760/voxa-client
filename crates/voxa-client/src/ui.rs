@@ -166,6 +166,75 @@ fn two_tone(dark: bool, a: (u8, u8, u8), b: (u8, u8, u8), accent: (u8, u8, u8)) 
     }
 }
 
+/// The "Your picture" theme: the picture and how much it is darkened (set by
+/// `apply_style`), and the pictures loaded so far (path -> texture, None if unreadable).
+static BACKGROUND: std::sync::Mutex<(Option<String>, f32)> = std::sync::Mutex::new((None, 0.35));
+#[allow(clippy::type_complexity)]
+static BACKGROUND_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, Option<egui::TextureHandle>>>> = std::sync::Mutex::new(None);
+
+/// The largest picture file accepted as a background.
+pub const BACKGROUND_MAX_BYTES: u64 = 40 * 1024 * 1024;
+
+/// Loads a background picture (at most 2560 pixels wide or high in memory), once.
+pub fn background_texture(ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
+    let mut cache = BACKGROUND_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let map = cache.get_or_insert_with(Default::default);
+    if let Some(t) = map.get(path) {
+        return t.clone();
+    }
+    // At most the picture in use and the one being chosen.
+    if map.len() >= 3 {
+        map.clear();
+    }
+    let load = || -> Option<egui::TextureHandle> {
+        if std::fs::metadata(path).ok()?.len() > BACKGROUND_MAX_BYTES {
+            return None;
+        }
+        let mut reader = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(16_000);
+        limits.max_image_height = Some(16_000);
+        limits.max_alloc = Some(1024 * 1024 * 1024);
+        reader.limits(limits);
+        let img = reader.decode().ok()?;
+        let img = if img.width().max(img.height()) > 2560 { img.resize(2560, 2560, image::imageops::FilterType::Triangle) } else { img };
+        let rgba = img.to_rgba8();
+        let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], &rgba);
+        Some(ctx.load_texture("voxa_background", ci, egui::TextureOptions::LINEAR))
+    };
+    let tex = load();
+    map.insert(path.to_string(), tex.clone());
+    tex
+}
+
+/// Paints a picture over `rect`, cut to fill it (like a wallpaper), darkened by `dim`.
+pub fn paint_picture(painter: &egui::Painter, rect: egui::Rect, tex: &egui::TextureHandle, dim: f32) {
+    let size = tex.size_vec2();
+    let (ta, ra) = (size.x / size.y.max(1.0), rect.width() / rect.height().max(1.0));
+    let uv = if ta > ra {
+        let w = ra / ta;
+        egui::Rect::from_min_max(egui::pos2((1.0 - w) / 2.0, 0.0), egui::pos2((1.0 + w) / 2.0, 1.0))
+    } else {
+        let h = ta / ra;
+        egui::Rect::from_min_max(egui::pos2(0.0, (1.0 - h) / 2.0), egui::pos2(1.0, (1.0 + h) / 2.0))
+    };
+    painter.image(tex.id(), rect, uv, Color32::WHITE);
+    painter.rect_filled(rect, 0, Color32::from_black_alpha((dim.clamp(0.0, 0.8) * 255.0) as u8));
+}
+
+/// The background behind the see-through panels: your picture ("Your picture" theme) or
+/// the theme's two colours.
+pub fn paint_background(ctx: &egui::Context, painter: &egui::Painter, rect: egui::Rect, g: [Color32; 2]) {
+    if current_theme() == ThemeKind::OwnPicture {
+        let (path, dim) = BACKGROUND.lock().map(|b| b.clone()).unwrap_or((None, 0.35));
+        if let Some(tex) = path.and_then(|p| background_texture(ctx, &p)) {
+            paint_picture(painter, rect, &tex, dim);
+            return;
+        }
+    }
+    paint_gradient(painter, rect, g);
+}
+
 /// Paints a two-tone theme's background over `rect` (before the panels).
 pub fn paint_gradient(painter: &egui::Painter, rect: egui::Rect, [a, b]: [Color32; 2]) {
     let mid = a.lerp_to_gamma(b, 0.5);
@@ -226,6 +295,8 @@ fn solid_palette(kind: ThemeKind) -> Theme {
         ThemeKind::Aurora => two_tone(true, (0x06, 0x20, 0x53), (0x10, 0xB6, 0xB6), (0x0B, 0x84, 0x90)),
         ThemeKind::Woodland => two_tone(true, (0x14, 0x22, 0x15), (0x5A, 0x7C, 0x58), (0x4A, 0x75, 0x3A)),
         ThemeKind::ViceCity => two_tone(true, (0xFF, 0x8A, 0x3D), (0x8E, 0x1E, 0x8C), (0xFF, 0x2E, 0x88)),
+        // Without a picture (yet): a quiet dark blend.
+        ThemeKind::OwnPicture => two_tone(true, (0x2B, 0x2D, 0x35), (0x12, 0x13, 0x17), (0x58, 0x65, 0xF2)),
         // Mustard yellow (#FFDB58) with a deep mustard accent and brown text.
         ThemeKind::Mustard => Theme {
             rail: c(0xFF, 0xDB, 0x58),
@@ -467,6 +538,9 @@ pub fn chat_font(size: f32) -> FontId {
 
 pub fn apply_style(ctx: &egui::Context, s: &Settings) {
     let kind = s.theme_kind();
+    if let Ok(mut b) = BACKGROUND.lock() {
+        *b = (s.background_image.clone(), s.background_dim);
+    }
     CURRENT_THEME.store(ThemeKind::ALL.iter().position(|k| *k == kind).unwrap_or(0) as u8, std::sync::atomic::Ordering::Relaxed);
     let t = palette(kind);
     let mut v = if kind.is_dark() { egui::Visuals::dark() } else { egui::Visuals::light() };
@@ -691,7 +765,7 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
     let show_server = app.sess.is_some() && !app.home;
     // Two-tone themes: the blend behind the see-through panels.
     if let Some(g) = t.gradient {
-        paint_gradient(ui.painter(), ctx.content_rect(), g);
+        paint_background(&ctx, ui.painter(), ctx.content_rect(), g);
     }
 
     if is_mobile(&ctx) {
@@ -837,8 +911,8 @@ fn mobile_layout(app: &mut VoxaApp, ui: &mut Ui, show_server: bool) {
             egui::Popup::close_all(&ctx);
             true
         } || crate::files::close_browser()
-            || app.dlg.close_one()
             || app.whats_new.take().is_some()
+            || app.dlg.close_one()
             || app.sess.as_mut().is_some_and(|s| {
                 let cal = if s.server_calendar_open { &mut s.server_cal_ui } else { &mut s.cal_ui };
                 cal.form.take().is_some() || cal.open_event.take().is_some()
@@ -910,49 +984,42 @@ fn mobile_layout(app: &mut VoxaApp, ui: &mut Ui, show_server: bool) {
     if shown <= 0.0 {
         return;
     }
-    egui::Area::new(egui::Id::unique("m_shade")).order(egui::Order::Foreground).fixed_pos(safe.min).show(&ctx, |ui| {
+    // The dimmed chat and the panel are one layer, the panel drawn last: it always gets the
+    // touch first. (As separate layers, tapping the shade raised it above the panel for good,
+    // and the panel could no longer be used.)
+    let w = (safe.width() * 0.86).min(400.0);
+    egui::Area::new(egui::Id::unique("m_drawers")).order(egui::Order::Foreground).fixed_pos(safe.min).show(&ctx, |ui| {
         let (r, resp) = ui.allocate_exact_size(safe.size(), Sense::click());
         ui.painter().rect_filled(r, 0, Color32::from_black_alpha((160.0 * shown) as u8));
         if resp.clicked() {
             app.mobile_drawer = Drawer::None;
         }
-    });
-    let w = (safe.width() * 0.86).min(400.0);
-    let drawer = |x: f32, id: &str| egui::Area::new(egui::Id::unique(id)).order(egui::Order::Foreground).fixed_pos(egui::pos2(x, safe.top()));
-    if left > 0.0 {
-        drawer(safe.left() - w * (1.0 - left), "m_left").show(&ctx, |ui| {
-            let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(w, safe.height()));
+        if left > 0.0 {
+            let rect = egui::Rect::from_min_size(egui::pos2(safe.left() - w * (1.0 - left), safe.top()), egui::vec2(w, safe.height()));
             ui.painter().rect_filled(rect, 0, t.side);
-            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                ui.set_min_size(rect.size());
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    // The servers (and Home) like Discord's rail.
-                    let rail_rect = egui::Rect::from_min_size(rect.min, egui::vec2(68.0, rect.height()));
-                    ui.painter().rect_filled(rail_rect, 0, t.rail);
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(rail_rect.shrink2(egui::vec2(0.0, 10.0))), |ui| rail(app, ui));
-                    let rest = egui::Rect::from_min_max(egui::pos2(rail_rect.right(), rect.top()), rect.max);
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(rest), |ui| {
-                        if show_server {
-                            server_column(app, ui);
-                        } else {
-                            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| home_column(app, ui));
-                        }
-                    });
-                });
+            // The servers (and Home) like Discord's rail.
+            let rail_rect = egui::Rect::from_min_size(rect.min, egui::vec2(68.0, rect.height()));
+            ui.painter().rect_filled(rail_rect, 0, t.rail);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rail_rect.shrink2(egui::vec2(0.0, 10.0))), |ui| rail(app, ui));
+            let rest = egui::Rect::from_min_max(egui::pos2(rail_rect.right(), rect.top()), rect.max);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rest), |ui| {
+                ui.set_min_size(rest.size());
+                if show_server {
+                    server_column(app, ui);
+                } else {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| home_column(app, ui));
+                }
             });
-        });
-    }
-    if right > 0.0 {
-        drawer(safe.right() - w * right, "m_right").show(&ctx, |ui| {
-            let rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(w, safe.height()));
+        }
+        if right > 0.0 {
+            let rect = egui::Rect::from_min_size(egui::pos2(safe.right() - w * right, safe.top()), egui::vec2(w, safe.height()));
             ui.painter().rect_filled(rect, 0, t.side);
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(12.0)), |ui| {
                 ui.set_min_size(rect.shrink(12.0).size());
                 info_panel(app, ui);
             });
-        });
-    }
+        }
+    });
 }
 
 /// The phone's Home screen (not on a server): a bar like the chat's, with ☰ for the
@@ -1296,6 +1363,9 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         // Screens are shared with a channel, so not outside one (phones can watch streams,
         // but not share their screen).
         let show_share = CAN_SHARE && (in_channel || sharing);
+        // The server calendar is global, so it is there in and outside channels.
+        let show_cal = s.sees_server_calendar();
+        let cal_open = s.server_calendar_open;
         let vping = shared.ping_ms.load(Ordering::Relaxed);
         let ping = format!("{} ms", if vping > 0 { vping } else { s.tcp_ping });
         let buttons = |ui: &mut Ui, a: &mut Vec<Action>, show_ping: bool| {
@@ -1314,6 +1384,9 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
             if show_share && icon_button(ui, "🖥", if sharing { "Stop sharing your screen" } else { "Share your screen or an application" }, sharing.then_some(RED)).clicked() {
                 a.push(Action::ShareScreen);
             }
+            if show_cal && icon_button(ui, "📆", if cal_open { "Close the server calendar" } else { "Server calendar: game nights and events of the whole server" }, cal_open.then_some(accent())).clicked() {
+                a.push(if cal_open { Action::SetTab(s.tab) } else { Action::OpenServerCalendar });
+            }
             if show_ping {
                 ui.label(RichText::new(&ping).small().color(t.dim)).on_hover_text("Voice ping. All traffic is end-to-server encrypted.");
             }
@@ -1321,7 +1394,7 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         // Side by side when it fits, otherwise the buttons go on a row of their own (a
         // narrow channel list, a big UI scale, long channel names).
         let gap = ui.spacing().item_spacing.x;
-        let n = 1 + [show_leave, show_preview, show_cam, show_share].iter().filter(|b| **b).count();
+        let n = 1 + [show_leave, show_preview, show_cam, show_share, show_cal].iter().filter(|b| **b).count();
         let small = egui::TextStyle::Small.resolve(ui.style());
         let body = egui::TextStyle::Body.resolve(ui.style());
         let width = |text: &str, font: FontId| ui.painter().layout_no_wrap(text.to_string(), font, Color32::WHITE).size().x;
@@ -2663,7 +2736,7 @@ fn server_welcome(s: &Session, ui: &mut Ui) {
             }
             ui.add_space(16.0);
             ui.label(
-                RichText::new("Chat in a channel (double-click one to join it), or with direct and group messages in 💬 Messages.")
+                RichText::new(if is_mobile(ui.ctx()) { "Chat in a channel (☰, then tap one to join it), or with direct and group messages in 👥 People." } else { "Chat in a channel (double-click one to join it), or with direct and group messages in 💬 Messages." })
                     .small()
                     .color(t.dim),
             );
@@ -2882,7 +2955,7 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
         s.dm_win.focused = ui.input(|i| i.viewport().focused.unwrap_or(false));
         s.dm_win.minimized = quiet || ui.input(|i| i.viewport().minimized.unwrap_or(false));
         if let Some(g) = t.gradient {
-            paint_gradient(ui.painter(), ui.ctx().content_rect(), g);
+            paint_background(ui.ctx(), ui.painter(), ui.ctx().content_rect(), g);
         }
         egui::Panel::left("dm_list").resizable(false).exact_size(250.0).frame(Frame::new().fill(t.side).inner_margin(Margin::same(8))).show(ui, |ui| {
             messages_sidebar(s, ui, &open_ids, sel);
@@ -4380,6 +4453,8 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
                 s.server_calendar_open = true;
                 s.calendar_open = false;
             }
+            // Phones: the button is in the channels panel, which would cover the calendar.
+            app.mobile_drawer = Drawer::None;
         }
         Action::CloseTab(id) => {
             if let Some(s) = &mut app.sess {
