@@ -19,7 +19,6 @@ pub enum Page {
     SignIn,
     Forgot,
     ChangePassword,
-    Email,
     DisableMfa,
     NewCodes,
 }
@@ -30,11 +29,8 @@ pub struct AccountDlg {
     pub password: String,
     pub password2: String,
     pub new_password: String,
-    pub email: String,
     pub code: String,
     pub remember: bool,
-    /// A reset code was asked for (the form for it is shown).
-    pub reset_asked: bool,
     /// Made an account: sign in once more to remember this device.
     pub after_create: Option<(String, String)>,
     pub error: Option<String>,
@@ -48,10 +44,8 @@ impl Default for AccountDlg {
             password: String::new(),
             password2: String::new(),
             new_password: String::new(),
-            email: String::new(),
             code: String::new(),
             remember: true,
-            reset_asked: false,
             after_create: None,
             error: None,
         }
@@ -173,7 +167,10 @@ pub fn draw(app: &mut VoxaApp, ctx: &egui::Context) {
                 return;
             }
             let has = acc.username.is_some();
-            let page = if d.page == Page::Main {
+            let page = if acc.signed_in && acc.must_change {
+                // After an administrator's reset: a new password first.
+                Page::ChangePassword
+            } else if d.page == Page::Main {
                 if acc.signed_in { Page::Main } else if has { Page::SignIn } else { Page::Main }
             } else {
                 d.page
@@ -189,10 +186,7 @@ pub fn draw(app: &mut VoxaApp, ctx: &egui::Context) {
                     text_field(ui, "Username:", &mut d.username, "3-32 letters, digits, . - _");
                     password_field(ui, "Password (at least 10 characters):", &mut d.password);
                     password_field(ui, "Password again:", &mut d.password2);
-                    text_field(ui, "Email (optional, to reset a forgotten password):", &mut d.email, "you@example.com");
-                    if !policy.email_reset {
-                        ui.label(RichText::new("This server cannot send email: reset a forgotten password with recovery codes (add an authenticator app to get them).").small().color(t.dim));
-                    }
+                    ui.label(RichText::new("Forgot it later? Use a recovery code (you get them with an authenticator app), or ask a server administrator to reset it.").small().color(t.dim));
                     ui.checkbox(&mut d.remember, "Remember this device (sign in by itself for 30 days)");
                     ui.horizontal(|ui| {
                         if primary(ui, "Make account") {
@@ -203,8 +197,7 @@ pub fn draw(app: &mut VoxaApp, ctx: &egui::Context) {
                             } else if d.password != d.password2 {
                                 Some("The two passwords are different.".into())
                             } else {
-                                let email = Some(d.email.trim().to_string()).filter(|e| !e.is_empty());
-                                s.conn.send(C2S::CreateAccount { username: d.username.trim().to_string(), password: d.password.clone(), email });
+                                s.conn.send(C2S::CreateAccount { username: d.username.trim().to_string(), password: d.password.clone() });
                                 if d.remember {
                                     d.after_create = Some((d.username.trim().to_string(), d.password.clone()));
                                 }
@@ -246,15 +239,7 @@ pub fn draw(app: &mut VoxaApp, ctx: &egui::Context) {
                 Page::Forgot => {
                     ui.label(RichText::new("Reset your password").strong());
                     text_field(ui, "Username:", &mut d.username, "");
-                    if policy.email_reset {
-                        ui.label("If your account has an email address, the server can send you a reset code.");
-                        if ui.button("📧 Email me a reset code").clicked() && !d.username.trim().is_empty() {
-                            s.conn.send(C2S::RequestReset { username: d.username.trim().to_string() });
-                            d.reset_asked = true;
-                        }
-                    }
-                    ui.add_space(4.0);
-                    text_field(ui, if policy.email_reset { "Reset code from the email, or a recovery code:" } else { "A recovery code:" }, &mut d.code, "");
+                    text_field(ui, "A recovery code:", &mut d.code, "XXXXX-XXXXX");
                     password_field(ui, "New password (at least 10 characters):", &mut d.new_password);
                     ui.horizontal(|ui| {
                         if primary(ui, "Reset password") {
@@ -272,10 +257,17 @@ pub fn draw(app: &mut VoxaApp, ctx: &egui::Context) {
                             d.page = Page::SignIn;
                         }
                     });
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("No recovery code? Ask a server administrator to reset your password: they give you a temporary one, and you choose a new password after signing in.").small().color(t.dim));
                 }
                 Page::ChangePassword => {
-                    ui.label(RichText::new("Change your password").strong());
-                    password_field(ui, "Current password:", &mut d.password);
+                    let forced = acc.must_change;
+                    if forced {
+                        ui.label(RichText::new("An administrator reset your password: choose a new one.").strong().color(YELLOW));
+                    } else {
+                        ui.label(RichText::new("Change your password").strong());
+                    }
+                    password_field(ui, if forced { "Temporary password:" } else { "Current password:" }, &mut d.password);
                     password_field(ui, "New password (at least 10 characters):", &mut d.new_password);
                     password_field(ui, "New password again:", &mut d.password2);
                     ui.horizontal(|ui| {
@@ -293,23 +285,7 @@ pub fn draw(app: &mut VoxaApp, ctx: &egui::Context) {
                                 d.page = Page::Main;
                             }
                         }
-                        if ui.button("Back").clicked() {
-                            d.page = Page::Main;
-                        }
-                    });
-                }
-                Page::Email => {
-                    ui.label(RichText::new("Recovery email").strong());
-                    text_field(ui, "Email (empty: none):", &mut d.email, "you@example.com");
-                    password_field(ui, "Your password:", &mut d.password);
-                    ui.horizontal(|ui| {
-                        if primary(ui, "Save") && !d.password.is_empty() {
-                            let email = Some(d.email.trim().to_string()).filter(|e| !e.is_empty());
-                            s.conn.send(C2S::SetEmail { password: d.password.clone(), email });
-                            d.password.clear();
-                            d.page = Page::Main;
-                        }
-                        if ui.button("Back").clicked() {
+                        if !forced && ui.button("Back").clicked() {
                             d.page = Page::Main;
                         }
                     });
@@ -360,7 +336,6 @@ pub fn draw(app: &mut VoxaApp, ctx: &egui::Context) {
                     if acc.mfa {
                         row(ui, "Recovery codes left:", RichText::new(acc.recovery_left.to_string()));
                     }
-                    row(ui, "Recovery email:", RichText::new(acc.email.clone().unwrap_or_else(|| "none".into())));
                     row(ui, "This device:", RichText::new(if token.is_some() { "remembered" } else { "not remembered" }));
                     ui.add_space(6.0);
                     ui.horizontal_wrapped(|ui| {
@@ -376,9 +351,6 @@ pub fn draw(app: &mut VoxaApp, ctx: &egui::Context) {
                         }
                         if ui.button("Change password…").clicked() {
                             d.page = Page::ChangePassword;
-                        }
-                        if ui.button("Recovery email…").clicked() {
-                            d.page = Page::Email;
                         }
                         if ui.button("Sign out").clicked() {
                             s.conn.send(C2S::SignOut(token.clone()));

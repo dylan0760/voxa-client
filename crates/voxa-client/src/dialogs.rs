@@ -48,6 +48,8 @@ pub enum Open {
     ForgetClient(String, String),
     /// Your account on this server (sign in, MFA, recovery).
     Account,
+    /// An administrator resets someone's account password (uid, nickname).
+    ResetAccount(String, String),
 }
 
 /// Someone who sent direct messages while you were offline.
@@ -272,6 +274,10 @@ pub struct Dialogs {
     pub delete_msg: Option<(TextTarget, MessageId, String, String)>,
     /// Removing someone from the server: (uid, nickname).
     pub forget: Option<(String, String)>,
+    /// Resetting someone's account password: (uid, nickname, also turn off their MFA).
+    pub reset_account: Option<(String, String, bool)>,
+    /// The temporary password from a reset: (username, password), shown once.
+    pub account_reset: Option<(String, String)>,
     /// Your account on this server.
     pub account: Option<crate::account::AccountDlg>,
     pub clear_chat: Option<TextTarget>,
@@ -308,7 +314,7 @@ impl Dialogs {
                 }
             )*};
         }
-        close!(error, link_prompt, web_login, fingerprint, delete_msg, forget, clear_chat, channel_password, away, talk_request, nickname, description);
+        close!(error, link_prompt, web_login, fingerprint, delete_msg, forget, reset_account, account_reset, clear_chat, channel_password, away, talk_request, nickname, description);
         close!(ban_client, kick, poke, privkey_use, privkey_create, delete_channel, clone_channel, client_perms, avatar, share, offline, files, account);
         if self.transfers || self.conn_info || self.about || self.update {
             (self.transfers, self.conn_info, self.about, self.update) = (false, false, false, false);
@@ -323,7 +329,7 @@ impl Dialogs {
         macro_rules! open {
             ($($f:ident),*) => { false $(|| self.$f.is_some())* };
         }
-        open!(error, link_prompt, web_login, fingerprint, delete_msg, forget, clear_chat, channel_password, away, talk_request, nickname, description)
+        open!(error, link_prompt, web_login, fingerprint, delete_msg, forget, reset_account, account_reset, clear_chat, channel_password, away, talk_request, nickname, description)
             || open!(ban_client, kick, poke, privkey_use, privkey_create, delete_channel, clone_channel, client_perms, avatar, share, offline, files, account)
             || self.transfers
             || self.conn_info
@@ -336,6 +342,8 @@ impl Dialogs {
         self.delete_msg = None;
         self.account = None;
         self.forget = None;
+        self.reset_account = None;
+        self.account_reset = None;
         self.clear_chat = None;
         self.client_perms = None;
         self.channel = None;
@@ -501,6 +509,7 @@ impl Dialogs {
                 self.clear_chat = Some(t);
             }
             Open::ForgetClient(uid, name) => self.forget = Some((uid, name)),
+            Open::ResetAccount(uid, name) => self.reset_account = Some((uid, name, false)),
             Open::Account => self.account = Some(Default::default()),
             Open::ClientPerms(id) => {
                 if let Some(c) = s.clients.get(&id) {
@@ -1677,9 +1686,7 @@ fn server_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             }
             let required = matches!(p.mode, AccountMode::Required | AccountMode::RequiredForStaff);
             ui.add_enabled(required, egui::Checkbox::new(&mut p.mfa_for_staff, "Staff must also use an authenticator app (MFA)"));
-            if !p.email_reset {
-                ui.label(RichText::new("Password reset by email is off: set smtp_host and smtp_from in the server's server.toml to turn it on. Recovery codes always work.").small().weak());
-            }
+            ui.label(RichText::new("Forgotten passwords: people use a recovery code, or an administrator right-clicks them ▸ Reset Account Password to give them a temporary one.").small().weak());
         }
         ui.add_space(6.0);
         ui.label(RichText::new("File transfers").strong());
@@ -2479,6 +2486,55 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         });
         if open && !close {
             app.dlg.forget = Some((uid, name));
+        }
+    }
+    // Reset someone's account password (Voxa Server 1.25.1+).
+    if let Some((uid, name, mut remove_mfa)) = app.dlg.reset_account.take() {
+        let mut open = true;
+        let mut close = false;
+        window("Reset Account Password").open(&mut open).show_centered(ctx, |ui| {
+            ui.set_max_width(ui.available_width().min(440.0));
+            ui.label(RichText::new(&name).strong());
+            ui.label(RichText::new(&uid).small().monospace().weak());
+            ui.add_space(4.0);
+            ui.label("The server makes a temporary password for their account and shows it to you once. Give it to them: they sign in with it and must then choose a new password. Their remembered devices are signed out.");
+            ui.checkbox(&mut remove_mfa, "Also turn off their authenticator app (they lost their phone or key)");
+            ui.label(RichText::new("Make sure it really is them asking (e.g. in person or by voice): whoever has the temporary password gets the account.").small().weak());
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(RichText::new("Reset password").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
+                    app.send_mut(C2S::ResetAccount { uid: uid.clone(), remove_mfa });
+                    close = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if open && !close {
+            app.dlg.reset_account = Some((uid, name, remove_mfa));
+        }
+    }
+    // The temporary password from a reset, shown once.
+    if let Some((user, pw)) = app.dlg.account_reset.take() {
+        let mut open = true;
+        let mut close = false;
+        window("Temporary Password").open(&mut open).show_centered(ctx, |ui| {
+            ui.set_max_width(ui.available_width().min(440.0));
+            ui.label(format!("The password of the account \"{user}\" was reset. Give them this temporary password (it is not shown again):"));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&pw).monospace().size(18.0).strong());
+                if ui.button("📋 Copy").clicked() {
+                    ui.ctx().copy_text(pw.clone());
+                }
+            });
+            ui.label(RichText::new("They sign in with username and this password, then choose a new password.").small().weak());
+            if ui.button("Done").clicked() {
+                close = true;
+            }
+        });
+        if open && !close {
+            app.dlg.account_reset = Some((user, pw));
         }
     }
     // Delete a single message.

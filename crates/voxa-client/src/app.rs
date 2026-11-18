@@ -621,7 +621,13 @@ impl Session {
     /// Best-effort client side view of my permissions (the server enforces).
     /// The server limits me to Guest permissions until I sign in (accounts, 1.25.0+).
     pub fn account_limited(&self) -> bool {
-        self.account.as_ref().is_some_and(|a| a.limited)
+        match &self.account {
+            Some(a) => a.limited,
+            // Servers with accounts send them right after Welcome. Until then assume Guest
+            // rights, so nothing is asked for that the server would refuse ("Insufficient
+            // permissions" while a remembered device is still signing in).
+            None => self.welcomed && self.server.as_ref().is_some_and(|i| server_at_least(&i.version, ACCOUNTS_SERVER)),
+        }
     }
 
     pub fn perms(&self) -> u64 {
@@ -1087,7 +1093,7 @@ impl VoxaApp {
                         self.dlg.account = Some(Default::default());
                         // `VOXA_ACCOUNT_MFA`: also make an account and start adding an app.
                         if std::env::var("VOXA_ACCOUNT_MFA").is_ok() {
-                            s.conn.send(C2S::CreateAccount { username: "dylan".into(), password: "correct horse 1".into(), email: None });
+                            s.conn.send(C2S::CreateAccount { username: "dylan".into(), password: "correct horse 1".into() });
                             STEP.store(3, Relaxed);
                         } else {
                             self.debug_done = true;
@@ -2253,7 +2259,15 @@ impl VoxaApp {
                     self.dlg.error = Some(server.host_message.clone());
                 }
                 let supports_limits = server_at_least(&server.version, "1.3.0");
+                let accounts = server_at_least(&server.version, ACCOUNTS_SERVER);
                 s.server = Some(server);
+                // A remembered device signs in before anything else is asked for.
+                if accounts {
+                    if let Some(t) = self.settings.account_tokens.get(&account_key(&s.req.address, &s.my_uid)) {
+                        s.account_resumed = true;
+                        s.conn.send(C2S::ResumeAccount(crate::protect::open(t)));
+                    }
+                }
                 if supports_limits {
                     s.conn.send(C2S::GetFileLimits);
                 }
@@ -2326,6 +2340,10 @@ impl VoxaApp {
                 if a.signed_in {
                     s.account_prompted = true;
                 }
+                // Signed in with an administrator's temporary password: choose a new one.
+                if a.signed_in && a.must_change && self.dlg.account.is_none() {
+                    self.dlg.account = Some(Default::default());
+                }
                 s.account = Some(a);
             }
             S2C::AccountToken(t) => {
@@ -2334,6 +2352,7 @@ impl VoxaApp {
                 self.settings.save();
             }
             S2C::MfaSetup { secret, uri } => s.mfa_setup = Some((secret, uri)),
+            S2C::AccountReset { uid: _, username, password } => self.dlg.account_reset = Some((username, password)),
             S2C::RecoveryCodes(codes) => {
                 s.mfa_setup = None;
                 s.recovery_codes = Some(codes);
@@ -3130,6 +3149,9 @@ impl eframe::App for VoxaApp {
 
 /// Guest, the server's built-in group for people with the fewest rights.
 pub const GUEST_GROUP: GroupId = 3;
+
+/// The first Voxa Server with accounts (and the account messages this Voxa speaks).
+pub const ACCOUNTS_SERVER: &str = "1.25.1";
 
 /// Where this device's account sign-in is remembered: per server and identity.
 pub fn account_key(address: &str, uid: &str) -> String {

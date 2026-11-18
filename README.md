@@ -213,7 +213,7 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
 * **👥 People** (top right, Voxa Server 1.13.0+): everyone who has been on the server.
   * Online people first, with their channel; then offline people with when they were
     last seen. 💬 marks people you have a saved conversation with.
-  * Click anywhere on someone's row to message them (1.33.0: the whole row, not just
+  * Click anywhere on someone's row to message them (1.33.1: the whole row, not just
     the name, and it lights up under the mouse).
 * **Offline messages** (Voxa Server 1.13.0+): message someone who is offline and the
   server delivers it when they come online.
@@ -323,7 +323,7 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   channel groups and, if you like, its sub-channels.
 * **Join power:** channels can require a minimum group *join power* (TeamSpeak style).
   Channels you can't enter show ⛔.
-* **Hidden channels** (Voxa Server 1.25.0+, Voxa 1.33.0): **Edit Channel → Hidden
+* **Hidden channels** (Voxa Server 1.25.1+, Voxa 1.33.1): **Edit Channel → Hidden
   from** lists the server groups. Tick the groups that should not see the channel: for
   them the channel, its sub-channels, the people in it and its chat don't exist (asking
   for it by number gets "Channel not found"). Administrators always see every channel,
@@ -374,7 +374,7 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
     the proof only works on that page's web address, so a look-alike site gets nothing.
   * Or paste an identity exported from Voxa.
 
-### Accounts & security (Voxa Server 1.25.0+, Voxa 1.33.0)
+### Accounts & security (Voxa Server 1.25.1+, Voxa 1.33.1)
 Your identity key proves who you are. A server can add a **username and password** on
 top of it, so a copied identity key alone is no longer enough there.
 * **Per server:** each server has its own accounts. Your username and password on one
@@ -392,18 +392,24 @@ top of it, so a copied identity key alone is no longer enough there.
 * **🔐 Account & Security…** is in the server menu and in your own menu at the bottom
   left. When the server asks you to sign in, the page opens by itself as you connect.
   * **Make an account:** a username (3–32 letters, digits, `.`, `-`, `_`), a password of
-    at least 10 characters and, optionally, an email for password resets.
+    at least 10 characters.
   * **Remember this device:** it signs in by itself for 30 days (the token is encrypted
-    like your identities). Changing or resetting your password, or turning MFA on, signs
-    remembered devices out.
+    like your identities), signing in before Voxa asks the server for anything else.
+    Changing or resetting your password, or turning MFA on, signs remembered devices out.
   * **Authenticator app (MFA):** scan the QR code with Microsoft or Google
     Authenticator, Aegis, 2FAS, or Yubico Authenticator with a YubiKey, then type the
     6-digit code. You get **10 recovery codes**, shown once. Each works once, instead of
     the app or to reset your password.
-  * **Forgot your password?** Use a recovery code or, if the server has email set up and
-    your account has an email, **📧 Email me a reset code**.
-  * Change your password or recovery email, make new recovery codes or turn MFA off.
+  * **Forgot your password?** Use a recovery code, or ask a server administrator to reset
+    it: they give you a temporary password, and after signing in with it you choose a
+    new one (until then you only have Guest permissions where accounts are required).
+  * Change your password, make new recovery codes or turn MFA off.
     These need a full sign-in (with the app, if you use one).
+* **Administrators** (*Edit virtual server*): right-click someone (or someone offline in
+  👥 People) ▸ **Reset Account Password…** makes a temporary password for their account,
+  shown to you once, optionally also turning off their authenticator app (a lost phone or
+  key). Their remembered devices are signed out. Not for people with permissions you lack,
+  and not yourself.
 * **Passkeys and tap-to-sign-in YubiKeys (FIDO2)** are planned for a later version.
 
 ### Everyday conveniences
@@ -460,7 +466,7 @@ x86_64 for Chromebooks).
   pictures, files, video calls, the calendar, watching screen shares, themes, bookmarks
   and identities. Dialogs open as full-screen pages with finger-sized buttons, ticks and
   lists; Android's back button closes them (and open menus) first.
-  * 1.33.0: every dialog is a page as wide as the screen that scrolls down. Forms put
+  * 1.33.1: every dialog is a page as wide as the screen that scrolls down. Forms put
     each label above its box (full width), and text wraps instead of running under the
     boxes or off the screen. Small pop-ups (signing in to the web page, messages from
     while you were away, the avatar editor) are pages too.
@@ -526,7 +532,7 @@ Lossless channels need about 0.8–1.5 Mbit/s per listener, sent by the server.
   your "last seen" time from when you were last visible. Anyone who can't see you gets
   "Client not found" when they try to poke or message your session. A direct message to
   your identity is answered "kept for later" but reaches you right away.
-* **Accounts** (Voxa Server 1.25.0+): passwords only travel over the encrypted
+* **Accounts** (Voxa Server 1.25.1+): passwords only travel over the encrypted
   connection, and the server stores them as Argon2 hashes. Ten wrong passwords or codes
   in a row lock the account for 15 minutes. Authenticator codes work once, and the server
   keeps remembered-device tokens only as SHA-256 hashes. See the server's README.

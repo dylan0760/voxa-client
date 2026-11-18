@@ -2117,6 +2117,11 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
             a.push(Action::Dialog(dialogs::Open::ClientPerms(c.id)));
             ui.close();
         }
+        // Accounts (Voxa Server 1.25.1+): give them a temporary password.
+        if c.id != s.me && s.account_policy.is_some() && s.my_server_perms() & perm::SERVER_EDIT != 0 && ui.button("🔑  Reset Account Password…").on_hover_text("They forgot their password: give them a temporary one").clicked() {
+            a.push(Action::Dialog(dialogs::Open::ResetAccount(c.uid.clone(), c.nickname.clone())));
+            ui.close();
+        }
         if ui.button("📋  Copy Unique ID").clicked() {
             a.push(Action::CopyText(c.uid.clone()));
             ui.close();
@@ -2225,6 +2230,8 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
     offline.sort_by(|a, b| b.2.cmp(&a.2).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
     let can_call = s.me().is_some_and(|m| s.server_perms_of(m) & perm::CHANNEL_CREATE_TEMPORARY != 0);
     let can_forget = s.supports("1.23.0") && s.my_server_perms() & perm::GROUP_MANAGE != 0;
+    let can_reset = s.account_policy.is_some() && s.my_server_perms() & perm::SERVER_EDIT != 0;
+    let my_uid = s.my_uid.clone();
     let a = &mut app.actions;
     let now = now_unix();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -2276,6 +2283,10 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
                 }
                 if !online && can_forget && ui.button(RichText::new("🗑  Remove from server…").color(RED)).on_hover_text("Forget them: groups, permissions, picture (they start fresh if they come back)").clicked() {
                     a.push(Action::Dialog(dialogs::Open::ForgetClient(uid.to_string(), name.to_string())));
+                    ui.close();
+                }
+                if can_reset && uid != my_uid && ui.button("🔑  Reset Account Password…").on_hover_text("They forgot their password: give them a temporary one").clicked() {
+                    a.push(Action::Dialog(dialogs::Open::ResetAccount(uid.to_string(), name.to_string())));
                     ui.close();
                 }
             });

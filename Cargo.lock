@@ -5047,7 +5047,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voxa-android"
-version = "1.33.0"
+version = "1.33.1"
 dependencies = [
  "android_logger",
  "anyhow",
@@ -5079,7 +5079,7 @@ dependencies = [
 
 [[package]]
 name = "voxa-client"
-version = "1.33.0"
+version = "1.33.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5113,7 +5113,7 @@ dependencies = [
 
 [[package]]
 name = "voxa-proto"
-version = "1.33.0"
+version = "1.33.1"
 dependencies = [
  "base64 0.22.1",
  "bincode",
