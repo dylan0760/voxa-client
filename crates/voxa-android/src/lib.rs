@@ -27,6 +27,8 @@ mod comms;
 mod config;
 #[path = "../../voxa-client/src/avatar_editor.rs"]
 mod avatar_editor;
+#[path = "../../voxa-client/src/account.rs"]
+mod account;
 #[path = "../../voxa-client/src/avatars.rs"]
 mod avatars;
 #[path = "../../voxa-client/src/dialogs.rs"]

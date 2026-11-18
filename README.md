@@ -2,8 +2,9 @@
 
 Voxa is free, open source voice chat with persistent encrypted text chat, video calls,
 screen sharing and channel calendars. It is written in Rust for **Windows and Android**
-and has a TeamSpeak-6-style interface. There are no license keys, accounts,
-registrations or fees.
+and has a TeamSpeak-6-style interface. There are no license keys, registrations or
+fees. Servers can optionally ask for a per-server account (username, password and an
+authenticator app) on top of your identity.
 
 This repository is the **client** (Windows and Android). The server lives at
 [dylan0760/voxa-server](https://github.com/dylan0760/voxa-server).
@@ -212,7 +213,8 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
 * **👥 People** (top right, Voxa Server 1.13.0+): everyone who has been on the server.
   * Online people first, with their channel; then offline people with when they were
     last seen. 💬 marks people you have a saved conversation with.
-  * Click anyone to message them.
+  * Click anywhere on someone's row to message them (1.33.0: the whole row, not just
+    the name, and it lights up under the mouse).
 * **Offline messages** (Voxa Server 1.13.0+): message someone who is offline and the
   server delivers it when they come online.
   * The server keeps it encrypted until then and deletes it after delivery.
@@ -321,6 +323,13 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   channel groups and, if you like, its sub-channels.
 * **Join power:** channels can require a minimum group *join power* (TeamSpeak style).
   Channels you can't enter show ⛔.
+* **Hidden channels** (Voxa Server 1.25.0+, Voxa 1.33.0): **Edit Channel → Hidden
+  from** lists the server groups. Tick the groups that should not see the channel: for
+  them the channel, its sub-channels, the people in it and its chat don't exist (asking
+  for it by number gets "Channel not found"). Administrators always see every channel,
+  and the default channel can't be hidden. Groups also have a new **See channels**
+  permission: without it, a group only sees the channel it is in. Every group has it
+  after the update, so nothing changes until you change it.
 
 ### Files
 * **File browser** per channel:
@@ -364,6 +373,38 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
     which identity to use, and the browser is signed in. Your key never leaves Voxa;
     the proof only works on that page's web address, so a look-alike site gets nothing.
   * Or paste an identity exported from Voxa.
+
+### Accounts & security (Voxa Server 1.25.0+, Voxa 1.33.0)
+Your identity key proves who you are. A server can add a **username and password** on
+top of it, so a copied identity key alone is no longer enough there.
+* **Per server:** each server has its own accounts. Your username and password on one
+  server mean nothing on another.
+* **The server decides** (**Edit Virtual Server → Accounts & security**):
+  * **Off:** as before, the identity key alone.
+  * **Optional:** anyone may make an account to protect their identity.
+  * **Required for staff:** everyone whose groups give more than the default server
+    group (moderators, admins…) must sign in.
+  * **Required for everyone.**
+  * **Staff must also use an authenticator app (MFA).**
+  * Until someone signs in, they only get **Guest** permissions (and see what Guests
+    see). The server refuses a setting that would lock out the admin making it, so make
+    your own account (and add MFA) first.
+* **🔐 Account & Security…** is in the server menu and in your own menu at the bottom
+  left. When the server asks you to sign in, the page opens by itself as you connect.
+  * **Make an account:** a username (3–32 letters, digits, `.`, `-`, `_`), a password of
+    at least 10 characters and, optionally, an email for password resets.
+  * **Remember this device:** it signs in by itself for 30 days (the token is encrypted
+    like your identities). Changing or resetting your password, or turning MFA on, signs
+    remembered devices out.
+  * **Authenticator app (MFA):** scan the QR code with Microsoft or Google
+    Authenticator, Aegis, 2FAS, or Yubico Authenticator with a YubiKey, then type the
+    6-digit code. You get **10 recovery codes**, shown once. Each works once, instead of
+    the app or to reset your password.
+  * **Forgot your password?** Use a recovery code or, if the server has email set up and
+    your account has an email, **📧 Email me a reset code**.
+  * Change your password or recovery email, make new recovery codes or turn MFA off.
+    These need a full sign-in (with the app, if you use one).
+* **Passkeys and tap-to-sign-in YubiKeys (FIDO2)** are planned for a later version.
 
 ### Everyday conveniences
 * Identities (export/import), bookmarks, and trust-on-first-use server fingerprint
@@ -419,6 +460,10 @@ x86_64 for Chromebooks).
   pictures, files, video calls, the calendar, watching screen shares, themes, bookmarks
   and identities. Dialogs open as full-screen pages with finger-sized buttons, ticks and
   lists; Android's back button closes them (and open menus) first.
+  * 1.33.0: every dialog is a page as wide as the screen that scrolls down. Forms put
+    each label above its box (full width), and text wraps instead of running under the
+    boxes or off the screen. Small pop-ups (signing in to the web page, messages from
+    while you were away, the avatar editor) are pages too.
 * **Touch, like Discord** (1.30.0):
   * **tap a channel** to join it (the arrow still opens or closes it);
   * **press and hold** a message, person or channel for its menu (edit, copy text, pin,
@@ -481,6 +526,10 @@ Lossless channels need about 0.8–1.5 Mbit/s per listener, sent by the server.
   your "last seen" time from when you were last visible. Anyone who can't see you gets
   "Client not found" when they try to poke or message your session. A direct message to
   your identity is answered "kept for later" but reaches you right away.
+* **Accounts** (Voxa Server 1.25.0+): passwords only travel over the encrypted
+  connection, and the server stores them as Argon2 hashes. Ten wrong passwords or codes
+  in a row lock the account for 15 minutes. Authenticator codes work once, and the server
+  keeps remembered-device tokens only as SHA-256 hashes. See the server's README.
 * **Downloads and chat content:**
   * Folder downloads never write outside the folder you pick.
   * Hostile chat messages, images and streams are size-limited, so they cannot freeze

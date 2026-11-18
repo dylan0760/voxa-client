@@ -146,26 +146,47 @@ impl Updater {
 /// egui sizes a window to its content's height, so a window can only be made taller
 /// by dragging if the content fills the space it is given. `show_fill` lets the
 /// content take up the remaining height, which makes every window resizable both ways.
-pub trait ShowFill {
+pub trait ShowFill: Sized {
     fn show_fill<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<Option<R>>>;
+    /// A small window centred on the screen; on phones a full-screen page instead.
+    fn show_centered<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<Option<R>>>;
+}
+
+/// Phones: a dialog as a flat full-screen page (above the system bars), like an app's
+/// settings page rather than a floating window. It scrolls down only, so text wraps to the
+/// screen's width instead of running off it.
+fn phone_page<R>(w: egui::Window<'_>, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<Option<R>>> {
+    let style = ctx.global_style();
+    let page = egui::Frame::window(&style)
+        .corner_radius(0)
+        .stroke(egui::Stroke::NONE)
+        .shadow(egui::Shadow::NONE)
+        .fill(style.visuals.panel_fill)
+        .inner_margin(egui::Margin::symmetric(14, 10));
+    // The screen's size also replaces a dialog's `default_width` (wider than some phones).
+    let screen = crate::ui::safe_rect(ctx);
+    w.frame(page).resizable(false).default_size(screen.size()).fixed_rect(screen).show(ctx, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.set_max_width(ui.available_width());
+            // Text wraps instead of widening the page.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            add(ui)
+        })
+        .inner
+    })
 }
 
 impl ShowFill for egui::Window<'_> {
-    fn show_fill<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<Option<R>>> {
-        // Phones: every dialog is a flat full-screen page (above the system bars), like an
-        // app's settings page rather than a floating window.
+    fn show_centered<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<Option<R>>> {
         if crate::ui::is_mobile(ctx) {
-            let style = ctx.global_style();
-            let page = egui::Frame::window(&style)
-                .corner_radius(0)
-                .stroke(egui::Stroke::NONE)
-                .shadow(egui::Shadow::NONE)
-                .fill(style.visuals.panel_fill)
-                .inner_margin(egui::Margin::symmetric(12, 8));
-            // Content wider or taller than a phone scrolls.
-            return self.frame(page).fixed_rect(crate::ui::safe_rect(ctx)).show(ctx, |ui| {
-                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, add).inner
-            });
+            return phone_page(self, ctx, add);
+        }
+        self.anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, add)
+    }
+
+    fn show_fill<R>(self, ctx: &egui::Context, add: impl FnOnce(&mut egui::Ui) -> R) -> Option<egui::InnerResponse<Option<R>>> {
+        if crate::ui::is_mobile(ctx) {
+            return phone_page(self, ctx, add);
         }
         self.show(ctx, |ui| {
             let r = add(ui);

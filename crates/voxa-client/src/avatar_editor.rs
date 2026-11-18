@@ -1,6 +1,7 @@
 //! The avatar editor: a colour for the initials, or a picture cropped like on Steam (drag
 //! the square to move it, drag a corner or scroll to resize, previews at several sizes).
 
+use crate::updater::ShowFill;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::app::VoxaApp;
@@ -239,8 +240,7 @@ pub fn show(app: &mut VoxaApp, ctx: &egui::Context) {
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
+        .show_centered(ctx, |ui| {
             ui.label(RichText::new(format!("Identity \"{}\" · shown to others on servers with Voxa Server 1.15.0 or newer", ident.name)).small().weak());
             ui.add_space(4.0);
             ui.horizontal_top(|ui| {

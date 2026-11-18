@@ -1282,6 +1282,9 @@ fn server_menu(s: &Session, ui: &mut Ui, a: &mut Vec<Action>) {
         }
     };
     item(ui, true, "ℹ  Server Info", Action::Select(Selection::Server));
+    if s.account.is_some() {
+        item(ui, true, "🔐  Account & Security…", Action::Dialog(dialogs::Open::Account));
+    }
     item(ui, create, "➕  Create Channel", Action::Dialog(dialogs::Open::CreateChannel(None)));
     item(ui, true, "⭐  Add to Bookmarks", Action::Dialog(dialogs::Open::AddBookmark));
     ui.separator();
@@ -1525,6 +1528,10 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
                 ui.close();
             }
             ui.separator();
+            if s.account.is_some() && ui.button("🔐 Account & Security...").on_hover_text("Your username, password and authenticator app on this server").clicked() {
+                a.push(Action::Dialog(dialogs::Open::Account));
+                ui.close();
+            }
             if ui.button("👤 Identities...").clicked() {
                 a.push(Action::Dialog(dialogs::Open::Identities));
                 ui.close();
@@ -2223,8 +2230,11 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         let mut row = |ui: &mut Ui, uid: &str, name: &str, sub: String, dot: Option<Color32>| {
             let online = dot.is_some();
+            // The whole row is one target: the texts in it do not catch the mouse.
+            let bg = ui.painter().add(egui::Shape::Noop);
             let r = ui.scope_builder(egui::UiBuilder::new().sense(Sense::click()), |ui| {
                 ui.set_width(ui.available_width());
+                ui.style_mut().interaction.selectable_labels = false;
                 ui.horizontal(|ui| {
                     avatar(ui, 28.0, name, uid, dot);
                     ui.vertical(|ui| {
@@ -2246,6 +2256,9 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
                     }
                 });
             });
+            if r.response.hovered() {
+                ui.painter().set(bg, egui::Shape::rect_filled(r.response.rect.expand(2.0), CornerRadius::same(6), t.hover));
+            }
             let tip = if online { "Send a direct message" } else { "Send a message: it is delivered when they come online" };
             let r = r.response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip);
             if r.clicked() {

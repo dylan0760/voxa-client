@@ -331,6 +331,17 @@ pub struct Session {
     pub adopt_avatar: bool,
     /// Server-wide options (servers 1.16.0+).
     pub server_options: Option<ServerOptions>,
+    /// Accounts (servers 1.25.0+): the rules, my account here, and whether this device's
+    /// remembered sign-in was tried / the account page was shown by itself.
+    pub account_policy: Option<AccountPolicy>,
+    pub account: Option<AccountState>,
+    pub account_resumed: bool,
+    pub account_prompted: bool,
+    /// Adding an authenticator app: (secret, otpauth link); recovery codes to show once.
+    pub mfa_setup: Option<(String, String)>,
+    pub recovery_codes: Option<Vec<String>>,
+    /// Which server groups do not see which channels (for people who edit channels).
+    pub hidden_channels: HashMap<ChannelId, Vec<GroupId>>,
     /// Bans of the ban list that include hardware.
     pub hw_bans: HashSet<u64>,
     /// You were set away by Voxa (idle), so coming back clears it.
@@ -401,6 +412,10 @@ impl Session {
     }
 
     pub fn server_perms_of(&self, c: &ClientInfo) -> u64 {
+        // Until I sign in to my account (when the server wants it): only Guest's.
+        if c.id == self.me && self.account_limited() {
+            return self.groups.get(&GUEST_GROUP).map(|g| g.perms).unwrap_or(0);
+        }
         let own = if c.id == self.me { self.extra_perms } else { 0 };
         c.server_groups.iter().filter_map(|g| self.groups.get(g)).fold(own, |a, g| a | g.perms)
     }
@@ -604,8 +619,16 @@ impl Session {
     }
 
     /// Best-effort client side view of my permissions (the server enforces).
+    /// The server limits me to Guest permissions until I sign in (accounts, 1.25.0+).
+    pub fn account_limited(&self) -> bool {
+        self.account.as_ref().is_some_and(|a| a.limited)
+    }
+
     pub fn perms(&self) -> u64 {
         let Some(me) = self.me() else { return 0 };
+        if self.account_limited() {
+            return self.server_perms_of(me);
+        }
         self.server_perms_of(me) | self.groups.get(&me.channel_group).map(|g| g.perms).unwrap_or(0)
     }
 
@@ -1040,6 +1063,43 @@ impl VoxaApp {
             },
             // The server calendar with a few game nights, one meeting in a channel (for
             // screenshots; VOXA_PRIVKEY makes me an admin first).
+            // The account page with accounts optional (VOXA_PRIVKEY makes me an admin first).
+            "account" => {
+                static STEP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+                use std::sync::atomic::Ordering::Relaxed;
+                self.debug_done = false;
+                let Some(s) = &mut self.sess else { return };
+                if !s.welcomed || s.account.is_none() {
+                    return;
+                }
+                match STEP.load(Relaxed) {
+                    0 => {
+                        if let Ok(k) = std::env::var("VOXA_PRIVKEY") {
+                            s.conn.send(C2S::UsePrivilegeKey(k));
+                        }
+                        STEP.store(1, Relaxed);
+                    }
+                    1 if s.my_server_perms() & perm::SERVER_EDIT != 0 => {
+                        s.conn.send(C2S::SetAccountPolicy(AccountPolicy { mode: AccountMode::Optional, ..Default::default() }));
+                        STEP.store(2, Relaxed);
+                    }
+                    2 if s.account_policy.is_some_and(|p| p.mode == AccountMode::Optional) => {
+                        self.dlg.account = Some(Default::default());
+                        // `VOXA_ACCOUNT_MFA`: also make an account and start adding an app.
+                        if std::env::var("VOXA_ACCOUNT_MFA").is_ok() {
+                            s.conn.send(C2S::CreateAccount { username: "dylan".into(), password: "correct horse 1".into(), email: None });
+                            STEP.store(3, Relaxed);
+                        } else {
+                            self.debug_done = true;
+                        }
+                    }
+                    3 if s.account.as_ref().is_some_and(|a| a.signed_in) => {
+                        s.conn.send(C2S::StartMfa);
+                        self.debug_done = true;
+                    }
+                    _ => {}
+                }
+            }
             "server-calendar" => {
                 static STEP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
                 use std::sync::atomic::Ordering::Relaxed;
@@ -1761,6 +1821,13 @@ impl VoxaApp {
             avatars_synced: false,
             adopt_avatar: false,
             server_options: None,
+            account_policy: None,
+            account: None,
+            account_resumed: false,
+            account_prompted: false,
+            mfa_setup: None,
+            recovery_codes: None,
+            hidden_channels: HashMap::new(),
             hw_bans: HashSet::new(),
             auto_away: false,
             presences: HashMap::new(),
@@ -2225,10 +2292,66 @@ impl VoxaApp {
             }
             S2C::Refused(r) => s.log(EventKind::Error, r),
             S2C::Error(e) => {
+                // This device's sign-in expired: forget it and ask for the password.
+                if e.contains("sign-in has expired") {
+                    self.settings.account_tokens.remove(&account_key(&s.req.address, &s.my_uid));
+                    self.settings.save();
+                    if self.dlg.account.is_none() && s.account_limited() {
+                        self.dlg.account = Some(Default::default());
+                    }
+                }
                 s.log(EventKind::Error, e.clone());
                 self.dlg.error = Some(e);
             }
             S2C::Notice(n) => s.log(EventKind::Info, n),
+            S2C::AccountPolicy(p) => s.account_policy = Some(p),
+            S2C::AccountState(a) => {
+                let key = account_key(&s.req.address, &s.my_uid);
+                // Turning MFA on signs remembered devices out (they must sign in with it).
+                if a.mfa && s.account.as_ref().is_some_and(|o| !o.mfa) && self.settings.account_tokens.remove(&key).is_some() {
+                    self.settings.save();
+                }
+                // A remembered device signs in by itself (once per connection).
+                if !a.signed_in && a.username.is_some() && !s.account_resumed {
+                    s.account_resumed = true;
+                    if let Some(t) = self.settings.account_tokens.get(&key) {
+                        s.conn.send(C2S::ResumeAccount(crate::protect::open(t)));
+                    }
+                }
+                // Limited until signing in: the account page opens by itself, once.
+                if a.limited && !s.account_prompted && (a.username.is_none() || s.account_resumed && !self.settings.account_tokens.contains_key(&key)) {
+                    s.account_prompted = true;
+                    self.dlg.account = Some(Default::default());
+                }
+                if a.signed_in {
+                    s.account_prompted = true;
+                }
+                s.account = Some(a);
+            }
+            S2C::AccountToken(t) => {
+                let key = account_key(&s.req.address, &s.my_uid);
+                self.settings.account_tokens.insert(key, crate::protect::seal(&t));
+                self.settings.save();
+            }
+            S2C::MfaSetup { secret, uri } => s.mfa_setup = Some((secret, uri)),
+            S2C::RecoveryCodes(codes) => {
+                s.mfa_setup = None;
+                s.recovery_codes = Some(codes);
+            }
+            S2C::HiddenChannels(list) => s.hidden_channels = list.into_iter().collect(),
+            // Channels that came into or went out of view (not made or deleted): no log line.
+            S2C::ChannelsVisible { shown, hidden } => {
+                for id in hidden {
+                    s.channels.remove(&id);
+                    s.channel_logs.remove(&id);
+                    if s.selected == Selection::Channel(id) {
+                        s.selected = Selection::Server;
+                    }
+                }
+                for c in shown {
+                    s.channels.insert(c.id, c);
+                }
+            }
             S2C::Pong(t) => {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                 s.tcp_ping = now.saturating_sub(t) as u32;
@@ -3003,6 +3126,14 @@ impl eframe::App for VoxaApp {
         self.settings.save();
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
+}
+
+/// Guest, the server's built-in group for people with the fewest rights.
+pub const GUEST_GROUP: GroupId = 3;
+
+/// Where this device's account sign-in is remembered: per server and identity.
+pub fn account_key(address: &str, uid: &str) -> String {
+    format!("{address}|{uid}")
 }
 
 #[cfg(test)]

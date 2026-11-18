@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod gpu;
+mod account;
 mod app;
 mod audio;
 mod calendar;

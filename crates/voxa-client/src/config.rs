@@ -304,6 +304,9 @@ pub struct Settings {
     /// darkened (0 to 0.8) so text stays readable.
     pub background_image: Option<String>,
     pub background_dim: f32,
+    /// Accounts on servers: this device's sign-in tokens (encrypted like the identities),
+    /// per server address and identity.
+    pub account_tokens: HashMap<String, String>,
     pub show_timestamps: bool,
     pub download_dir: Option<String>,
     /// Per-uid local volume adjustments.
@@ -355,6 +358,7 @@ impl Default for Settings {
             ui_scale: 1.0,
             background_image: None,
             background_dim: 0.35,
+            account_tokens: HashMap::new(),
             show_timestamps: true,
             download_dir: None,
             client_volumes: HashMap::new(),

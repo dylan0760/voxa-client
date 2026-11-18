@@ -46,6 +46,8 @@ pub enum Open {
     Avatar(usize),
     /// Remove someone who is offline from the server (uid, nickname).
     ForgetClient(String, String),
+    /// Your account on this server (sign in, MFA, recovery).
+    Account,
 }
 
 /// Someone who sent direct messages while you were offline.
@@ -136,6 +138,9 @@ pub struct ChannelDlg {
     pub had_password: bool,
     pub unlimited: bool,
     pub max: u32,
+    /// Server groups that do not see this channel (None: not editable here, e.g. a new
+    /// channel or a server older than 1.25.0).
+    pub hidden: Option<Vec<GroupId>>,
 }
 
 pub struct ServerDlg {
@@ -151,6 +156,8 @@ pub struct ServerDlg {
     pub quota_gb: f64,
     /// Auto-away minutes (None: server older than 1.16.0).
     pub auto_away: Option<u32>,
+    /// Who must sign in to an account (None: server older than 1.25.0).
+    pub accounts: Option<AccountPolicy>,
 }
 
 impl ServerDlg {
@@ -265,6 +272,8 @@ pub struct Dialogs {
     pub delete_msg: Option<(TextTarget, MessageId, String, String)>,
     /// Removing someone from the server: (uid, nickname).
     pub forget: Option<(String, String)>,
+    /// Your account on this server.
+    pub account: Option<crate::account::AccountDlg>,
     pub clear_chat: Option<TextTarget>,
     /// The chat a delete / clear confirmation was opened for (the selected tab may change,
     /// or it came from the Messages window).
@@ -300,7 +309,7 @@ impl Dialogs {
             )*};
         }
         close!(error, link_prompt, web_login, fingerprint, delete_msg, forget, clear_chat, channel_password, away, talk_request, nickname, description);
-        close!(ban_client, kick, poke, privkey_use, privkey_create, delete_channel, clone_channel, client_perms, avatar, share, offline, files);
+        close!(ban_client, kick, poke, privkey_use, privkey_create, delete_channel, clone_channel, client_perms, avatar, share, offline, files, account);
         if self.transfers || self.conn_info || self.about || self.update {
             (self.transfers, self.conn_info, self.about, self.update) = (false, false, false, false);
             return true;
@@ -315,7 +324,7 @@ impl Dialogs {
             ($($f:ident),*) => { false $(|| self.$f.is_some())* };
         }
         open!(error, link_prompt, web_login, fingerprint, delete_msg, forget, clear_chat, channel_password, away, talk_request, nickname, description)
-            || open!(ban_client, kick, poke, privkey_use, privkey_create, delete_channel, clone_channel, client_perms, avatar, share, offline, files)
+            || open!(ban_client, kick, poke, privkey_use, privkey_create, delete_channel, clone_channel, client_perms, avatar, share, offline, files, account)
             || self.transfers
             || self.conn_info
             || self.about
@@ -325,6 +334,7 @@ impl Dialogs {
 
     pub fn close_session_dialogs(&mut self) {
         self.delete_msg = None;
+        self.account = None;
         self.forget = None;
         self.clear_chat = None;
         self.client_perms = None;
@@ -424,6 +434,7 @@ impl Dialogs {
                         password: String::new(),
                         change_password: false,
                         had_password: i.has_password,
+                        accounts: s.account_policy,
                         limits: None,
                         max_unlimited: false,
                         max_gb: 2.0,
@@ -451,7 +462,7 @@ impl Dialogs {
             Open::ConnectionInfo => self.conn_info = true,
             Open::CreateChannel(parent) => {
                 let edit = ChannelEdit::new_default(parent);
-                self.channel = Some(ChannelDlg { id: None, edit, password: String::new(), change_password: true, had_password: false, unlimited: true, max: 10 });
+                self.channel = Some(ChannelDlg { id: None, edit, password: String::new(), change_password: true, had_password: false, unlimited: true, max: 10, hidden: None });
             }
             Open::EditChannel(id) => {
                 if let Some(c) = s.channels.get(&id) {
@@ -463,6 +474,7 @@ impl Dialogs {
                         had_password: c.has_password,
                         unlimited: c.max_clients.is_none(),
                         max: c.max_clients.unwrap_or(10),
+                        hidden: (s.account_policy.is_some() && s.has(perm::CHANNEL_EDIT)).then(|| s.hidden_channels.get(&id).cloned().unwrap_or_default()),
                     });
                 }
             }
@@ -489,6 +501,7 @@ impl Dialogs {
                 self.clear_chat = Some(t);
             }
             Open::ForgetClient(uid, name) => self.forget = Some((uid, name)),
+            Open::Account => self.account = Some(Default::default()),
             Open::ClientPerms(id) => {
                 if let Some(c) = s.clients.get(&id) {
                     s.conn.send(C2S::GetClientPerms(c.uid.clone()));
@@ -575,6 +588,18 @@ fn window(title: &str) -> egui::Window<'_> {
 }
 
 fn form_row(ui: &mut Ui, label: &str, f: impl FnOnce(&mut Ui)) {
+    // Phones: the label above its field, which gets the whole width (side by side, both
+    // were squeezed and the text ran into the boxes).
+    if crate::ui::is_mobile(ui.ctx()) {
+        ui.vertical(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(label).small().strong());
+            f(ui);
+            ui.add_space(4.0);
+        });
+        ui.end_row();
+        return;
+    }
     ui.label(label);
     f(ui);
     ui.end_row();
@@ -618,6 +643,7 @@ fn text_prompt(ctx: &egui::Context, title: &str, label: &str, text: &mut String,
 
 pub fn draw_all(app: &mut VoxaApp, ctx: &egui::Context) {
     connect_dialog(app, ctx);
+    crate::account::draw(app, ctx);
     bookmarks_dialog(app, ctx);
     options_dialog(app, ctx);
     identities_dialog(app, ctx);
@@ -1513,6 +1539,29 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             form_row(ui, "Sort order:", |ui| {
                 ui.add(egui::DragValue::new(&mut d.edit.sort));
             });
+            // Voxa Server 1.25.0+: groups that do not see this channel at all.
+            if let Some(hidden) = &mut d.hidden {
+                form_row(ui, "Hidden from:", |ui| {
+                    ui.vertical(|ui| {
+                        let mut groups: Vec<&GroupInfo> = s.groups.values().filter(|g| g.kind == GroupKind::Server).collect();
+                        groups.sort_by_key(|g| (g.sort, g.id));
+                        let mine = s.me().map(|m| m.server_groups.clone()).unwrap_or_default();
+                        for g in groups {
+                            let mut on = hidden.contains(&g.id);
+                            let own = mine.contains(&g.id);
+                            let r = ui.add_enabled(!own || on, egui::Checkbox::new(&mut on, g.name.as_str()));
+                            let r = if own { r.on_hover_text("You are in this group") } else { r };
+                            if r.changed() {
+                                hidden.retain(|x| *x != g.id);
+                                if on {
+                                    hidden.push(g.id);
+                                }
+                            }
+                        }
+                        ui.label(RichText::new("People in these groups do not see this channel, its sub-channels, people or chat. Administrators always see it.").small().weak());
+                    });
+                });
+            }
         });
         let (ok, cancel) = ok_cancel(ui, "OK");
         if ok {
@@ -1539,6 +1588,15 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 e.name = sp.name();
                 e.max_clients = None;
                 e.password = if d.id.is_some() { PasswordChange::Clear } else { PasswordChange::Keep };
+            }
+            if let (Some(id), Some(h)) = (d.id, &d.hidden) {
+                let mut new = h.clone();
+                new.sort();
+                let mut old = s.hidden_channels.get(&id).cloned().unwrap_or_default();
+                old.sort();
+                if new != old {
+                    s.conn.send(C2S::SetChannelHidden { channel: id, groups: new });
+                }
             }
             match d.id {
                 Some(id) => s.conn.send(C2S::EditChannel { id, edit: e }),
@@ -1604,6 +1662,25 @@ fn server_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 });
             }
         });
+        // Accounts (Voxa Server 1.25.0+).
+        if let Some(p) = &mut d.accounts {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Accounts & security").strong());
+            ui.label(RichText::new("Accounts add a username and password (and optionally an authenticator app) on top of each identity, so a copied identity key alone is not enough. People who must sign in only get Guest permissions until they do.").small().weak());
+            for (m, label, tip) in [
+                (AccountMode::Off, "Off", "The identity key alone, as before"),
+                (AccountMode::Optional, "Optional", "People may make an account to protect their identity"),
+                (AccountMode::RequiredForStaff, "Required for staff", "Staff must sign in: anyone whose groups give more than the default server group (e.g. moderators and admins)"),
+                (AccountMode::Required, "Required for everyone", "Everyone must sign in to get their permissions"),
+            ] {
+                ui.radio_value(&mut p.mode, m, label).on_hover_text(tip);
+            }
+            let required = matches!(p.mode, AccountMode::Required | AccountMode::RequiredForStaff);
+            ui.add_enabled(required, egui::Checkbox::new(&mut p.mfa_for_staff, "Staff must also use an authenticator app (MFA)"));
+            if !p.email_reset {
+                ui.label(RichText::new("Password reset by email is off: set smtp_host and smtp_from in the server's server.toml to turn it on. Recovery codes always work.").small().weak());
+            }
+        }
         ui.add_space(6.0);
         ui.label(RichText::new("File transfers").strong());
         if d.limits.is_some() {
@@ -1642,6 +1719,11 @@ fn server_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             if let (Some(m), Some(old)) = (d.auto_away, s.server_options) {
                 if m != old.auto_away_minutes {
                     s.conn.send(C2S::SetServerOptions(ServerOptions { auto_away_minutes: m }));
+                }
+            }
+            if let (Some(new), Some(old)) = (d.accounts, s.account_policy) {
+                if new.mode != old.mode || new.mfa_for_staff != old.mfa_for_staff {
+                    s.conn.send(C2S::SetAccountPolicy(new));
                 }
             }
             if let Some(old) = d.limits {
@@ -2379,7 +2461,7 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut open = true;
         let mut close = false;
         window("Remove from Server").open(&mut open).show_fill(ctx, |ui| {
-            ui.set_max_width(440.0);
+            ui.set_max_width(ui.available_width().min(440.0));
             ui.label(RichText::new(&name).strong());
             ui.label(RichText::new(&uid).small().monospace().weak());
             ui.add_space(4.0);
@@ -2404,7 +2486,7 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut open = true;
         let mut close = false;
         window("Delete Message").open(&mut open).show_fill(ctx, |ui| {
-            ui.set_max_width(420.0);
+            ui.set_max_width(ui.available_width().min(420.0));
             ui.label("Delete this message? It is removed for everyone and from the chat history.");
             Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(6).inner_margin(Margin::same(8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -2443,7 +2525,7 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             TextTarget::Private(_) | TextTarget::Group(_) => "this conversation".into(),
         };
         window("Clear Chat History").open(&mut open).show_fill(ctx, |ui| {
-            ui.set_max_width(420.0);
+            ui.set_max_width(ui.available_width().min(420.0));
             ui.label(RichText::new(format!("Delete every message in {what}?")).strong());
             ui.label(if matches!(target, TextTarget::Private(_)) {
                 "This deletes your copy of the conversation from this PC. The other person keeps their own copy. It cannot be undone."
@@ -2730,9 +2812,8 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-            ui.set_min_width(380.0);
+            .show_centered(ctx, |ui| {
+            ui.set_min_width(ui.available_width().min(380.0));
             ui.label(RichText::new(format!("You got {total} direct message{} while you were offline:", if total == 1 { "" } else { "s" })).strong());
             ui.add_space(4.0);
             egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
@@ -2772,9 +2853,8 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.set_max_width(420.0);
+            .show_centered(ctx, |ui| {
+                ui.set_max_width(ui.available_width().min(420.0));
                 ui.label("A web page wants to sign in with your Voxa identity:");
                 ui.label(RichText::new(&w.origin).strong().monospace().size(15.0));
                 if !w.server_name.is_empty() {
@@ -2863,9 +2943,8 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-            ui.set_max_width(380.0);
+            .show_centered(ctx, |ui| {
+            ui.set_max_width(ui.available_width().min(380.0));
             ui.label("A link wants to connect you to this server:");
             ui.label(RichText::new(&address).strong().monospace());
             if !known {
@@ -2972,7 +3051,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if app.dlg.update {
         let mut open = true;
         window("Voxa Updates").open(&mut open).show_fill(ctx, |ui| {
-            ui.set_min_width(380.0);
+            ui.set_min_width(ui.available_width().min(380.0));
             crate::updater::ui(&mut app.updater, ui, "Voxa");
         });
         app.dlg.update = open;
