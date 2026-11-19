@@ -531,6 +531,21 @@ fn fit(ui: &Ui, w: f32) -> f32 {
     w.min(ui.available_width() - 8.0).max(120.0)
 }
 
+/// Too narrow for a list beside its editor (phones in portrait, small windows).
+fn narrow_dialog(ui: &Ui) -> bool {
+    crate::ui::is_mobile(ui.ctx()) || ui.available_width() < 520.0
+}
+
+/// A list and its editor side by side, or (narrow) one above the other so nothing is
+/// pushed off the right edge of the screen.
+fn side_or_stacked(narrow: bool) -> egui::Layout {
+    if narrow {
+        egui::Layout::top_down(egui::Align::Min)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Min)
+    }
+}
+
 /// The search box above a permission list (the text is kept while the dialog is open).
 /// Returns what to search for.
 fn perm_search(ui: &mut Ui, key: &str) -> String {
@@ -764,18 +779,24 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     // A bookmark that was just set to connect on startup (the others are turned off).
     let mut only_startup: Option<usize> = None;
     egui::Window::new("Bookmarks").open(&mut open).collapsible(false).resizable(true).default_size([620.0, 360.0]).show_fill(ctx, |ui| {
-        ui.horizontal_top(|ui| {
+        let narrow = narrow_dialog(ui);
+        ui.with_layout(side_or_stacked(narrow), |ui| {
             ui.vertical(|ui| {
-                ui.set_width(200.0);
-                crate::updater::fill_list(ui, "list1", 40.0, 120.0, |ui| {
+                ui.set_width(if narrow { ui.available_width() } else { 200.0 });
+                let list = |ui: &mut Ui| {
                     for (i, b) in app.settings.bookmarks.iter().enumerate() {
                         let label = if b.name.is_empty() { b.address.clone() } else { b.name.clone() };
                         if ui.selectable_label(d.selected == Some(i), label).clicked() {
                             d.selected = Some(i);
                         }
                     }
-                });
-                ui.horizontal(|ui| {
+                };
+                if narrow {
+                    egui::ScrollArea::vertical().id_salt("list1").max_height(200.0).auto_shrink([false, true]).show(ui, list);
+                } else {
+                    crate::updater::fill_list(ui, "list1", 40.0, 120.0, list);
+                }
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("➕ Add").clicked() {
                         app.settings.bookmarks.push(Bookmark { name: "New Bookmark".into(), nickname: app.settings.nickname.clone(), ..Default::default() });
                         d.selected = Some(app.settings.bookmarks.len() - 1);
@@ -794,25 +815,25 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 if let Some(b) = d.selected.and_then(|i| app.settings.bookmarks.get_mut(i)) {
                     egui::Grid::new("bm").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                         form_row(ui, "Label:", |ui| {
-                            ui.text_edit_singleline(&mut b.name);
+                            ui.add(egui::TextEdit::singleline(&mut b.name).desired_width(fit(ui, 280.0)));
                         });
                         form_row(ui, "Address:", |ui| {
-                            ui.text_edit_singleline(&mut b.address);
+                            ui.add(egui::TextEdit::singleline(&mut b.address).desired_width(fit(ui, 280.0)));
                         });
                         form_row(ui, "Nickname:", |ui| {
-                            ui.text_edit_singleline(&mut b.nickname);
+                            ui.add(egui::TextEdit::singleline(&mut b.nickname).desired_width(fit(ui, 280.0)));
                         });
                         form_row(ui, "Server password:", |ui| {
-                            ui.add(egui::TextEdit::singleline(&mut b.server_password).password(true));
+                            ui.add(egui::TextEdit::singleline(&mut b.server_password).password(true).desired_width(fit(ui, 280.0)));
                         });
                         form_row(ui, "Default channel:", |ui| {
-                            ui.text_edit_singleline(&mut b.default_channel);
+                            ui.add(egui::TextEdit::singleline(&mut b.default_channel).desired_width(fit(ui, 280.0)));
                         });
                         form_row(ui, "Channel password:", |ui| {
-                            ui.add(egui::TextEdit::singleline(&mut b.channel_password).password(true));
+                            ui.add(egui::TextEdit::singleline(&mut b.channel_password).password(true).desired_width(fit(ui, 280.0)));
                         });
                         form_row(ui, "Identity:", |ui| {
-                            egui::ComboBox::from_id_salt("bmid").selected_text(ids.get(b.identity).cloned().unwrap_or_default()).show_ui(ui, |ui| {
+                            egui::ComboBox::from_id_salt("bmid").width(fit(ui, 240.0)).selected_text(ids.get(b.identity).cloned().unwrap_or_default()).show_ui(ui, |ui| {
                                 for (i, n) in ids.iter().enumerate() {
                                     ui.selectable_value(&mut b.identity, i, n);
                                 }
@@ -1313,9 +1334,10 @@ fn identities_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     egui::Window::new("Identities").open(&mut open).collapsible(false).resizable(true).default_size([600.0, 380.0]).show_fill(ctx, |ui| {
         ui.label(RichText::new("Your identity is a cryptographic key pair that the server uses to recognize you. Keep a backup (Export) to keep your permissions.").weak());
         ui.separator();
-        ui.horizontal_top(|ui| {
+        let narrow = narrow_dialog(ui);
+        ui.with_layout(side_or_stacked(narrow), |ui| {
             ui.vertical(|ui| {
-                ui.set_width(180.0);
+                ui.set_width(if narrow { ui.available_width() } else { 180.0 });
                 for (i, id) in app.settings.identities.iter().enumerate() {
                     let label = if i == app.settings.default_identity { format!("{} (default)", id.name) } else { id.name.clone() };
                     if ui.selectable_label(d.selected == i, label).clicked() {
@@ -1323,7 +1345,7 @@ fn identities_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     }
                 }
                 ui.add_space(6.0);
-                ui.add(egui::TextEdit::singleline(&mut d.new_name).hint_text("New identity name"));
+                ui.add(egui::TextEdit::singleline(&mut d.new_name).hint_text("New identity name").desired_width(fit(ui, 180.0)));
                 if ui.button("➕ Create").clicked() {
                     let name = if d.new_name.trim().is_empty() { format!("Identity {}", app.settings.identities.len() + 1) } else { d.new_name.trim().to_string() };
                     app.settings.identities.push(Identity::generate(&name));
@@ -1339,14 +1361,15 @@ fn identities_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 if let Some(id) = app.settings.identities.get_mut(d.selected) {
                     egui::Grid::new("idg").num_columns(2).show(ui, |ui| {
                         form_row(ui, "Name:", |ui| {
-                            ui.text_edit_singleline(&mut id.name);
+                            ui.add(egui::TextEdit::singleline(&mut id.name).desired_width(fit(ui, 280.0)));
                         });
                         form_row(ui, "Unique ID:", |ui| {
-                            ui.add(egui::Label::new(RichText::new(id.uid()).monospace()).selectable(true));
+                            // Long IDs wrap on phones instead of widening the page.
+                            ui.add(egui::Label::new(RichText::new(id.uid()).monospace()).selectable(true).wrap());
                         });
                     });
                     let key = id.key.clone();
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui.button("📋 Export (copy key)").on_hover_text("Copies the private key to the clipboard. Keep it secret!").clicked() {
                             ctx.copy_text(key.clone());
                         }
@@ -1364,7 +1387,7 @@ fn identities_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 }
                 ui.separator();
                 ui.label("Import identity (paste an exported key):");
-                ui.add(egui::TextEdit::singleline(&mut d.import).password(true).desired_width(300.0));
+                ui.add(egui::TextEdit::singleline(&mut d.import).password(true).desired_width(fit(ui, 300.0)));
                 if ui.button("Import").clicked() {
                     if voxa_proto::identity::KeyPair::import(&d.import).is_some() {
                         app.settings.identities.push(Identity { name: format!("Imported {}", app.settings.identities.len() + 1), key: d.import.trim().to_string(), avatar_color: None, avatar_image: None });
@@ -1756,9 +1779,10 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut open = true;
     let title = if d.kind == GroupKind::Server { "Server Groups" } else { "Channel Groups" };
     egui::Window::new(title).open(&mut open).collapsible(false).resizable(true).default_size([760.0, 520.0]).show_fill(ctx, |ui| {
-        ui.horizontal_top(|ui| {
+        let narrow = narrow_dialog(ui);
+        ui.with_layout(side_or_stacked(narrow), |ui| {
             ui.vertical(|ui| {
-                ui.set_width(200.0);
+                ui.set_width(if narrow { ui.available_width() } else { 200.0 });
                 let mut groups: Vec<&GroupInfo> = s.groups.values().filter(|g| g.kind == d.kind).collect();
                 groups.sort_by_key(|g| (g.sort, g.id));
                 // The first group is shown right away (not an empty "Select a group").
@@ -1780,7 +1804,7 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     }
                 }
                 ui.separator();
-                ui.add(egui::TextEdit::singleline(&mut d.new_name).hint_text("New group name"));
+                ui.add(egui::TextEdit::singleline(&mut d.new_name).hint_text("New group name").desired_width(fit(ui, 180.0)));
                 if ui.button("➕ Create group").clicked() && !d.new_name.trim().is_empty() {
                     s.conn.send(C2S::CreateGroup { kind: d.kind, name: d.new_name.trim().to_string(), copy_from: d.selected });
                     d.new_name.clear();
@@ -1795,7 +1819,7 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 };
                 egui::Grid::new("gedit").num_columns(2).show(ui, |ui| {
                     form_row(ui, "Name:", |ui| {
-                        ui.text_edit_singleline(&mut g.name);
+                        ui.add(egui::TextEdit::singleline(&mut g.name).desired_width(fit(ui, 280.0)));
                     });
                     form_row(ui, "Talk power:", |ui| {
                         ui.add(egui::DragValue::new(&mut g.talk_power).range(0..=100));
@@ -1825,7 +1849,7 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         }
                     }
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("💾 Save group").clicked() {
                         s.conn.send(C2S::EditGroup(g.clone()));
                     }
@@ -1854,8 +1878,8 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     }
                 });
                 if d.kind == GroupKind::Server {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut d.add_uid).hint_text("Unique ID to add"));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut d.add_uid).hint_text("Unique ID to add").desired_width(fit(ui, 220.0)));
                         if ui.button("Add member").clicked() && !d.add_uid.trim().is_empty() {
                             s.conn.send(C2S::SetServerGroup { uid: d.add_uid.trim().to_string(), group: gid, add: true });
                             s.conn.send(C2S::GroupMembers(gid));

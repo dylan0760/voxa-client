@@ -466,6 +466,13 @@ x86_64 for Chromebooks).
   pictures, files, video calls, the calendar, watching screen shares, themes, bookmarks
   and identities. Dialogs open as full-screen pages with finger-sized buttons, ticks and
   lists; Android's back button closes them (and open menus) first.
+  * 1.34.0: **Identities**, **Bookmarks** and **Server/Channel Groups** fit a phone held
+    upright. Their list is shown above the editor (instead of beside it), the buttons
+    wrap onto a second line, and the boxes are as wide as the screen, so **Delete**,
+    **Export**, **Set as default**, **Connect** and the rest are no longer cut off in
+    portrait. The same happens in a narrow window on Windows.
+  * 1.34.0: servers show you as being on **Android** (Voxa 1.33.1 and older reported
+    every phone as Windows).
   * 1.33.1: every dialog is a page as wide as the screen that scrolls down. Forms put
     each label above its box (full width), and text wraps instead of running under the
     boxes or off the screen. Small pop-ups (signing in to the web page, messages from
@@ -536,6 +543,10 @@ Lossless channels need about 0.8–1.5 Mbit/s per listener, sent by the server.
   connection, and the server stores them as Argon2 hashes. Ten wrong passwords or codes
   in a row lock the account for 15 minutes. Authenticator codes work once, and the server
   keeps remembered-device tokens only as SHA-256 hashes. See the server's README.
+* **Names can't be imitated** (Voxa Server 1.26.0+): your nickname belongs to your
+  identity on each server, also while you are offline. Someone else joining with it, or
+  with a look-alike ("DyIan", Cyrillic letters, "Dy1an"), gets a numbered name instead,
+  and renaming to it is refused. See the server's README.
 * **Downloads and chat content:**
   * Folder downloads never write outside the folder you pick.
   * Hostile chat messages, images and streams are size-limited, so they cannot freeze
@@ -571,13 +582,27 @@ Tests:
   * `feature_test` (codecs and the version requirement);
   * `spacer_test` (separators);
   * `group_test`, `video_test` and `calendar_test` (group chats, video, calendar);
+  * `names_test` (unique names and the platform shown for a person; Voxa Server 1.26.0+);
+  * `web_origin_test` (the web page only accepts sign-ins for its own address; Voxa
+    Server 1.26.0+, web page on, its address as a third argument);
   * `stream_rate` (frame rate of a screen share).
+* Give each end-to-end test a server with a **fresh data folder**: the tests claim its
+  one-time admin privilege key, and names stay reserved between runs. `feature_test`
+  needs `require_latest_client = true` in `server.toml`; the others are easiest with
+  `false`.
 
 ## Releasing an update
 1. Bump `version` in `Cargo.toml` (for example `1.2.0`) and commit.
 2. Push a matching tag: `git tag v1.2.0` then `git push origin v1.2.0`.
 3. GitHub Actions builds the MSI and publishes the release. Installed clients offer the
    update automatically.
+
+### Test builds
+New work goes to the **`test` branch** first. A test build is published as a GitHub
+**pre-release** named `vX.Y.Z (test)` from the `test` branch, with the MSI and the APK.
+Pre-releases are not "latest", so installed copies of Voxa (Windows and Android) do not
+offer them as updates; install them by hand from the release page. Once tested, merge
+`test` into `main` and publish the normal release.
 
 To point a fork's updater at another repository, build with
 `$env:VOXA_UPDATE_REPO = "you/your-fork"`.

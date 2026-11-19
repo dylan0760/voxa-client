@@ -242,6 +242,19 @@ impl Transfer {
 }
 
 /// True if the server version is `min` or newer (feature detection for optional messages).
+/// The platform this client reports to servers (shown in the user list and client info).
+pub fn client_platform() -> &'static str {
+    if cfg!(target_os = "android") {
+        "Android"
+    } else if cfg!(windows) {
+        "Windows"
+    } else if cfg!(target_os = "macos") {
+        "macOS"
+    } else {
+        "Linux"
+    }
+}
+
 pub fn server_at_least(server_version: &str, min: &str) -> bool {
     !voxa_proto::update::is_newer(min, server_version)
 }
@@ -1766,7 +1779,7 @@ impl VoxaApp {
         let hello = C2S::Hello {
             protocol: PROTOCOL_VERSION,
             version: APP_VERSION.into(),
-            platform: "Windows".into(),
+            platform: client_platform().into(),
             nickname: req.nickname.clone(),
             server_password: Some(req.server_password.clone()).filter(|s| !s.is_empty()),
             // Join options: stay out of channels and / or invisible (servers 1.17.0+;
