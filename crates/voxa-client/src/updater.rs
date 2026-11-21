@@ -161,7 +161,8 @@ fn phone_page<R>(w: egui::Window<'_>, ctx: &egui::Context, add: impl FnOnce(&mut
         .corner_radius(0)
         .stroke(egui::Stroke::NONE)
         .shadow(egui::Shadow::NONE)
-        .fill(style.visuals.panel_fill)
+        // Solid, never see-through (two-tone and picture themes made pages hard to read).
+        .fill(crate::ui::theme().phone_solid(style.visuals.panel_fill))
         .inner_margin(egui::Margin::symmetric(14, 10));
     // The screen's size also replaces a dialog's `default_width` (wider than some phones).
     let screen = crate::ui::safe_rect(ctx);
@@ -352,7 +353,7 @@ pub fn whats_new_window(ctx: &egui::Context, wn: &WhatsNew, product: &str, rende
         window = window.pivot(egui::Align2::CENTER_CENTER).default_pos(center);
     } else {
         let style = ctx.global_style();
-        let page = egui::Frame::window(&style).corner_radius(0).stroke(egui::Stroke::NONE).shadow(egui::Shadow::NONE).fill(style.visuals.panel_fill).inner_margin(egui::Margin::symmetric(12, 8));
+        let page = egui::Frame::window(&style).corner_radius(0).stroke(egui::Stroke::NONE).shadow(egui::Shadow::NONE).fill(crate::ui::theme().phone_solid(style.visuals.panel_fill)).inner_margin(egui::Margin::symmetric(12, 8));
         window = window.frame(page).min_size([100.0, 100.0]).fixed_rect(crate::ui::safe_rect(ctx));
     }
     window

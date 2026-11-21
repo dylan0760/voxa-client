@@ -184,7 +184,10 @@ mod browser {
         let mut finish: Option<Vec<PathBuf>> = None;
         let mut cancel = false;
         let screen = crate::ui::safe_rect(ctx);
+        let style = ctx.global_style();
+        let solid = egui::Frame::window(&style).fill(crate::ui::theme().phone_solid(style.visuals.window_fill));
         egui::Window::new(b.title.clone())
+            .frame(solid)
             .collapsible(false)
             .resizable(false)
             .fixed_rect(screen.shrink(8.0))

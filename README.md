@@ -478,6 +478,9 @@ x86_64 for Chromebooks).
     each label above its box (full width), and text wraps instead of running under the
     boxes or off the screen. Small pop-ups (signing in to the web page, messages from
     while you were away, the avatar editor) are pages too.
+  * 1.34.1: these pages and the side panels are solid, never see-through. With the
+    two-tone themes and **Your picture** they are black (white on the light two-tone
+    themes, whose text is dark), so the background no longer shows through the text.
 * **Touch, like Discord** (1.30.0):
   * **tap a channel** to join it (the arrow still opens or closes it);
   * **press and hold** a message, person or channel for its menu (edit, copy text, pin,

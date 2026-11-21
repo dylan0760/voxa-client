@@ -115,6 +115,20 @@ pub struct Theme {
 impl Theme {
     /// Fill of a panel inside another panel of the same colour: see-through panel colours
     /// would add up and get darker, so two-tone themes leave nested panels unfilled.
+    /// Phones: a solid fill for full-screen pages and the side panels. Two-tone and picture
+    /// themes are see-through there, which made text hard to read over the background:
+    /// solid black on dark themes, solid white on light ones (their text is dark).
+    pub fn phone_solid(&self, c: Color32) -> Color32 {
+        if self.gradient.is_none() {
+            return c.to_opaque();
+        }
+        if self.text.r() > 128 {
+            Color32::BLACK
+        } else {
+            Color32::WHITE
+        }
+    }
+
     pub fn inner(&self, c: Color32) -> Color32 {
         if self.gradient.is_some() {
             Color32::TRANSPARENT
@@ -996,7 +1010,7 @@ fn mobile_layout(app: &mut VoxaApp, ui: &mut Ui, show_server: bool) {
         }
         if left > 0.0 {
             let rect = egui::Rect::from_min_size(egui::pos2(safe.left() - w * (1.0 - left), safe.top()), egui::vec2(w, safe.height()));
-            ui.painter().rect_filled(rect, 0, t.side);
+            ui.painter().rect_filled(rect, 0, t.phone_solid(t.side));
             // The servers (and Home) like Discord's rail.
             let rail_rect = egui::Rect::from_min_size(rect.min, egui::vec2(68.0, rect.height()));
             ui.painter().rect_filled(rail_rect, 0, t.rail);
@@ -1013,7 +1027,7 @@ fn mobile_layout(app: &mut VoxaApp, ui: &mut Ui, show_server: bool) {
         }
         if right > 0.0 {
             let rect = egui::Rect::from_min_size(egui::pos2(safe.right() - w * right, safe.top()), egui::vec2(w, safe.height()));
-            ui.painter().rect_filled(rect, 0, t.side);
+            ui.painter().rect_filled(rect, 0, t.phone_solid(t.side));
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(12.0)), |ui| {
                 ui.set_min_size(rect.shrink(12.0).size());
                 info_panel(app, ui);
