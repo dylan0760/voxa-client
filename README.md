@@ -325,9 +325,10 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   Channels you can't enter show ⛔.
 * **Hidden channels** (Voxa Server 1.25.1+, Voxa 1.33.1): **Edit Channel → Hidden
   from** lists the server groups. Tick the groups that should not see the channel: for
-  them the channel, its sub-channels, the people in it and its chat don't exist (asking
-  for it by number gets "Channel not found"). Administrators always see every channel,
-  and the default channel can't be hidden. Groups also have a new **See channels**
+  them the channel, its sub-channels, the people in it, its chat, pictures, files and
+  calendar don't exist (asking for it by number gets "Channel not found"; fully from
+  Voxa Server 1.26.1). Administrators always see every channel, and the default channel
+  can't be hidden. Groups also have a new **See channels**
   permission: without it, a group only sees the channel it is in. Every group has it
   after the update, so nothing changes until you change it.
 
