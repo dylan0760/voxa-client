@@ -355,13 +355,15 @@ pub fn pending_sends(ui: &mut Ui, imgs: &ChatImages, dim: Color32) {
     }
 }
 
-/// Full-size viewer window with "Save as".
-pub fn viewer(ctx: &egui::Context, imgs: &mut ChatImages) {
+/// Full-size viewer window with "Save as". Returns a GIF to add to the server's library
+/// (`can_add`: allowed to): (name, bytes).
+pub fn viewer(ctx: &egui::Context, imgs: &mut ChatImages, can_add: bool) -> Option<(String, Vec<u8>)> {
     // Only in the window it was opened from.
     if ctx.viewport_id() != imgs.viewing_in {
-        return;
+        return None;
     }
-    let Some(r) = imgs.viewing.clone() else { return };
+    let Some(r) = imgs.viewing.clone() else { return None };
+    let mut to_server: Option<Arc<Vec<u8>>> = None;
     let mut open = true;
     let mut save: Option<Arc<Vec<u8>>> = None;
     let mut favourite: Option<Arc<Vec<u8>>> = None;
@@ -383,6 +385,9 @@ pub fn viewer(ctx: &egui::Context, imgs: &mut ChatImages) {
                 }
                 if anim.is_some() && ui.button("⭐ Add to GIF favourites").on_hover_text("Find it under ⭐ in the GIF picker").clicked() {
                     favourite = Some(bytes.clone());
+                }
+                if can_add && anim.is_some() && ui.button("📚 Add to server GIFs").on_hover_text("Everyone on this server finds it under 📚 Server in the GIF picker").clicked() {
+                    to_server = Some(bytes.clone());
                 }
                 ui.label(RichText::new(format!("{w}×{h} · {}", crate::ui::fmt_size(bytes.len() as u64))).weak());
             });
@@ -412,6 +417,7 @@ pub fn viewer(ctx: &egui::Context, imgs: &mut ChatImages) {
     if !open {
         imgs.viewing = None;
     }
+    to_server.map(|b| (r.name.clone(), b.to_vec()))
 }
 
 #[cfg(test)]

@@ -23,6 +23,8 @@ const MAX_RECENT: usize = 40;
 pub enum Tab {
     #[default]
     Search,
+    /// The server's own GIF library (servers 1.28.0+).
+    Server,
     Favourites,
     Recent,
 }
@@ -35,31 +37,23 @@ pub enum Tile {
     Failed,
 }
 
-/// GIF search on one server, and the picker.
+/// One searchable list of GIFs (online search, or the server's library).
 #[derive(Default)]
-pub struct GifState {
-    pub open: bool,
-    pub tab: Tab,
-    /// The server answered which service it searches (1.27.0+): Some(name), or None
-    /// when it has none. Outer None: an older server (no GIF search at all).
-    pub provider: Option<Option<String>>,
+pub struct List {
     pub query: String,
-    /// What was last asked for, and when the text last changed (search after a pause).
+    /// What was last asked for (`\u{1}` at the end: the next page), and when the text
+    /// last changed (search after a pause).
     asked: Option<String>,
     typed: Option<Instant>,
     pub results: Vec<GifInfo>,
     pub next: Option<String>,
     pub loading: bool,
-    previews: HashMap<String, Tile>,
-    /// Preview bytes, to keep the GIF in Recent after sending it.
-    preview_bytes: HashMap<String, Arc<Vec<u8>>>,
 }
 
-impl GifState {
-    /// The server's answer to a search.
-    pub fn got(&mut self, query: String, items: Vec<GifInfo>, next: Option<String>) {
-        if self.asked.as_deref().map(|a| a.split('\u{1}').next().unwrap_or_default()) != Some(query.as_str()) {
-            return;
+impl List {
+    fn got(&mut self, query: &str, items: Vec<GifInfo>, next: Option<String>) -> bool {
+        if self.asked.as_deref().map(|a| a.split('\u{1}').next().unwrap_or_default()) != Some(query) {
+            return false;
         }
         let more = self.asked.as_deref().is_some_and(|a| a.contains('\u{1}'));
         if !more {
@@ -72,6 +66,94 @@ impl GifState {
         }
         self.next = next;
         self.loading = false;
+        true
+    }
+
+    /// Asks again next time it is shown (e.g. after GIFs were added).
+    pub fn refresh(&mut self) {
+        self.asked = None;
+    }
+}
+
+/// GIF search on one server, its GIF library, and the picker.
+#[derive(Default)]
+pub struct GifState {
+    pub open: bool,
+    pub tab: Tab,
+    /// The server answered which service it searches (1.27.0+): Some(name), or None
+    /// when it has none. Outer None: an older server (no GIF search at all).
+    pub provider: Option<Option<String>>,
+    pub online: List,
+    pub library: List,
+    pub categories: Vec<String>,
+    pub library_total: u32,
+    previews: HashMap<String, Tile>,
+    /// Preview bytes, to keep the GIF in Recent after sending it.
+    preview_bytes: HashMap<String, Arc<Vec<u8>>>,
+    /// Adding GIFs to the server's library: the category, uploads on their way, and how
+    /// the last ones went.
+    pub upload_category: String,
+    uploads: HashMap<u32, String>,
+    next_upload: u32,
+    added: u32,
+    failed: Vec<String>,
+}
+
+impl GifState {
+    /// The server's answer to an online search.
+    pub fn got(&mut self, query: String, items: Vec<GifInfo>, next: Option<String>) {
+        self.online.got(&query, items, next);
+    }
+
+    /// A page of the server's library.
+    pub fn got_library(&mut self, query: String, items: Vec<GifInfo>, categories: Vec<String>, next: Option<String>, total: u32) {
+        if self.library.got(&query, items, next) {
+            self.categories = categories;
+            self.library_total = total;
+        }
+    }
+
+    /// Sends GIFs to the server's library (in the background: they can be 10 MB each).
+    pub fn upload(&mut self, conn: &crate::net::Connection, files: Vec<(String, Vec<u8>)>) {
+        let category = self.upload_category.trim().to_string();
+        for (name, data) in files {
+            self.next_upload = self.next_upload.wrapping_add(1);
+            let id = self.next_upload;
+            self.uploads.insert(id, name.clone());
+            let tx = conn.bulk_tx.clone();
+            let category = category.clone();
+            std::thread::spawn(move || {
+                let _ = tx.blocking_send(BulkC2S::AddServerGif { id, category, name, data });
+            });
+        }
+    }
+
+    /// Reads GIF files picked for the server's library and sends them.
+    fn upload_files(&mut self, conn: &crate::net::Connection, paths: Vec<PathBuf>) {
+        let mut files = Vec::new();
+        for p in paths.into_iter().take(200) {
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            match std::fs::metadata(&p) {
+                Ok(m) if m.len() <= MAX_CHAT_IMAGE as u64 => match std::fs::read(&p) {
+                    Ok(d) if is_gif(&d) => files.push((name, d)),
+                    _ => self.failed.push(format!("{name}: not a GIF")),
+                },
+                _ => self.failed.push(format!("{name}: larger than {} MB", MAX_CHAT_IMAGE / (1024 * 1024))),
+            }
+        }
+        self.upload(conn, files);
+    }
+
+    /// The server's answer to an added GIF.
+    pub fn upload_done(&mut self, id: u32, error: Option<String>) {
+        let Some(name) = self.uploads.remove(&id) else { return };
+        match error {
+            None => self.added += 1,
+            Some(e) => self.failed.push(format!("{name}: {e}")),
+        }
+        if self.uploads.is_empty() {
+            self.library.refresh();
+        }
     }
 
     /// A preview arrived over the bulk connection: decoded in the background.
@@ -105,13 +187,12 @@ impl GifState {
     pub fn closed(&mut self) {
         self.open = false;
         // Previews are small, but a long scroll can collect hundreds of them.
-        if self.previews.len() > 200 {
+        if self.previews.len() > 300 {
             self.previews.clear();
             self.preview_bytes.clear();
         }
     }
 }
-
 static DECODED: std::sync::LazyLock<Arc<Mutex<Vec<(String, Tile)>>>> = std::sync::LazyLock::new(Default::default);
 
 fn decode_tile(ctx: &egui::Context, name: &str, data: &[u8]) -> Tile {
@@ -216,31 +297,132 @@ fn local_tile(ctx: &egui::Context, p: &Path) -> Tile {
 // ---------------------------------------------------------------- the picker
 
 pub enum Pick {
-    /// A search result: the server posts it.
+    /// A search result or a library GIF: the server posts it.
     Search(String),
     /// A local GIF file (favourite or recent): sent like a picture.
     File(PathBuf),
 }
 
+/// What the picker can do on this server.
+pub struct Caps {
+    pub library: bool,
+    pub manage: bool,
+    pub bulk_ready: bool,
+}
+
+/// Search box with a pause before asking, for online search and the library.
+fn search_box(ui: &mut Ui, list: &mut List, hint: &str, focus: bool, ask: impl FnOnce(String)) {
+    let r = ui.add(egui::TextEdit::singleline(&mut list.query).hint_text(hint).desired_width(f32::INFINITY));
+    if focus {
+        r.request_focus();
+    }
+    if r.changed() {
+        list.typed = Some(Instant::now());
+    }
+    let want = list.query.trim().chars().take(MAX_GIF_QUERY).collect::<String>().to_lowercase();
+    let settled = list.typed.is_none_or(|at| at.elapsed() > Duration::from_millis(450));
+    if settled && list.asked.as_deref() != Some(want.as_str()) {
+        list.asked = Some(want.clone());
+        list.results.clear();
+        list.next = None;
+        list.loading = true;
+        ask(want);
+    } else if !settled {
+        ui.ctx().request_repaint_after(Duration::from_millis(150));
+    }
+}
+
+/// What a click or right-click on a result asked for.
+enum TileAct {
+    Post(String),
+    Favourite(String),
+    Remove(String),
+}
+
+/// A grid of search results / library GIFs, loading more at the end.
+#[allow(clippy::too_many_arguments)]
+fn results_grid(ui: &mut Ui, list: &mut List, previews: &mut HashMap<String, Tile>, conn: &crate::net::Connection, caps: &Caps, w: f32, cols: usize, removable: bool, more: impl FnOnce(String, String)) -> Option<TileAct> {
+    let mut act = None;
+    if list.results.is_empty() {
+        if list.loading {
+            ui.spinner();
+        }
+        return None;
+    }
+    let results = list.results.clone();
+    for row in results.chunks(cols) {
+        ui.horizontal(|ui| {
+            for it in row {
+                let tile = previews.get(&it.id).cloned();
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, w * 0.75), Sense::click());
+                if ui.is_rect_visible(rect) && tile.is_none() && caps.bulk_ready {
+                    previews.insert(it.id.clone(), Tile::Loading);
+                    conn.bulk_control(BulkC2S::GifPreview(it.id.clone()));
+                }
+                paint_tile(ui, rect, tile.as_ref(), &resp);
+                let resp = resp.on_hover_text(&it.title);
+                if resp.clicked() {
+                    act = Some(TileAct::Post(it.id.clone()));
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("⭐ Add to favourites").clicked() {
+                        act = Some(TileAct::Favourite(it.id.clone()));
+                        ui.close();
+                    }
+                    if removable && ui.button(RichText::new("🗑 Remove from the server").color(crate::ui::RED)).clicked() {
+                        act = Some(TileAct::Remove(it.id.clone()));
+                        ui.close();
+                    }
+                });
+            }
+        });
+    }
+    if let Some(next) = list.next.clone() {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::hover());
+        if ui.is_rect_visible(rect) && !list.loading {
+            list.loading = true;
+            let q = list.asked.clone().unwrap_or_default().split('\u{1}').next().unwrap_or_default().to_string();
+            list.asked = Some(format!("{q}\u{1}"));
+            more(q, next);
+        }
+        if list.loading {
+            ui.put(rect, egui::Spinner::new());
+        }
+    }
+    act
+}
+
 /// The GIF picker above the message box. Returns what was picked.
-pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::net::Connection, bulk_ready: bool, toggled: bool) -> Option<Pick> {
+pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::net::Connection, caps: Caps, toggled: bool) -> Option<Pick> {
     g.collect_decoded();
+    // Files picked on Android arrive later (Voxa's own file browser).
+    if let Some((_, files)) = crate::files::take(|k| *k == crate::files::PickKind::ServerGifs) {
+        g.upload_files(conn, files);
+    }
     let t = crate::ui::theme();
     let ctx = ui.ctx().clone();
-    let size = egui::vec2(420.0_f32.min(ctx.content_rect().width() - 8.0), 440.0_f32.min(ctx.content_rect().height() * 0.7));
+    let size = egui::vec2(440.0_f32.min(ctx.content_rect().width() - 8.0), 460.0_f32.min(ctx.content_rect().height() * 0.75));
     let pos = egui::pos2((anchor.right() - size.x).max(4.0), (anchor.top() - size.y - 8.0).max(4.0));
     let searchable = matches!(&g.provider, Some(Some(_)));
-    if !searchable && g.tab == Tab::Search {
-        g.tab = Tab::Favourites;
+    if (!searchable && g.tab == Tab::Search) || (!caps.library && g.tab == Tab::Server) {
+        g.tab = if caps.library { Tab::Server } else { Tab::Favourites };
+    }
+    if toggled {
+        // Fresh each time the picker opens: GIFs may have been added to the server.
+        g.library.refresh();
     }
     let mut picked = None;
     let mut remove: Option<PathBuf> = None;
     let mut favourite: Option<Arc<Vec<u8>>> = None;
+    let mut pick_files = false;
     let area = egui::Area::new(egui::Id::unique("voxa_gif_picker")).order(egui::Order::Foreground).fixed_pos(pos).show(&ctx, |ui| {
         egui::Frame::new().fill(t.window).corner_radius(10).stroke(egui::Stroke::new(1.0, t.hover)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
             ui.set_min_size(size - egui::vec2(20.0, 20.0));
             ui.set_max_size(size - egui::vec2(20.0, 20.0));
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                if caps.library {
+                    ui.selectable_value(&mut g.tab, Tab::Server, "📚 Server");
+                }
                 if searchable {
                     ui.selectable_value(&mut g.tab, Tab::Search, "🔍 Search");
                 }
@@ -248,90 +430,102 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
                 ui.selectable_value(&mut g.tab, Tab::Recent, "🕘 Recent");
             });
             ui.separator();
-            match g.tab {
-                Tab::Search => {
-                    let r = ui.add(egui::TextEdit::singleline(&mut g.query).hint_text("Search GIFs (empty: trending)").desired_width(f32::INFINITY));
-                    if toggled {
-                        r.request_focus();
-                    }
-                    if r.changed() {
-                        g.typed = Some(Instant::now());
-                    }
-                    // Ask after a short pause in typing (or at once for trending).
-                    let want = g.query.trim().chars().take(MAX_GIF_QUERY).collect::<String>().to_lowercase();
-                    let settled = g.typed.is_none_or(|at| at.elapsed() > Duration::from_millis(450));
-                    if settled && g.asked.as_deref() != Some(want.as_str()) {
-                        g.asked = Some(want.clone());
-                        g.results.clear();
-                        g.next = None;
-                        g.loading = true;
-                        conn.send(C2S::SearchGifs { query: want, next: None });
-                    } else if !settled {
-                        ctx.request_repaint_after(Duration::from_millis(150));
-                    }
-                }
-                _ => {
-                    ui.label(RichText::new(if g.tab == Tab::Favourites { "Your favourite GIFs (on this device). Add one from any GIF: click it in the chat ▸ ⭐ Add to GIF favourites." } else { "GIFs you sent recently (on this device)." }).small().color(t.dim));
-                }
-            }
-            let avail = ui.available_size();
-            egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(avail.y - if g.tab == Tab::Search { 18.0 } else { 0.0 }).show(ui, |ui| {
-                let cols = 3usize;
-                let w = ((ui.available_width() - 8.0) / cols as f32).floor();
-                match g.tab {
-                    Tab::Search => {
-                        if g.results.is_empty() {
-                            if g.loading {
-                                ui.spinner();
-                            } else {
-                                ui.label(RichText::new("No GIFs found").color(t.dim));
-                            }
-                        }
-                        let results = g.results.clone();
-                        for row in results.chunks(cols) {
+            let tab = g.tab;
+            match tab {
+                Tab::Search => search_box(ui, &mut g.online, "Search GIFs (empty: trending)", toggled, |q| conn.send(C2S::SearchGifs { query: q, next: None })),
+                Tab::Server => {
+                    search_box(ui, &mut g.library, "Search this server's GIFs", toggled, |q| conn.send(C2S::ServerGifs { query: q, next: None }));
+                    if !g.categories.is_empty() {
+                        egui::ScrollArea::horizontal().id_salt("gif_cats").max_height(30.0).show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                for it in row {
-                                    let tile = g.previews.get(&it.id).cloned();
-                                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, w * 0.75), Sense::click());
-                                    if ui.is_rect_visible(rect) && tile.is_none() && bulk_ready {
-                                        g.previews.insert(it.id.clone(), Tile::Loading);
-                                        conn.bulk_control(BulkC2S::GifPreview(it.id.clone()));
+                                for c in g.categories.clone() {
+                                    let on = g.library.query.trim().eq_ignore_ascii_case(&c);
+                                    if ui.selectable_label(on, &c).clicked() {
+                                        g.library.query = if on { String::new() } else { c.clone() };
+                                        g.library.typed = None;
                                     }
-                                    paint_tile(ui, rect, tile.as_ref(), &resp);
-                                    let resp = resp.on_hover_text(&it.title);
-                                    if resp.clicked() {
-                                        if let Some(b) = g.preview_bytes.get(&it.id) {
-                                            add_recent(b);
-                                        }
-                                        picked = Some(Pick::Search(it.id.clone()));
-                                    }
-                                    let id = it.id.clone();
-                                    resp.context_menu(|ui| {
-                                        if ui.button("⭐ Add to favourites").clicked() {
-                                            favourite = g.preview_bytes.get(&id).cloned();
-                                            ui.close();
-                                        }
-                                    });
+                                }
+                            });
+                        });
+                    }
+                    if caps.manage {
+                        ui.horizontal(|ui| {
+                            if ui.button("⬆ Add GIFs…").on_hover_text("Add GIF files to the server's library (people see them here)").clicked() {
+                                pick_files = true;
+                            }
+                            ui.add(egui::TextEdit::singleline(&mut g.upload_category).hint_text("Category (optional)").desired_width(150.0));
+                        });
+                        if !g.uploads.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(RichText::new(format!("Adding {} GIFs…", g.uploads.len())).small().color(t.dim));
+                            });
+                        } else if g.added > 0 || !g.failed.is_empty() {
+                            ui.horizontal_wrapped(|ui| {
+                                if g.added > 0 {
+                                    ui.label(RichText::new(format!("✔ Added {} GIFs", g.added)).small().color(crate::ui::GREEN));
+                                }
+                                if !g.failed.is_empty() {
+                                    ui.label(RichText::new(format!("⚠ {} not added", g.failed.len())).small().color(crate::ui::RED)).on_hover_text(g.failed.join("\n"));
+                                }
+                                if ui.small_button("✖").clicked() {
+                                    g.added = 0;
+                                    g.failed.clear();
                                 }
                             });
                         }
-                        // More as you scroll to the end.
-                        if let Some(next) = g.next.clone() {
-                            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::hover());
-                            if ui.is_rect_visible(rect) && !g.loading {
-                                g.loading = true;
-                                let q = g.asked.clone().unwrap_or_default();
-                                let q = q.split('\u{1}').next().unwrap_or_default().to_string();
-                                g.asked = Some(format!("{q}\u{1}"));
+                    }
+                }
+                _ => {
+                    ui.label(RichText::new(if tab == Tab::Favourites { "Your favourite GIFs (on this device). Add one from any GIF: click it in the chat ▸ ⭐ Add to GIF favourites." } else { "GIFs you sent recently (on this device)." }).small().color(t.dim));
+                }
+            }
+            let footer = matches!(tab, Tab::Search | Tab::Server);
+            let avail = ui.available_size();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(avail.y - if footer { 18.0 } else { 0.0 }).show(ui, |ui| {
+                let cols = 3usize;
+                let w = ((ui.available_width() - 8.0) / cols as f32).floor();
+                match tab {
+                    Tab::Search | Tab::Server => {
+                        let (list, removable) = if tab == Tab::Search { (&mut g.online, false) } else { (&mut g.library, caps.manage) };
+                        let act = results_grid(ui, list, &mut g.previews, conn, &caps, w, cols, removable, |q, next| {
+                            if tab == Tab::Search {
                                 conn.send(C2S::SearchGifs { query: q, next: Some(next) });
+                            } else {
+                                conn.send(C2S::ServerGifs { query: q, next: Some(next) });
                             }
-                            if g.loading {
-                                ui.put(rect, egui::Spinner::new());
+                        });
+                        let empty = if tab == Tab::Search { g.online.results.is_empty() && !g.online.loading } else { g.library.results.is_empty() && !g.library.loading };
+                        if empty {
+                            let text = if tab == Tab::Search {
+                                "No GIFs found".to_string()
+                            } else if !g.library.query.trim().is_empty() {
+                                "No server GIFs match".to_string()
+                            } else if caps.manage {
+                                "No GIFs on this server yet. Add some with ⬆ Add GIFs, or put .gif files into the server's gifs folder (sub-folders become categories).".to_string()
+                            } else {
+                                "No GIFs on this server yet.".to_string()
+                            };
+                            ui.label(RichText::new(text).color(t.dim));
+                        }
+                        match act {
+                            Some(TileAct::Post(id)) => {
+                                if let Some(b) = g.preview_bytes.get(&id) {
+                                    add_recent(b);
+                                }
+                                picked = Some(Pick::Search(id));
                             }
+                            Some(TileAct::Favourite(id)) => favourite = g.preview_bytes.get(&id).cloned(),
+                            Some(TileAct::Remove(id)) => {
+                                conn.send(C2S::RemoveServerGif(id.clone()));
+                                g.library.results.retain(|r| r.id != id);
+                                g.library_total = g.library_total.saturating_sub(1);
+                            }
+                            None => {}
                         }
                     }
                     Tab::Favourites | Tab::Recent => {
-                        let files = list(if g.tab == Tab::Favourites { "favourites" } else { "recent" });
+                        let files = list(if tab == Tab::Favourites { "favourites" } else { "recent" });
                         if files.is_empty() {
                             ui.label(RichText::new("Nothing here yet").color(t.dim));
                         }
@@ -344,7 +538,7 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
                                     if resp.clicked() {
                                         picked = Some(Pick::File(p.clone()));
                                     }
-                                    let fav = g.tab == Tab::Favourites;
+                                    let fav = tab == Tab::Favourites;
                                     resp.context_menu(|ui| {
                                         if fav {
                                             if ui.button("🗑 Remove from favourites").clicked() {
@@ -362,15 +556,23 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
                     }
                 }
             });
-            if g.tab == Tab::Search {
-                if let Some(Some(name)) = &g.provider {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(format!("Powered by {name}")).small().color(t.dim));
-                    });
-                }
+            if footer {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let text = match (&g.provider, tab) {
+                        (Some(Some(name)), Tab::Search) => format!("Powered by {name}"),
+                        (_, Tab::Server) => format!("{} GIFs on this server", g.library_total),
+                        _ => String::new(),
+                    };
+                    ui.label(RichText::new(text).small().color(t.dim));
+                });
             }
         });
     });
+    if pick_files {
+        if let Some(files) = crate::files::pick(crate::files::PickKind::ServerGifs, "Add GIFs to the server", &["gif"], true, false) {
+            g.upload_files(conn, files);
+        }
+    }
     if let Some(p) = remove {
         let _ = std::fs::remove_file(&p);
         LOCAL.lock().remove(&p);
@@ -378,12 +580,11 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
     if let Some(b) = favourite {
         add_favourite(&b);
     }
-    if picked.is_some() || (!toggled && (area.response.clicked_elsewhere() || ui.input(|i| i.key_pressed(egui::Key::Escape)))) {
+    if picked.is_some() || (!toggled && !pick_files && (area.response.clicked_elsewhere() || ui.input(|i| i.key_pressed(egui::Key::Escape)))) {
         g.closed();
     }
     picked
 }
-
 fn paint_tile(ui: &Ui, rect: egui::Rect, tile: Option<&Tile>, resp: &egui::Response) {
     let t = crate::ui::theme();
     ui.painter().rect_filled(rect.shrink(2.0), 6, t.card);

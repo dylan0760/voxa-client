@@ -3809,7 +3809,12 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
     let my_uid = s.my_uid.clone();
     let my_channel = s.my_channel();
     let target = chat_target(s);
-    crate::chat_images::viewer(ui.ctx(), &mut s.images);
+    let gif_library = s.supports("1.28.0");
+    let can_add_gifs = gif_library && s.my_server_perms() & perm::GIF_MANAGE != 0;
+    if let Some((name, data)) = crate::chat_images::viewer(ui.ctx(), &mut s.images, can_add_gifs) {
+        s.gif.upload(&s.conn, vec![(name, data)]);
+        s.log(EventKind::Info, "Adding the GIF to the server's library…".to_string());
+    }
     // Images go through the server: not possible for someone who is offline.
     let can_images = s.supports("1.5.0")
         && match s.tab {
@@ -3992,7 +3997,8 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                     emoji_picker(ui, rect, picker, input, &settings.recent_emoji, a, toggled);
                 }
                 if let (true, Some(gr)) = (s.gif.open, gif_rect) {
-                    match crate::gifs::picker(ui, gr, &mut s.gif, &s.conn, s.bulk_ready, gif_toggled) {
+                    let caps = crate::gifs::Caps { library: gif_library, manage: can_add_gifs, bulk_ready: s.bulk_ready };
+                    match crate::gifs::picker(ui, gr, &mut s.gif, &s.conn, caps, gif_toggled) {
                         Some(crate::gifs::Pick::Search(id)) => a.push(Action::Send(C2S::SendGif { target, id })),
                         Some(crate::gifs::Pick::File(f)) => a.push(Action::SendImage(target, crate::chat_images::ImageSource::File(f))),
                         None => {}

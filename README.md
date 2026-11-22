@@ -175,6 +175,13 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
     * **🔍 Search** (Voxa Server 1.27.0+ with GIF search set up by its admin): trending
       GIFs, or type to search. Click one to post it. The server does the searching and
       posts the GIF, so your searches and address never reach the GIF service.
+    * **📚 Server** (Voxa Server 1.28.0+, Voxa 1.36.0): the server's own GIF library,
+      with categories you can click and a search box. Click a GIF to post it. People with
+      **Manage server GIFs** (admins by default) also get **⬆ Add GIFs…** (many files
+      at once, with an optional category), **📚 Add to server GIFs** on any GIF in the
+      chat (click it to open the full-size view) and, on right-click, **🗑 Remove from
+      the server**. Admins can also drop `.gif` files straight into the server's `gifs`
+      folder (see the server's README).
     * **⭐ Favourites:** click any GIF in the chat ▸ **⭐ Add to GIF favourites**, or
       right-click one in the picker. Kept on this device, for every server.
     * **🕘 Recent:** the GIFs you sent lately.

@@ -21,6 +21,8 @@ pub enum PickKind {
     Avatar,
     /// The picture of the "Your picture" theme.
     Background,
+    /// GIFs to add to the server's GIF library.
+    ServerGifs,
 }
 
 /// Asks for files (`folder`: one folder). Windows: the chosen paths, None if cancelled.

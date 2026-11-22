@@ -1109,6 +1109,9 @@ impl VoxaApp {
                             }
                         }
                         crate::gifs::add_favourite(&buf);
+                        if let Ok(k) = std::env::var("VOXA_PRIVKEY") {
+                            s.conn.send(C2S::UsePrivilegeKey(k));
+                        }
                         let p = crate::config::config_dir().join("demo.gif");
                         let _ = std::fs::write(&p, &buf);
                         let target = TextTarget::Channel(s.my_channel());
@@ -1117,11 +1120,20 @@ impl VoxaApp {
                         s.images.send(s.conn.bulk_tx.clone(), target, crate::chat_images::ImageSource::File(p));
                         STEP.store(1, Relaxed);
                     }
-                    1 => {
-                        s.gif.open = true;
-                        s.gif.tab = crate::gifs::Tab::Favourites;
-                        self.debug_done = true;
+                    // An admin adds the GIF to the server's library (the bulk upload).
+                    1 if s.my_server_perms() & perm::GIF_MANAGE != 0 => {
+                        if let Ok(d) = std::fs::read(crate::config::config_dir().join("demo.gif")) {
+                            s.gif.upload_category = "Demo".into();
+                            s.gif.upload(&s.conn, vec![("checker dance.gif".into(), d.clone()), ("checker dance.gif".into(), d)]);
+                        }
+                        STEP.store(2, Relaxed);
                     }
+                    2 => {
+                        s.gif.open = true;
+                        s.gif.tab = crate::gifs::Tab::Server;
+                        STEP.store(3, Relaxed);
+                    }
+                    3 => self.debug_done = true,
                     _ => {}
                 }
             }
@@ -2280,6 +2292,7 @@ impl VoxaApp {
             BulkS2C::ChatImageSent { id } => s.images.send_done(id),
             BulkS2C::Image { image, data } => s.images.received(&self.ctx, image, data),
             BulkS2C::GifPreview { id, data } => s.gif.preview_received(&self.ctx, id, data),
+            BulkS2C::ServerGifAdded { id, error } => s.gif.upload_done(id, error),
             BulkS2C::ImageError { image, message } => s.images.failed(image, message),
             BulkS2C::TransferError { id, message } if s.images.owns_send(id) => s.images.send_failed(id, message),
             BulkS2C::TransferError { id, message } => {
@@ -2418,6 +2431,7 @@ impl VoxaApp {
             S2C::HiddenChannels(list) => s.hidden_channels = list.into_iter().collect(),
             S2C::GifSearch(provider) => s.gif.provider = Some(provider),
             S2C::Gifs { query, items, next } => s.gif.got(query, items, next),
+            S2C::ServerGifs { query, items, categories, next, total } => s.gif.got_library(query, items, categories, next, total),
             // Channels that came into or went out of view (not made or deleted): no log line.
             S2C::ChannelsVisible { shown, hidden } => {
                 for id in hidden {
