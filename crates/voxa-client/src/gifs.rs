@@ -97,6 +97,66 @@ pub struct GifState {
     next_upload: u32,
     added: u32,
     failed: Vec<String>,
+    /// Importing a GIF from a link (GIPHY and others): the box, links on their way, and
+    /// how the last one went (ok, text).
+    pub link_input: String,
+    /// The name a GIF from a link gets in the server's library (what people search for).
+    pub link_name: String,
+    link_busy: u32,
+    link_note: Option<(bool, String)>,
+}
+
+/// Where a GIF imported from a link goes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dest {
+    Server,
+    Favourites,
+}
+
+/// Links downloaded in the background, waiting for the picker.
+#[allow(clippy::type_complexity)]
+static LINKED: std::sync::LazyLock<Mutex<Vec<(Dest, String, Result<(Vec<u8>, String), String>)>>> = std::sync::LazyLock::new(Default::default);
+
+/// The GIF website people find GIFs on (🌐 in the picker).
+pub const GIF_SITE: &str = "https://giphy.com";
+
+/// "Paste a GIF link": downloads it (this device) and adds it to the server's library or
+/// your favourites.
+fn import_box(ui: &mut Ui, g: &mut GifState, dest: Dest) {
+    let t = crate::ui::theme();
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut g.link_input).hint_text("Paste a GIF link (GIPHY, Tenor, KLIPY or .gif)").desired_width((ui.available_width() - 80.0).max(120.0)));
+        let link = gif_link(&g.link_input);
+        let label = if dest == Dest::Server { "📚 Add" } else { "⭐ Add" };
+        let tip = if dest == Dest::Server { "Add it to the server's GIFs" } else { "Add it to your favourites" };
+        if ui.add_enabled(link.is_some() && g.link_busy == 0, egui::Button::new(label)).on_hover_text(tip).clicked() {
+            if let Some(url) = link {
+                g.link_busy += 1;
+                g.link_note = None;
+                g.link_input.clear();
+                let name = std::mem::take(&mut g.link_name).trim().to_string();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let r = fetch_link(&url);
+                    LINKED.lock().push((dest, name, r));
+                    ctx.request_repaint();
+                });
+            }
+        }
+    });
+    if dest == Dest::Server && !g.link_input.trim().is_empty() {
+        ui.add(egui::TextEdit::singleline(&mut g.link_name).hint_text("Name (what people search for, e.g. happy dance)").desired_width(f32::INFINITY));
+    }
+    if g.link_busy > 0 {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(RichText::new("Getting the GIF…").small().color(t.dim));
+        });
+    } else if let Some((ok, text)) = &g.link_note {
+        ui.label(RichText::new(text).small().color(if *ok { crate::ui::GREEN } else { crate::ui::RED }));
+    } else {
+        ui.label(RichText::new("Open GIPHY with the button above, open a GIF ▸ Share ▸ Copy GIF Link (or right-click the GIF ▸ Copy image address), and paste it here.").small().color(t.dim));
+    }
 }
 
 impl GifState {
@@ -395,6 +455,22 @@ fn results_grid(ui: &mut Ui, list: &mut List, previews: &mut HashMap<String, Til
 /// The GIF picker above the message box. Returns what was picked.
 pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::net::Connection, caps: Caps, toggled: bool) -> Option<Pick> {
     g.collect_decoded();
+    // GIFs imported from links that finished downloading.
+    for (dest, given, r) in std::mem::take(&mut *LINKED.lock()) {
+        g.link_busy = g.link_busy.saturating_sub(1);
+        g.link_note = Some(match r {
+            Ok((data, name)) if dest == Dest::Server => {
+                let name = if given.is_empty() { name } else { format!("{given}.gif") };
+                g.upload(conn, vec![(name, data)]);
+                (true, "Adding it to the server's GIFs…".into())
+            }
+            Ok((data, _)) => {
+                add_favourite(&data);
+                (true, "✔ Added to your favourites".into())
+            }
+            Err(e) => (false, format!("⚠ {e}")),
+        });
+    }
     // Files picked on Android arrive later (Voxa's own file browser).
     if let Some((_, files)) = crate::files::take(|k| *k == crate::files::PickKind::ServerGifs) {
         g.upload_files(conn, files);
@@ -428,6 +504,9 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
                 }
                 ui.selectable_value(&mut g.tab, Tab::Favourites, "⭐ Favourites");
                 ui.selectable_value(&mut g.tab, Tab::Recent, "🕘 Recent");
+                if ui.button("🌐 GIPHY").on_hover_text("Find GIFs on GIPHY, then paste their link under ⭐ Favourites (or 📚 Server) to keep them").clicked() {
+                    crate::markdown::open_link(GIF_SITE);
+                }
             });
             ui.separator();
             let tab = g.tab;
@@ -455,6 +534,7 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
                             }
                             ui.add(egui::TextEdit::singleline(&mut g.upload_category).hint_text("Category (optional)").desired_width(150.0));
                         });
+                        import_box(ui, g, Dest::Server);
                         if !g.uploads.is_empty() {
                             ui.horizontal(|ui| {
                                 ui.spinner();
@@ -477,6 +557,9 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
                     }
                 }
                 _ => {
+                    if tab == Tab::Favourites {
+                        import_box(ui, g, Dest::Favourites);
+                    }
                     ui.label(RichText::new(if tab == Tab::Favourites { "Your favourite GIFs (on this device). Add one from any GIF: click it in the chat ▸ ⭐ Add to GIF favourites." } else { "GIFs you sent recently (on this device)." }).small().color(t.dim));
                 }
             }
@@ -654,19 +737,16 @@ fn download(url: &str, limit: usize) -> Result<Vec<u8>, String> {
 /// Downloads the GIF behind a link (the page's GIF for GIPHY / Tenor / KLIPY pages).
 /// Only the sender's device does this; the GIF is then posted like a picture.
 pub fn fetch_link(url: &str) -> Result<(Vec<u8>, String), String> {
-    // GIPHY pages: giphy.com/gifs/<words>-<id> is i.giphy.com/<id>.gif.
-    let mut url = url.to_string();
-    if let Some(rest) = url.strip_prefix("https://giphy.com/gifs/").map(str::to_string) {
-        let slug = rest.split(['/', '?', '#']).next().unwrap_or_default();
-        let id = slug.rsplit('-').next().unwrap_or(slug);
-        if !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            url = format!("https://i.giphy.com/{id}.gif");
-        }
-    }
+    let url = giphy_direct(url).unwrap_or_else(|| url.to_string());
     let data = download(&url, MAX_CHAT_IMAGE)?;
     let name = |u: &str| {
-        let last = u.split(['?', '#']).next().unwrap_or_default().rsplit('/').next().unwrap_or_default();
-        let clean: String = last.chars().filter(|c| c.is_alphanumeric() || "-_.".contains(*c)).take(80).collect();
+        let path = u.split(['?', '#']).next().unwrap_or_default();
+        let mut parts = path.rsplit('/');
+        let last = parts.next().unwrap_or_default();
+        // GIPHY's files are all "giphy.gif": the folder before it is the GIF's id.
+        let last = if last.eq_ignore_ascii_case("giphy.gif") { parts.next().map(|id| format!("giphy {id}.gif")).unwrap_or(last.to_string()) } else { last.to_string() };
+        let last = last.as_str();
+        let clean: String = last.chars().filter(|c| c.is_alphanumeric() || " -_.".contains(*c)).take(80).collect();
         if clean.to_lowercase().ends_with(".gif") { clean } else { "GIF.gif".to_string() }
     };
     if is_gif(&data) {
@@ -680,6 +760,18 @@ pub fn fetch_link(url: &str) -> Result<(Vec<u8>, String), String> {
         return Err("That link does not lead to a GIF".into());
     }
     Ok((data, name(&found)))
+}
+
+/// GIPHY pages (giphy.com/gifs/<words>-<id>, /stickers/..., /embed/<id>, with or without
+/// www.) are the GIF at i.giphy.com/<id>.gif. (Their share tags show other GIFs.)
+fn giphy_direct(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    let path = rest.strip_prefix("giphy.com/")?;
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    let slug = ["gifs/", "stickers/", "embed/", "clips/"].iter().find_map(|p| path.strip_prefix(p))?.split('/').next().unwrap_or_default();
+    let id = slug.rsplit('-').next().unwrap_or(slug);
+    (!id.is_empty() && id.len() <= 40 && id.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| format!("https://i.giphy.com/{id}.gif"))
 }
 
 /// The GIF address in a page's `og:image` / `twitter:image` style tags.
@@ -779,6 +871,32 @@ mod tests {
         assert!(gif_link("look https://example.com/a.gif").is_none());
         assert!(gif_link("http://example.com/a.gif").is_none());
         assert!(gif_link("https://giphy.com").is_none());
+    }
+
+    #[test]
+    fn giphy_pages() {
+        assert_eq!(giphy_direct("https://giphy.com/gifs/cat-funny-JIX9t2j0ZTN9S").as_deref(), Some("https://i.giphy.com/JIX9t2j0ZTN9S.gif"));
+        assert_eq!(giphy_direct("https://www.giphy.com/gifs/JIX9t2j0ZTN9S?utm=1").as_deref(), Some("https://i.giphy.com/JIX9t2j0ZTN9S.gif"));
+        assert_eq!(giphy_direct("https://giphy.com/stickers/hello-abc123").as_deref(), Some("https://i.giphy.com/abc123.gif"));
+        assert_eq!(giphy_direct("https://giphy.com/embed/abc123").as_deref(), Some("https://i.giphy.com/abc123.gif"));
+        assert_eq!(giphy_direct("https://giphy.com/explore/cats"), None);
+        assert_eq!(giphy_direct("https://giphy.com/gifs/a-b<c"), None);
+        assert_eq!(giphy_direct("https://evilgiphy.com/gifs/x-abc"), None);
+    }
+
+    /// Needs internet: cargo test -p voxa-client giphy_live -- --ignored
+    #[test]
+    #[ignore]
+    fn giphy_live() {
+        let (data, name) = fetch_link("https://giphy.com/gifs/cat-funny-JIX9t2j0ZTN9S").unwrap();
+        assert!(is_gif(&data), "{name}");
+        // A GIF's own address on GIPHY's media server (with its long tracking part).
+        let direct = "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdXdoN29wM2Y0eGZ1ejR0aHE2b294NjN2aGNkaDMxZHZ3YXRsdndmYiZlcD12MV9naWZzX3RyZW5kaW5nJmN0PWc/R7m04yMaGWVeE/giphy.gif";
+        assert_eq!(gif_link(direct).as_deref(), Some(direct));
+        let (data, name) = fetch_link(direct).unwrap();
+        assert!(is_gif(&data), "{name}");
+        assert_eq!(name, "giphy R7m04yMaGWVeE.gif");
+        println!("{name}: {} KB", data.len() / 1024);
     }
 
     #[test]

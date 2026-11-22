@@ -1131,6 +1131,7 @@ impl VoxaApp {
                     2 => {
                         s.gif.open = true;
                         s.gif.tab = crate::gifs::Tab::Server;
+                        s.gif.link_input = "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdXdoN29wM2Y0eGZ1ejR0aHE2b294NjN2aGNkaDMxZHZ3YXRsdndmYiZlcD12MV9naWZzX3RyZW5kaW5nJmN0PWc/R7m04yMaGWVeE/giphy.gif".into();
                         STEP.store(3, Relaxed);
                     }
                     3 => self.debug_done = true,

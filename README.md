@@ -182,6 +182,12 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
       chat (click it to open the full-size view) and, on right-click, **🗑 Remove from
       the server**. Admins can also drop `.gif` files straight into the server's `gifs`
       folder (see the server's README).
+    * **🌐 GIPHY** (1.36.1) opens giphy.com to find GIFs. **Import from a link:** paste
+      a GIF's link into the box on the ⭐ Favourites tab (everyone) or the 📚 Server tab
+      (people with *Manage server GIFs*, with an optional name people search for) and
+      press Add. It works with GIPHY pages (`giphy.com/gifs/…`, `/stickers/…`), GIPHY's
+      own GIF addresses (`media.giphy.com/media/…/giphy.gif`), Tenor and KLIPY pages and
+      any `.gif` address. Your device downloads the GIF (up to 10 MB).
     * **⭐ Favourites:** click any GIF in the chat ▸ **⭐ Add to GIF favourites**, or
       right-click one in the picker. Kept on this device, for every server.
     * **🕘 Recent:** the GIFs you sent lately.
