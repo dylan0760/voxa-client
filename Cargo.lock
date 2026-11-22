@@ -259,6 +259,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "ar-reshaper"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08dae85b57b725df143d5a2eb92c032dd032f062a636826fda1e1a4b21c40c03"
+
+[[package]]
 name = "arboard"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4878,6 +4884,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
+
+[[package]]
 name = "unicode-general-category"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5047,10 +5059,11 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voxa-android"
-version = "1.37.0"
+version = "1.38.0"
 dependencies = [
  "android_logger",
  "anyhow",
+ "ar-reshaper",
  "base64 0.22.1",
  "chacha20poly1305",
  "chrono",
@@ -5071,6 +5084,7 @@ dependencies = [
  "sha2",
  "skrifa",
  "tokio",
+ "unicode-bidi",
  "ureq",
  "vello_cpu",
  "voxa-proto",
@@ -5079,9 +5093,10 @@ dependencies = [
 
 [[package]]
 name = "voxa-client"
-version = "1.37.0"
+version = "1.38.0"
 dependencies = [
  "anyhow",
+ "ar-reshaper",
  "arboard",
  "base64 0.22.1",
  "chacha20poly1305",
@@ -5103,6 +5118,7 @@ dependencies = [
  "skrifa",
  "tokio",
  "tray-icon",
+ "unicode-bidi",
  "ureq",
  "vello_cpu",
  "voxa-proto",
@@ -5114,7 +5130,7 @@ dependencies = [
 
 [[package]]
 name = "voxa-proto"
-version = "1.37.0"
+version = "1.38.0"
 dependencies = [
  "base64 0.22.1",
  "bincode",

@@ -1,6 +1,7 @@
 //! The avatar editor: a colour for the initials, or a picture cropped like on Steam (drag
 //! the square to move it, drag a corner or scroll to resize, previews at several sizes).
 
+use crate::i18n::{t, tf};
 use crate::updater::ShowFill;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
@@ -55,14 +56,14 @@ impl AvatarDlg {
         self.error = None;
         let data = match std::fs::metadata(path) {
             Ok(m) if m.len() > 25 * 1024 * 1024 => {
-                self.error = Some("That file is too big (at most 25 MB).".into());
+                self.error = Some(t!("That file is too big (at most 25 MB).").into());
                 return;
             }
             Ok(_) => std::fs::read(path).ok(),
             Err(_) => None,
         };
         let Some(img) = data.as_deref().and_then(|d| crate::avatars::decode_limited(d, 8192)) else {
-            self.error = Some("That is not a picture Voxa can read (PNG, JPEG, GIF, WebP or BMP, at most 8192 x 8192).".into());
+            self.error = Some(t!("That is not a picture Voxa can read (PNG, JPEG, GIF, WebP or BMP, at most 8192 x 8192).").into());
             return;
         };
         self.icon = None;
@@ -78,7 +79,7 @@ impl AvatarDlg {
                 self.error = None;
                 self.set_picture(ctx, img);
             }
-            None => self.error = Some("That icon could not be drawn on this PC.".into()),
+            None => self.error = Some(t!("That icon could not be drawn on this PC.").into()),
         }
     }
 
@@ -90,7 +91,7 @@ impl AvatarDlg {
             rgba = image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle);
         }
         if rgba.width() < 16 || rgba.height() < 16 {
-            self.error = Some("That picture is too small (at least 16 x 16 pixels).".into());
+            self.error = Some(t!("That picture is too small (at least 16 x 16 pixels).").into());
             return;
         }
         let tex = ctx.load_texture(
@@ -235,25 +236,25 @@ pub fn show(app: &mut VoxaApp, ctx: &egui::Context) {
     let (mut open, mut save, mut cancel, mut pick) = (true, false, false, false);
     let mut icon_pick: Option<&'static str> = None;
     let color_before = d.color;
-    egui::Window::new("Avatar")
+    egui::Window::new(t!("Avatar"))
         .id(egui::Id::unique("voxa_avatar_editor"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
         .show_centered(ctx, |ui| {
-            ui.label(RichText::new(format!("Identity \"{}\" · shown to others on servers with Voxa Server 1.15.0 or newer", ident.name)).small().weak());
+            ui.label(RichText::new(tf!("Identity \"{}\" · shown to others on servers with Voxa Server 1.15.0 or newer", ident.name)).small().weak());
             ui.add_space(4.0);
             ui.horizontal_top(|ui| {
                 d.editor(ui, &name, &uid);
                 ui.add_space(10.0);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("Preview").strong());
+                    ui.label(RichText::new(t!("Preview")).strong());
                     for size in [96.0, 48.0, 28.0] {
                         let (r, _) = ui.allocate_exact_size(egui::vec2(110.0, size + 6.0), Sense::hover());
                         d.preview(ui, egui::pos2(r.left() + size / 2.0 + 2.0, r.center().y), size / 2.0, &name, &uid);
                     }
                     ui.add_space(6.0);
-                    ui.label(RichText::new("In the channel list").small().color(t.dim));
+                    ui.label(RichText::new(t!("In the channel list")).small().color(t.dim));
                     ui.horizontal(|ui| {
                         let (r, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::hover());
                         d.preview(ui, r.center(), 11.0, &name, &uid);
@@ -262,12 +263,12 @@ pub fn show(app: &mut VoxaApp, ctx: &egui::Context) {
                 });
             });
             if d.src.is_some() {
-                ui.label(RichText::new("Drag the square to move it, drag a corner or scroll to resize it.").small().color(t.dim));
+                ui.label(RichText::new(t!("Drag the square to move it, drag a corner or scroll to resize it.")).small().color(t.dim));
             }
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
-                ui.label("Colour:");
-                if ui.selectable_label(d.color.is_none(), "Automatic").on_hover_text("A colour picked from your identity").clicked() {
+                ui.label(t!("Colour:"));
+                if ui.selectable_label(d.color.is_none(), "Automatic").on_hover_text(t!("A colour picked from your identity")).clicked() {
                     d.color = None;
                 }
                 for c in PALETTE {
@@ -282,18 +283,18 @@ pub fn show(app: &mut VoxaApp, ctx: &egui::Context) {
                 }
                 let cur = d.color.unwrap_or(0x2580C3);
                 let mut rgb = [(cur >> 16) as u8, (cur >> 8) as u8, cur as u8];
-                if ui.color_edit_button_srgb(&mut rgb).on_hover_text("Any colour").changed() {
+                if ui.color_edit_button_srgb(&mut rgb).on_hover_text(t!("Any colour")).changed() {
                     d.color = Some(((rgb[0] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[2] as u32);
                 }
             });
             if d.icon.is_some() {
-                ui.label(RichText::new("The colour is the background of your icon.").small().color(t.dim));
+                ui.label(RichText::new(t!("The colour is the background of your icon.")).small().color(t.dim));
             } else if d.src.is_some() || d.current.is_some() {
-                ui.label(RichText::new("The colour shows behind your initials when you have no picture.").small().color(t.dim));
+                ui.label(RichText::new(t!("The colour shows behind your initials when you have no picture.")).small().color(t.dim));
             }
             if crate::avatars::icons_available() {
                 ui.add_space(4.0);
-                ui.label(RichText::new("Icons").strong());
+                ui.label(RichText::new(t!("Icons")).strong());
                 egui::ScrollArea::vertical().id_salt("avatar_icons").max_height(96.0).show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
@@ -309,8 +310,8 @@ pub fn show(app: &mut VoxaApp, ctx: &egui::Context) {
             }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                pick = ui.button("📂 Choose Picture...").clicked();
-                if (d.src.is_some() || d.current.is_some()) && ui.button("🗑 Remove Picture").clicked() {
+                pick = ui.button(t!("📂 Choose Picture...")).clicked();
+                if (d.src.is_some() || d.current.is_some()) && ui.button(t!("🗑 Remove Picture")).clicked() {
                     d.icon = None;
                     d.src = None;
                     d.current = None;
@@ -322,8 +323,8 @@ pub fn show(app: &mut VoxaApp, ctx: &egui::Context) {
             }
             ui.separator();
             ui.horizontal(|ui| {
-                save = ui.add(egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(crate::ui::accent())).clicked();
-                cancel = ui.button("Cancel").clicked();
+                save = ui.add(egui::Button::new(RichText::new(t!("Save")).color(Color32::WHITE)).fill(crate::ui::accent())).clicked();
+                cancel = ui.button(t!("Cancel")).clicked();
             });
         });
     // An icon follows the colour.

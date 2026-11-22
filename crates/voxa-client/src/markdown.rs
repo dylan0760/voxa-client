@@ -3,6 +3,7 @@
 //! ```lang code blocks``` (with syntax highlighting), > quotes, # headings,
 //! - lists, plain http(s) links and [masked](https://links).
 
+use crate::i18n::t;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId, Frame, Margin, RichText, Sense, Stroke, Ui};
 
@@ -522,7 +523,7 @@ fn code_block(ui: &mut Ui, lang: &str, code: &str, size: f32, id: egui::Id) {
         ui.horizontal(|ui| {
             ui.label(RichText::new(if lang.is_empty() { "code" } else { lang }).small().weak());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("📋 Copy").on_hover_text("Copy the code").clicked() {
+                if ui.small_button(t!("📋 Copy")).on_hover_text(t!("Copy the code")).clicked() {
                     ui.ctx().copy_text(code.to_string());
                 }
             });

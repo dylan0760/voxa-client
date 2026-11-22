@@ -129,6 +129,7 @@ pub fn browser_ui(ctx: &egui::Context) {
 #[cfg(not(windows))]
 mod browser {
     use super::PickKind;
+    use crate::i18n::{t, tf};
     use egui::RichText;
     use parking_lot::Mutex;
     use std::collections::BTreeSet;
@@ -195,8 +196,8 @@ mod browser {
             .fixed_rect(screen.shrink(8.0))
             .show(ctx, |ui| {
                 if !crate::mobile::files_access() {
-                    ui.label("Voxa needs access to your files to send or upload them.");
-                    if ui.button("Allow access to files").clicked() {
+                    ui.label(t!("Voxa needs access to your files to send or upload them."));
+                    if ui.button(t!("Allow access to files")).clicked() {
                         crate::mobile::ask_files_access();
                     }
                     ui.separator();
@@ -210,7 +211,7 @@ mod browser {
                 });
                 ui.horizontal(|ui| {
                     let up = b.dir.parent().filter(|_| b.dir != Path::new(ROOT)).map(Path::to_path_buf);
-                    if ui.add_enabled(up.is_some(), egui::Button::new("⬆ Up")).clicked() {
+                    if ui.add_enabled(up.is_some(), egui::Button::new(t!("⬆ Up"))).clicked() {
                         if let Some(up) = up {
                             b.dir = up;
                         }
@@ -231,7 +232,7 @@ mod browser {
                 let list_h = (ui.available_height() - 56.0).max(120.0);
                 egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                     if entries.is_empty() {
-                        ui.label(RichText::new("Nothing here").weak());
+                        ui.label(RichText::new(t!("Nothing here")).weak());
                     }
                     for (p, dir) in &entries {
                         let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -255,16 +256,16 @@ mod browser {
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(t!("Cancel")).clicked() {
                         cancel = true;
                     }
                     if b.folder {
-                        if ui.add_enabled(b.dir != Path::new(ROOT), egui::Button::new("Choose this folder")).clicked() {
+                        if ui.add_enabled(b.dir != Path::new(ROOT), egui::Button::new(t!("Choose this folder"))).clicked() {
                             finish = Some(vec![b.dir.clone()]);
                         }
                     } else if b.multiple {
                         let n = b.selected.len();
-                        if ui.add_enabled(n > 0, egui::Button::new(format!("Choose ({n})"))).clicked() {
+                        if ui.add_enabled(n > 0, egui::Button::new(tf!("Choose ({n})"; n = n))).clicked() {
                             finish = Some(b.selected.iter().cloned().collect());
                         }
                     }

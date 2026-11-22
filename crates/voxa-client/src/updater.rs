@@ -1,5 +1,6 @@
 //! Background update checks / installs against GitHub Releases.
 
+use crate::i18n::{t, tf};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -118,7 +119,7 @@ impl Updater {
                     Err(e) => {
                         log::warn!("update failed: {e}");
                         crate::markdown::open_link(&rel.asset_url);
-                        UpdState::Failed(format!("{e}. The update is downloading in your browser instead: open it when it is done to install it."))
+                        UpdState::Failed(tf!("{e}. The update is downloading in your browser instead: open it when it is done to install it."; e = e))
                     }
                 };
                 ctx.request_repaint();
@@ -285,7 +286,7 @@ impl WhatsNew {
                         }
                     }
                     if releases.is_empty() {
-                        NotesState::Failed("No releases have been published yet".into())
+                        NotesState::Failed(t!("No releases have been published yet").into())
                     } else {
                         let selected = releases.iter().position(|r| r.version == v).unwrap_or(0);
                         NotesState::Ready { releases, selected }
@@ -341,7 +342,7 @@ pub fn whats_new_window(ctx: &egui::Context, wn: &WhatsNew, product: &str, rende
     let mut open = true;
     let mut close = false;
     let center = ctx.content_rect().center();
-    let mut window = egui::Window::new(format!("🎉 What's new in {product}"))
+    let mut window = egui::Window::new(tf!("🎉 What's new in {product}"; product = product))
         .id(egui::Id::unique("voxa_whats_new"))
         .open(&mut open)
         .collapsible(false)
@@ -371,19 +372,19 @@ pub fn whats_new_window(ctx: &egui::Context, wn: &WhatsNew, product: &str, rende
                 match &mut *state {
                     NotesState::Loading => {
                         ui.spinner();
-                        ui.label("Loading the change log...");
+                        ui.label(t!("Loading the change log..."));
                     }
                     NotesState::Failed(e) => {
                         ui.vertical(|ui| {
-                            ui.label(format!("{product} {} is installed.", wn.version));
-                            ui.label(RichText::new(format!("The change log could not be loaded: {e}")).weak());
+                            ui.label(tf!("{product} {} is installed.", wn.version; product = product));
+                            ui.label(RichText::new(tf!("The change log could not be loaded: {e}"; e = e)).weak());
                         });
                     }
                     NotesState::Ready { releases, selected } => {
                         // Version list ("tabs").
                         ui.vertical(|ui| {
                             ui.set_width(150.0);
-                            ui.label(RichText::new("VERSIONS").small().strong().weak());
+                            ui.label(RichText::new(t!("VERSIONS")).small().strong().weak());
                             egui::ScrollArea::vertical().id_salt("wn_versions").max_height(ui.available_height()).auto_shrink([false, false]).show(ui, |ui| {
                                 for (i, r) in releases.iter().enumerate() {
                                     let installed = r.version == wn.version;
@@ -392,7 +393,7 @@ pub fn whats_new_window(ctx: &egui::Context, wn: &WhatsNew, product: &str, rende
                                         text = text.strong();
                                     }
                                     let resp = ui.selectable_label(*selected == i, text);
-                                    let resp = if r.date.is_empty() { resp } else { resp.on_hover_text(format!("Released {}", r.date)) };
+                                    let resp = if r.date.is_empty() { resp } else { resp.on_hover_text(tf!("Released {}", r.date)) };
                                     if resp.clicked() {
                                         *selected = i;
                                     }
@@ -421,7 +422,7 @@ pub fn whats_new_window(ctx: &egui::Context, wn: &WhatsNew, product: &str, rende
             let body_bottom = body.response.rect.top() + body_h;
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Got it").clicked() {
+                if ui.button(t!("Got it")).clicked() {
                     close = true;
                 }
                 if let NotesState::Ready { releases, selected } = &*state {
@@ -446,38 +447,38 @@ pub fn open_url(url: &str) {
 pub fn ui(updater: &mut Updater, ui: &mut egui::Ui, product: &str) {
     use egui::{Color32, RichText};
     let dim = ui.visuals().weak_text_color();
-    ui.label(format!("Installed: {product} {}", voxa_proto::APP_VERSION));
-    ui.label(RichText::new(format!("Updates come from github.com/{}", updater.repo)).small().color(dim));
+    ui.label(tf!("Installed: {product} {}", voxa_proto::APP_VERSION; product = product));
+    ui.label(RichText::new(tf!("Updates come from github.com/{}", updater.repo)).small().color(dim));
     ui.add_space(6.0);
     match updater.get() {
         UpdState::Idle => {
-            ui.label("Click \"Check for updates\" to look for a newer version.");
+            ui.label(t!("Click \"Check for updates\" to look for a newer version."));
         }
         UpdState::Checking => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Checking GitHub for updates...");
+                ui.label(t!("Checking GitHub for updates..."));
             });
         }
         UpdState::UpToDate => {
-            ui.label(RichText::new("✔ You are running the latest version.").color(Color32::from_rgb(0x3B, 0xA5, 0x5D)));
+            ui.label(RichText::new(t!("✔ You are running the latest version.")).color(Color32::from_rgb(0x3B, 0xA5, 0x5D)));
         }
         UpdState::Failed(e) => {
-            ui.label(RichText::new(format!("Update failed: {e}")).color(Color32::from_rgb(0xED, 0x42, 0x45)));
+            ui.label(RichText::new(tf!("Update failed: {e}"; e = e)).color(Color32::from_rgb(0xED, 0x42, 0x45)));
         }
         UpdState::Available(rel) => {
-            ui.label(RichText::new(format!("⬆ {product} {} is available!", rel.version)).strong().color(Color32::from_rgb(0x3B, 0xA5, 0x5D)));
+            ui.label(RichText::new(tf!("⬆ {product} {} is available!", rel.version; product = product)).strong().color(Color32::from_rgb(0x3B, 0xA5, 0x5D)));
             if !rel.notes.trim().is_empty() {
                 egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
                     crate::markdown::render(ui, &rel.notes, 13.0, (0, 11));
                 });
             }
             ui.horizontal(|ui| {
-                let b = egui::Button::new(RichText::new("Download and install").color(Color32::WHITE)).fill(Color32::from_rgb(0x25, 0x80, 0xC3));
+                let b = egui::Button::new(RichText::new(t!("Download and install")).color(Color32::WHITE)).fill(Color32::from_rgb(0x25, 0x80, 0xC3));
                 if ui.add(b).clicked() {
                     updater.install(rel.clone());
                 }
-                if ui.button("Release page").clicked() {
+                if ui.button(t!("Release page")).clicked() {
                     open_url(&rel.page_url);
                 }
             });
@@ -489,27 +490,27 @@ pub fn ui(updater: &mut Updater, ui: &mut egui::Ui, product: &str) {
             ui.label(RichText::new(note).small().color(dim));
         }
         UpdState::InstallerOpened(rel) => {
-            ui.label(RichText::new(format!("⬆ Installing {product} {}", rel.version)).strong());
-            ui.label("Tap Update (or Install) in Android's window to finish. If Android asks, allow Voxa to install apps, then go back and tap \"Install again\".");
-            ui.label(RichText::new("A copy is also in Downloads/Voxa.").small().color(dim));
-            if ui.button("Install again").clicked() {
+            ui.label(RichText::new(tf!("⬆ Installing {product} {}", rel.version; product = product)).strong());
+            ui.label(t!("Tap Update (or Install) in Android's window to finish. If Android asks, allow Voxa to install apps, then go back and tap \"Install again\"."));
+            ui.label(RichText::new(t!("A copy is also in Downloads/Voxa.")).small().color(dim));
+            if ui.button(t!("Install again")).clicked() {
                 updater.install(rel.clone());
             }
         }
         UpdState::Downloading(rel, done, total) => {
             let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
-            ui.label(format!("Downloading {}...", rel.asset_name));
+            ui.label(tf!("Downloading {}...", rel.asset_name));
             ui.add(egui::ProgressBar::new(frac).show_percentage());
         }
         UpdState::Installing => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Starting the installer...");
+                ui.label(t!("Starting the installer..."));
             });
         }
     }
     ui.add_space(6.0);
-    if ui.add_enabled(!updater.busy(), egui::Button::new("⟲ Check for updates")).clicked() {
+    if ui.add_enabled(!updater.busy(), egui::Button::new(t!("⟲ Check for updates"))).clicked() {
         updater.check();
     }
 }

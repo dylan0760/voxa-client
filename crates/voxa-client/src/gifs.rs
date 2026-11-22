@@ -5,6 +5,7 @@
 //! Favourites and recents are files in Voxa's folder (`gifs/favourites`, `gifs/recent`):
 //! they stay on this device and work on every server.
 
+use crate::i18n::{t, tf};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -127,10 +128,10 @@ pub const GIF_SITE: &str = "https://giphy.com";
 fn import_box(ui: &mut Ui, g: &mut GifState, dest: Dest) {
     let t = crate::ui::theme();
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut g.link_input).hint_text("Paste a GIF link (GIPHY, Tenor, KLIPY or .gif)").desired_width((ui.available_width() - 80.0).max(120.0)));
+        ui.add(egui::TextEdit::singleline(&mut g.link_input).hint_text(t!("Paste a GIF link (GIPHY, Tenor, KLIPY or .gif)")).desired_width((ui.available_width() - 80.0).max(120.0)));
         let link = gif_link(&g.link_input);
-        let label = if dest == Dest::Server { "📚 Add" } else { "⭐ Add" };
-        let tip = if dest == Dest::Server { "Add it to the server's GIFs" } else { "Add it to your favourites" };
+        let label = if dest == Dest::Server { t!("📚 Add") } else { t!("⭐ Add") };
+        let tip = if dest == Dest::Server { t!("Add it to the server's GIFs") } else { t!("Add it to your favourites") };
         if ui.add_enabled(link.is_some() && g.link_busy == 0, egui::Button::new(label)).on_hover_text(tip).clicked() {
             if let Some(url) = link {
                 g.link_busy += 1;
@@ -147,17 +148,17 @@ fn import_box(ui: &mut Ui, g: &mut GifState, dest: Dest) {
         }
     });
     if dest == Dest::Server && !g.link_input.trim().is_empty() {
-        ui.add(egui::TextEdit::singleline(&mut g.link_name).hint_text("Name (optional: else its title on the page)").desired_width(f32::INFINITY));
+        ui.add(egui::TextEdit::singleline(&mut g.link_name).hint_text(t!("Name (optional: else its title on the page)")).desired_width(f32::INFINITY));
     }
     if g.link_busy > 0 {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label(RichText::new("Getting the GIF…").small().color(t.dim));
+            ui.label(RichText::new(t!("Getting the GIF…")).small().color(t.dim));
         });
     } else if let Some((ok, text)) = &g.link_note {
         ui.label(RichText::new(text).small().color(if *ok { crate::ui::GREEN } else { crate::ui::RED }));
     } else {
-        ui.label(RichText::new("Open GIPHY with the button above, open a GIF ▸ Share ▸ Copy GIF Link (or right-click the GIF ▸ Copy image address), and paste it here.").small().color(t.dim));
+        ui.label(RichText::new(t!("Open GIPHY with the button above, open a GIF ▸ Share ▸ Copy GIF Link (or right-click the GIF ▸ Copy image address), and paste it here.")).small().color(t.dim));
     }
 }
 
@@ -200,9 +201,9 @@ impl GifState {
             match std::fs::metadata(&p) {
                 Ok(m) if m.len() <= MAX_CHAT_IMAGE as u64 => match std::fs::read(&p) {
                     Ok(d) if is_gif(&d) => files.push((name, d, Vec::new())),
-                    _ => self.failed.push(format!("{name}: not a GIF")),
+                    _ => self.failed.push(tf!("{name}: not a GIF"; name = name)),
                 },
-                _ => self.failed.push(format!("{name}: larger than {} MB", MAX_CHAT_IMAGE / (1024 * 1024))),
+                _ => self.failed.push(tf!("{name}: larger than {} MB", MAX_CHAT_IMAGE / (1024 * 1024); name = name)),
             }
         }
         self.upload(conn, files);
@@ -429,11 +430,11 @@ fn results_grid(ui: &mut Ui, list: &mut List, previews: &mut HashMap<String, Til
                     act = Some(TileAct::Post(it.id.clone()));
                 }
                 resp.context_menu(|ui| {
-                    if ui.button("⭐ Add to favourites").clicked() {
+                    if ui.button(t!("⭐ Add to favourites")).clicked() {
                         act = Some(TileAct::Favourite(it.id.clone()));
                         ui.close();
                     }
-                    if removable && ui.button(RichText::new("🗑 Remove from the server").color(crate::ui::RED)).clicked() {
+                    if removable && ui.button(RichText::new(t!("🗑 Remove from the server")).color(crate::ui::RED)).clicked() {
                         act = Some(TileAct::Remove(it.id.clone()));
                         ui.close();
                     }
@@ -468,11 +469,11 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
                 let name = if !given.is_empty() { format!("{given}.gif") } else { f.title.map(|t| format!("{t}.gif")).unwrap_or(f.name) };
                 let n = f.tags.len();
                 g.upload(conn, vec![(name, f.data, f.tags)]);
-                (true, if n > 0 && g.tags_ok { format!("Adding it to the server's GIFs, with {n} tags from its page…") } else { "Adding it to the server's GIFs…".into() })
+                (true, if n > 0 && g.tags_ok { tf!("Adding it to the server's GIFs, with {n} tags from its page…"; n = n) } else { t!("Adding it to the server's GIFs…").into() })
             }
             Ok(f) => {
                 add_favourite(&f.data);
-                (true, "✔ Added to your favourites".into())
+                (true, t!("✔ Added to your favourites").into())
             }
             Err(e) => (false, format!("⚠ {e}")),
         });
@@ -503,14 +504,14 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
             ui.set_max_size(size - egui::vec2(20.0, 20.0));
             ui.horizontal_wrapped(|ui| {
                 if caps.library {
-                    ui.selectable_value(&mut g.tab, Tab::Server, "📚 Server");
+                    ui.selectable_value(&mut g.tab, Tab::Server, t!("📚 Server"));
                 }
                 if searchable {
-                    ui.selectable_value(&mut g.tab, Tab::Search, "🔍 Search");
+                    ui.selectable_value(&mut g.tab, Tab::Search, t!("🔍 Search"));
                 }
-                ui.selectable_value(&mut g.tab, Tab::Favourites, "⭐ Favourites");
-                ui.selectable_value(&mut g.tab, Tab::Recent, "🕘 Recent");
-                if ui.button("🌐 GIPHY").on_hover_text("Find GIFs on GIPHY, then paste their link under ⭐ Favourites (or 📚 Server) to keep them").clicked() {
+                ui.selectable_value(&mut g.tab, Tab::Favourites, t!("⭐ Favourites"));
+                ui.selectable_value(&mut g.tab, Tab::Recent, t!("🕘 Recent"));
+                if ui.button(t!("🌐 GIPHY")).on_hover_text(t!("Find GIFs on GIPHY, then paste their link under ⭐ Favourites (or 📚 Server) to keep them")).clicked() {
                     crate::markdown::open_link(GIF_SITE);
                 }
             });
@@ -535,24 +536,24 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
                     }
                     if caps.manage {
                         ui.horizontal(|ui| {
-                            if ui.button("⬆ Add GIFs…").on_hover_text("Add GIF files to the server's library (people see them here)").clicked() {
+                            if ui.button(t!("⬆ Add GIFs…")).on_hover_text(t!("Add GIF files to the server's library (people see them here)")).clicked() {
                                 pick_files = true;
                             }
-                            ui.add(egui::TextEdit::singleline(&mut g.upload_category).hint_text("Category (optional)").desired_width(150.0));
+                            ui.add(egui::TextEdit::singleline(&mut g.upload_category).hint_text(t!("Category (optional)")).desired_width(150.0));
                         });
                         import_box(ui, g, Dest::Server);
                         if !g.uploads.is_empty() {
                             ui.horizontal(|ui| {
                                 ui.spinner();
-                                ui.label(RichText::new(format!("Adding {} GIFs…", g.uploads.len())).small().color(t.dim));
+                                ui.label(RichText::new(tf!("Adding {} GIFs…", g.uploads.len())).small().color(t.dim));
                             });
                         } else if g.added > 0 || !g.failed.is_empty() {
                             ui.horizontal_wrapped(|ui| {
                                 if g.added > 0 {
-                                    ui.label(RichText::new(format!("✔ Added {} GIFs", g.added)).small().color(crate::ui::GREEN));
+                                    ui.label(RichText::new(tf!("✔ Added {} GIFs", g.added)).small().color(crate::ui::GREEN));
                                 }
                                 if !g.failed.is_empty() {
-                                    ui.label(RichText::new(format!("⚠ {} not added", g.failed.len())).small().color(crate::ui::RED)).on_hover_text(g.failed.join("\n"));
+                                    ui.label(RichText::new(tf!("⚠ {} not added", g.failed.len())).small().color(crate::ui::RED)).on_hover_text(g.failed.join("\n"));
                                 }
                                 if ui.small_button("✖").clicked() {
                                     g.added = 0;
@@ -566,7 +567,7 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
                     if tab == Tab::Favourites {
                         import_box(ui, g, Dest::Favourites);
                     }
-                    ui.label(RichText::new(if tab == Tab::Favourites { "Your favourite GIFs (on this device). Add one from any GIF: click it in the chat ▸ ⭐ Add to GIF favourites." } else { "GIFs you sent recently (on this device)." }).small().color(t.dim));
+                    ui.label(RichText::new(if tab == Tab::Favourites { t!("Your favourite GIFs (on this device). Add one from any GIF: click it in the chat ▸ ⭐ Add to GIF favourites.") } else { t!("GIFs you sent recently (on this device).") }).small().color(t.dim));
                 }
             }
             let footer = matches!(tab, Tab::Search | Tab::Server);
@@ -616,7 +617,7 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
                     Tab::Favourites | Tab::Recent => {
                         let files = list(if tab == Tab::Favourites { "favourites" } else { "recent" });
                         if files.is_empty() {
-                            ui.label(RichText::new("Nothing here yet").color(t.dim));
+                            ui.label(RichText::new(t!("Nothing here yet")).color(t.dim));
                         }
                         for row in files.chunks(cols) {
                             ui.horizontal(|ui| {
@@ -630,11 +631,11 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
                                     let fav = tab == Tab::Favourites;
                                     resp.context_menu(|ui| {
                                         if fav {
-                                            if ui.button("🗑 Remove from favourites").clicked() {
+                                            if ui.button(t!("🗑 Remove from favourites")).clicked() {
                                                 remove = Some(p.clone());
                                                 ui.close();
                                             }
-                                        } else if ui.button("⭐ Add to favourites").clicked() {
+                                        } else if ui.button(t!("⭐ Add to favourites")).clicked() {
                                             favourite = std::fs::read(p).ok().map(Arc::new);
                                             ui.close();
                                         }
@@ -648,8 +649,8 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
             if footer {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let text = match (&g.provider, tab) {
-                        (Some(Some(name)), Tab::Search) => format!("Powered by {name}"),
-                        (_, Tab::Server) => format!("{} GIFs on this server", g.library_total),
+                        (Some(Some(name)), Tab::Search) => tf!("Powered by {name}"; name = name),
+                        (_, Tab::Server) => tf!("{} GIFs on this server", g.library_total),
                         _ => String::new(),
                     };
                     ui.label(RichText::new(text).small().color(t.dim));
@@ -734,9 +735,9 @@ fn public_host(url: &str) -> bool {
 
 fn download(url: &str, limit: usize) -> Result<Vec<u8>, String> {
     if !public_host(url) {
-        return Err("Only https links to websites can be loaded".into());
+        return Err(t!("Only https links to websites can be loaded").into());
     }
-    let mut r = agent().get(url).call().map_err(|e| format!("The link could not be loaded ({e})"))?;
+    let mut r = agent().get(url).call().map_err(|e| tf!("The link could not be loaded ({e})"; e = e))?;
     r.body_mut().with_config().limit(limit as u64).read_to_vec().map_err(|_| format!("The GIF is larger than {} MB", limit / (1024 * 1024)))
 }
 
@@ -788,7 +789,7 @@ fn fetch_gif(url: &str) -> Result<(Vec<u8>, String, Option<String>), String> {
     let found = page_gif(&page).ok_or("No GIF found at that link")?;
     let data = download(&found, MAX_CHAT_IMAGE)?;
     if !is_gif(&data) {
-        return Err("That link does not lead to a GIF".into());
+        return Err(t!("That link does not lead to a GIF").into());
     }
     Ok((data, name(&found), Some(page)))
 }

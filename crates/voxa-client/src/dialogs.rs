@@ -7,6 +7,7 @@ use voxa_proto::*;
 use crate::app::*;
 use crate::config::*;
 use crate::ui::{fmt_date, fmt_size, Action};
+use crate::i18n::{t, tf};
 use crate::updater::ShowFill;
 
 pub enum Open {
@@ -50,6 +51,8 @@ pub enum Open {
     Account,
     /// An administrator resets someone's account password (uid, nickname).
     ResetAccount(String, String),
+    /// Preview the server as other server groups.
+    ViewAs,
 }
 
 /// Someone who sent direct messages while you were offline.
@@ -79,6 +82,8 @@ pub struct OptionsDlg {
     /// The cameras found when the dialog opened.
     pub cameras: Vec<crate::camera::CameraDevice>,
     pub nickname: String,
+    /// The language (None: the system's).
+    pub language: Option<String>,
     pub theme: crate::config::ThemeKind,
     /// The "Your picture" theme: the picture (a copy in Voxa's folder), how dark, and why
     /// a picture could not be used.
@@ -278,6 +283,8 @@ pub struct Dialogs {
     pub reset_account: Option<(String, String, bool)>,
     /// The temporary password from a reset: (username, password), shown once.
     pub account_reset: Option<(String, String)>,
+    /// "View as": the server groups ticked.
+    pub view_as: Option<Vec<GroupId>>,
     /// Your account on this server.
     pub account: Option<crate::account::AccountDlg>,
     pub clear_chat: Option<TextTarget>,
@@ -314,7 +321,7 @@ impl Dialogs {
                 }
             )*};
         }
-        close!(error, link_prompt, web_login, fingerprint, delete_msg, forget, reset_account, account_reset, clear_chat, channel_password, away, talk_request, nickname, description);
+        close!(error, link_prompt, web_login, fingerprint, delete_msg, forget, reset_account, account_reset, view_as, clear_chat, channel_password, away, talk_request, nickname, description);
         close!(ban_client, kick, poke, privkey_use, privkey_create, delete_channel, clone_channel, client_perms, avatar, share, offline, files, account);
         if self.transfers || self.conn_info || self.about || self.update {
             (self.transfers, self.conn_info, self.about, self.update) = (false, false, false, false);
@@ -329,7 +336,7 @@ impl Dialogs {
         macro_rules! open {
             ($($f:ident),*) => { false $(|| self.$f.is_some())* };
         }
-        open!(error, link_prompt, web_login, fingerprint, delete_msg, forget, reset_account, account_reset, clear_chat, channel_password, away, talk_request, nickname, description)
+        open!(error, link_prompt, web_login, fingerprint, delete_msg, forget, reset_account, account_reset, view_as, clear_chat, channel_password, away, talk_request, nickname, description)
             || open!(ban_client, kick, poke, privkey_use, privkey_create, delete_channel, clone_channel, client_perms, avatar, share, offline, files, account)
             || self.transfers
             || self.conn_info
@@ -343,6 +350,7 @@ impl Dialogs {
         self.account = None;
         self.forget = None;
         self.reset_account = None;
+        self.view_as = None;
         self.account_reset = None;
         self.clear_chat = None;
         self.client_perms = None;
@@ -510,6 +518,7 @@ impl Dialogs {
             }
             Open::ForgetClient(uid, name) => self.forget = Some((uid, name)),
             Open::ResetAccount(uid, name) => self.reset_account = Some((uid, name, false)),
+            Open::ViewAs => self.view_as = Some(s.view_as.clone().unwrap_or_else(|| vec![GUEST_GROUP])),
             Open::Account => self.account = Some(Default::default()),
             Open::ClientPerms(id) => {
                 if let Some(c) = s.clients.get(&id) {
@@ -552,8 +561,8 @@ fn perm_search(ui: &mut Ui, key: &str) -> String {
     let id = egui::Id::unique(key);
     let mut q: String = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut q).hint_text("🔍 Search permissions").desired_width(220.0));
-        if !q.is_empty() && ui.small_button("✖").on_hover_text("Show all permissions").clicked() {
+        ui.add(egui::TextEdit::singleline(&mut q).hint_text(t!("🔍 Search permissions")).desired_width(220.0));
+        if !q.is_empty() && ui.small_button("✖").on_hover_text(t!("Show all permissions")).clicked() {
             q.clear();
         }
         let shown = perm::NAMES.iter().filter(|(_, n)| perm_matches(&q, n)).count();
@@ -579,6 +588,7 @@ fn options_dlg(s: &Settings) -> OptionsDlg {
         camera: s.camera.clone(),
         cameras: crate::camera::devices(),
         nickname: s.nickname.clone(),
+        language: s.language.clone(),
         theme: s.theme_kind(),
         background: s.background_image.clone(),
         background_dim: s.background_dim,
@@ -634,7 +644,7 @@ fn ok_cancel(ui: &mut Ui, ok: &str) -> (bool, bool) {
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         r.0 = ui.button(ok).clicked();
-        r.1 = ui.button("Cancel").clicked();
+        r.1 = ui.button(t!("Cancel")).clicked();
     });
     r
 }
@@ -689,11 +699,11 @@ fn connect_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.connect.take() else { return };
     let mut open = true;
     let mut close = false;
-    window("Connect").open(&mut open).show_fill(ctx, |ui| {
+    window(t!("Connect")).open(&mut open).show_fill(ctx, |ui| {
         egui::Grid::new("conn").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-            form_row(ui, "Server address:", |ui| {
+            form_row(ui, t!("Server address:"), |ui| {
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut d.raw_address).hint_text("host or host:port").desired_width(230.0));
+                    ui.add(egui::TextEdit::singleline(&mut d.raw_address).hint_text(t!("host or host:port")).desired_width(230.0));
                     ui.menu_button("▾", |ui| {
                         for r in &app.settings.recent {
                             if ui.button(r).clicked() {
@@ -704,27 +714,27 @@ fn connect_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                 });
             });
-            form_row(ui, "Nickname:", |ui| {
+            form_row(ui, t!("Nickname:"), |ui| {
                 ui.add(egui::TextEdit::singleline(&mut d.req.nickname).desired_width(260.0));
             });
-            form_row(ui, "Server password:", |ui| {
+            form_row(ui, t!("Server password:"), |ui| {
                 ui.add(egui::TextEdit::singleline(&mut d.req.server_password).password(true).desired_width(260.0));
             });
         });
-        ui.checkbox(&mut d.more, "More options");
+        ui.checkbox(&mut d.more, t!("More options"));
         if d.more {
             egui::Grid::new("conn2").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                form_row(ui, "Identity:", |ui| {
+                form_row(ui, t!("Identity:"), |ui| {
                     egui::ComboBox::from_id_salt("connid").selected_text(app.settings.identity(d.req.identity).name.clone()).show_ui(ui, |ui| {
                         for (i, id) in app.settings.identities.iter().enumerate() {
                             ui.selectable_value(&mut d.req.identity, i, &id.name);
                         }
                     });
                 });
-                form_row(ui, "Default channel:", |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut d.req.default_channel).hint_text("Channel/Sub-channel").desired_width(260.0));
+                form_row(ui, t!("Default channel:"), |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut d.req.default_channel).hint_text(t!("Channel/Sub-channel")).desired_width(260.0));
                 });
-                form_row(ui, "Channel password:", |ui| {
+                form_row(ui, t!("Channel password:"), |ui| {
                     ui.add(egui::TextEdit::singleline(&mut d.req.channel_password).password(true).desired_width(260.0));
                 });
             });
@@ -778,7 +788,7 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut connect = None;
     // A bookmark that was just set to connect on startup (the others are turned off).
     let mut only_startup: Option<usize> = None;
-    egui::Window::new("Bookmarks").open(&mut open).collapsible(false).resizable(true).default_size([620.0, 360.0]).show_fill(ctx, |ui| {
+    egui::Window::new(t!("Bookmarks")).open(&mut open).collapsible(false).resizable(true).default_size([620.0, 360.0]).show_fill(ctx, |ui| {
         let narrow = narrow_dialog(ui);
         ui.with_layout(side_or_stacked(narrow), |ui| {
             ui.vertical(|ui| {
@@ -797,11 +807,11 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     crate::updater::fill_list(ui, "list1", 40.0, 120.0, list);
                 }
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("➕ Add").clicked() {
+                    if ui.button(t!("➕ Add")).clicked() {
                         app.settings.bookmarks.push(Bookmark { name: "New Bookmark".into(), nickname: app.settings.nickname.clone(), ..Default::default() });
                         d.selected = Some(app.settings.bookmarks.len() - 1);
                     }
-                    if ui.add_enabled(d.selected.is_some(), egui::Button::new("➖ Remove")).clicked() {
+                    if ui.add_enabled(d.selected.is_some(), egui::Button::new(t!("➖ Remove"))).clicked() {
                         if let Some(i) = d.selected {
                             app.settings.bookmarks.remove(i);
                             d.selected = None;
@@ -814,35 +824,35 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 let ids: Vec<String> = app.settings.identities.iter().map(|i| i.name.clone()).collect();
                 if let Some(b) = d.selected.and_then(|i| app.settings.bookmarks.get_mut(i)) {
                     egui::Grid::new("bm").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                        form_row(ui, "Label:", |ui| {
+                        form_row(ui, t!("Label:"), |ui| {
                             ui.add(egui::TextEdit::singleline(&mut b.name).desired_width(fit(ui, 280.0)));
                         });
-                        form_row(ui, "Address:", |ui| {
+                        form_row(ui, t!("Address:"), |ui| {
                             ui.add(egui::TextEdit::singleline(&mut b.address).desired_width(fit(ui, 280.0)));
                         });
-                        form_row(ui, "Nickname:", |ui| {
+                        form_row(ui, t!("Nickname:"), |ui| {
                             ui.add(egui::TextEdit::singleline(&mut b.nickname).desired_width(fit(ui, 280.0)));
                         });
-                        form_row(ui, "Server password:", |ui| {
+                        form_row(ui, t!("Server password:"), |ui| {
                             ui.add(egui::TextEdit::singleline(&mut b.server_password).password(true).desired_width(fit(ui, 280.0)));
                         });
-                        form_row(ui, "Default channel:", |ui| {
+                        form_row(ui, t!("Default channel:"), |ui| {
                             ui.add(egui::TextEdit::singleline(&mut b.default_channel).desired_width(fit(ui, 280.0)));
                         });
-                        form_row(ui, "Channel password:", |ui| {
+                        form_row(ui, t!("Channel password:"), |ui| {
                             ui.add(egui::TextEdit::singleline(&mut b.channel_password).password(true).desired_width(fit(ui, 280.0)));
                         });
-                        form_row(ui, "Identity:", |ui| {
+                        form_row(ui, t!("Identity:"), |ui| {
                             egui::ComboBox::from_id_salt("bmid").width(fit(ui, 240.0)).selected_text(ids.get(b.identity).cloned().unwrap_or_default()).show_ui(ui, |ui| {
                                 for (i, n) in ids.iter().enumerate() {
                                     ui.selectable_value(&mut b.identity, i, n);
                                 }
                             });
                         });
-                        form_row(ui, "Startup:", |ui| {
+                        form_row(ui, t!("Startup:"), |ui| {
                             if ui
-                                .checkbox(&mut b.connect_on_startup, "Connect when Voxa starts")
-                                .on_hover_text("Voxa connects to this server by itself when it starts (also with Windows, in the tray). Only one bookmark can do this.")
+                                .checkbox(&mut b.connect_on_startup, t!("Connect when Voxa starts"))
+                                .on_hover_text(t!("Voxa connects to this server by itself when it starts (also with Windows, in the tray). Only one bookmark can do this."))
                                 .changed()
                                 && b.connect_on_startup
                             {
@@ -851,11 +861,11 @@ fn bookmarks_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         });
                     });
                     ui.add_space(8.0);
-                    if ui.button("🔌 Connect").clicked() {
+                    if ui.button(t!("🔌 Connect")).clicked() {
                         connect = d.selected;
                     }
                 } else {
-                    ui.label("Select or add a bookmark.");
+                    ui.label(t!("Select or add a bookmark."));
                 }
             });
         });
@@ -883,9 +893,9 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut open = true;
     let mut close = false;
     let mut apply = false;
-    egui::Window::new("Options").open(&mut open).collapsible(false).resizable(true).default_size([600.0, 480.0]).show_fill(ctx, |ui| {
+    egui::Window::new(t!("Options")).open(&mut open).collapsible(false).resizable(true).default_size([600.0, 480.0]).show_fill(ctx, |ui| {
         ui.horizontal_wrapped(|ui| {
-            for (i, t) in ["Capture", "Playback", "Video", "Hotkeys", "Application"].iter().enumerate() {
+            for (i, t) in [t!("Capture"), t!("Playback"), t!("Video"), t!("Hotkeys"), t!("Application")].iter().enumerate() {
                 // Android: no global hotkeys.
                 if cfg!(target_os = "android") && i == 3 {
                     continue;
@@ -899,43 +909,43 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         match d.tab {
             0 => {
                 egui::Grid::new("cap").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                    form_row(ui, "Capture from:", |ui| {
+                    form_row(ui, t!("Capture from:"), |ui| {
                         let label = |s: &CaptureSource| match s {
-                            CaptureSource::Microphone => "🎙 Microphone".to_string(),
-                            CaptureSource::SystemSound => "🔊 System sound (everything except Voxa)".to_string(),
+                            CaptureSource::Microphone => t!("🎙 Microphone").to_string(),
+                            CaptureSource::SystemSound => t!("🔊 System sound (everything except Voxa)").to_string(),
                             CaptureSource::Application(a) => format!("🎵 {a}"),
                         };
                         egui::ComboBox::from_id_salt("capsrc").width(fit(ui, 300.0)).selected_text(label(&d.audio.source)).show_ui(ui, |ui| {
                             ui.selectable_value(&mut d.audio.source, CaptureSource::Microphone, label(&CaptureSource::Microphone));
                             ui.selectable_value(&mut d.audio.source, CaptureSource::SystemSound, label(&CaptureSource::SystemSound));
                             ui.separator();
-                            ui.label(RichText::new("Only this application:").small().weak());
+                            ui.label(RichText::new(t!("Only this application:")).small().weak());
                             for (app_name, title) in &d.apps {
                                 let src = CaptureSource::Application(app_name.clone());
                                 ui.selectable_value(&mut d.audio.source, src, format!("🎵 {app_name}")).on_hover_text(title);
                             }
                         });
-                        if ui.small_button("⟳").on_hover_text("Refresh the list of applications").clicked() {
+                        if ui.small_button("⟳").on_hover_text(t!("Refresh the list of applications")).clicked() {
                             d.apps = capture_apps();
                         }
                     });
                     if d.audio.source != CaptureSource::Microphone {
                         form_row(ui, "", |ui| {
                             ui.label(
-                                RichText::new("You transmit this sound instead of your microphone (for example music). Use a channel with the Opus Music codec for the best quality, and Continuous Transmission so quiet parts are not cut off.")
+                                RichText::new(t!("You transmit this sound instead of your microphone (for example music). Use a channel with the Opus Music codec for the best quality, and Continuous Transmission so quiet parts are not cut off."))
                                     .small()
                                     .weak(),
                             );
                         });
                     }
                     if d.audio.source == CaptureSource::Microphone {
-                        form_row(ui, "Capture device:", |ui| {
+                        form_row(ui, t!("Capture device:"), |ui| {
                             egui::ComboBox::from_id_salt("indev")
                                 .width(fit(ui, 300.0))
                                 .selected_text(crate::audio::device_label(&d.audio.input_device))
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(&mut d.audio.input_device, None, crate::audio::device_label(&None))
-                                        .on_hover_text("The microphone Windows uses for calls, like other voice apps (with SteelSeries Sonar: Sonar - Microphone)");
+                                        .on_hover_text(t!("The microphone Windows uses for calls, like other voice apps (with SteelSeries Sonar: Sonar - Microphone)"));
                                     let wd = Some(crate::audio::WINDOWS_DEFAULT.to_string());
                                     ui.selectable_value(&mut d.audio.input_device, wd.clone(), crate::audio::device_label(&wd));
                                     for n in &d.inputs {
@@ -945,39 +955,39 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         });
                         device_now(ui, &mut d.resolved, true, &d.audio.input_device);
                     }
-                    form_row(ui, "Transmission:", |ui| {
+                    form_row(ui, t!("Transmission:"), |ui| {
                         ui.vertical(|ui| {
-                            ui.radio_value(&mut d.audio.mode, VoiceMode::PushToTalk, "Push-To-Talk");
-                            ui.radio_value(&mut d.audio.mode, VoiceMode::VoiceActivation, "Voice Activation Detection");
-                            ui.radio_value(&mut d.audio.mode, VoiceMode::Continuous, "Continuous Transmission");
+                            ui.radio_value(&mut d.audio.mode, VoiceMode::PushToTalk, t!("Push-To-Talk"));
+                            ui.radio_value(&mut d.audio.mode, VoiceMode::VoiceActivation, t!("Voice Activation Detection"));
+                            ui.radio_value(&mut d.audio.mode, VoiceMode::Continuous, t!("Continuous Transmission"));
                         });
                     });
                     if d.audio.mode == VoiceMode::PushToTalk {
-                        form_row(ui, "Push-To-Talk key:", |ui| {
+                        form_row(ui, t!("Push-To-Talk key:"), |ui| {
                             if d.capturing_key {
-                                ui.label(RichText::new("Press any key or mouse button...").color(Color32::YELLOW));
+                                ui.label(RichText::new(t!("Press any key or mouse button...")).color(Color32::YELLOW));
                                 if let Some(k) = crate::audio::any_key_down() {
                                     d.audio.ptt_key = k;
                                     d.capturing_key = false;
                                 }
                                 ctx.request_repaint();
-                            } else if ui.button(crate::audio::key_name(d.audio.ptt_key)).on_hover_text("Click to change").clicked() {
+                            } else if ui.button(crate::audio::key_name(d.audio.ptt_key)).on_hover_text(t!("Click to change")).clicked() {
                                 d.capturing_key = true;
                             }
                         });
-                        form_row(ui, "Release delay:", |ui| {
+                        form_row(ui, t!("Release delay:"), |ui| {
                             ui.add(egui::Slider::new(&mut d.audio.ptt_release_ms, 0..=1000).suffix(" ms"));
                         });
                     }
                     if d.audio.mode == VoiceMode::VoiceActivation {
-                        form_row(ui, "Activation level:", |ui| {
+                        form_row(ui, t!("Activation level:"), |ui| {
                             ui.add(egui::Slider::new(&mut d.audio.vad_threshold_db, -70.0..=0.0).suffix(" dB"));
                         });
                     }
-                    form_row(ui, if d.audio.source == CaptureSource::Microphone { "Microphone boost:" } else { "Volume:" }, |ui| {
+                    form_row(ui, if d.audio.source == CaptureSource::Microphone { t!("Microphone boost:") } else { t!("Volume:") }, |ui| {
                         ui.add(egui::Slider::new(&mut d.audio.input_gain, 0.1..=4.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
                     });
-                    form_row(ui, "Input level:", |ui| {
+                    form_row(ui, t!("Input level:"), |ui| {
                         if app.sess.as_ref().map(|s| s.voice.is_some()).unwrap_or(false) {
                             let db = app.voice_shared.input_level_db();
                             let frac = ((db + 70.0) / 70.0).clamp(0.0, 1.0);
@@ -985,26 +995,26 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             ui.add(egui::ProgressBar::new(frac).desired_width(260.0).text(format!("{db:.0} dB")).fill(if over { Color32::from_rgb(0x4C, 0xC0, 0x5A) } else { Color32::GRAY }));
                             ctx.request_repaint();
                         } else {
-                            ui.label(RichText::new("Connect to a server to see the live level (or record a test below)").weak());
+                            ui.label(RichText::new(t!("Connect to a server to see the live level (or record a test below)")).weak());
                         }
                     });
-                    form_row(ui, "Test:", |ui| {
+                    form_row(ui, t!("Test:"), |ui| {
                         mic_test_ui(ui, &mut d, &app.voice_shared);
                     });
                 });
             }
             1 => {
                 egui::Grid::new("play").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                    form_row(ui, "Playback device:", |ui| {
+                    form_row(ui, t!("Playback device:"), |ui| {
                         egui::ComboBox::from_id_salt("outdev")
                             .width(fit(ui, 300.0))
                             .selected_text(crate::audio::device_label(&d.audio.output_device))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut d.audio.output_device, None, crate::audio::device_label(&None))
-                                    .on_hover_text("Where Windows plays calls, like other voice apps (with SteelSeries Sonar: Sonar - Chat, so Sonar's Chat slider sets Voxa's volume)");
+                                    .on_hover_text(t!("Where Windows plays calls, like other voice apps (with SteelSeries Sonar: Sonar - Chat, so Sonar's Chat slider sets Voxa's volume)"));
                                 let wd = Some(crate::audio::WINDOWS_DEFAULT.to_string());
                                 ui.selectable_value(&mut d.audio.output_device, wd.clone(), crate::audio::device_label(&wd))
-                                    .on_hover_text("Where Windows plays everything else (with SteelSeries Sonar: Sonar - Game)");
+                                    .on_hover_text(t!("Where Windows plays everything else (with SteelSeries Sonar: Sonar - Game)"));
                                 for n in &d.outputs {
                                     ui.selectable_value(&mut d.audio.output_device, Some(n.clone()), n);
                                 }
@@ -1015,13 +1025,13 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     let sonar_chat = d.outputs.iter().find(|n| n.contains("Sonar") && n.contains("Chat")).cloned();
                     if let Some(chat) = sonar_chat {
                         let now = d.resolved.get(&(false, d.audio.output_device.clone())).cloned().flatten().unwrap_or_default();
-                        form_row(ui, "SteelSeries Sonar:", |ui| {
+                        form_row(ui, t!("SteelSeries Sonar:"), |ui| {
                             if now == chat {
-                                ui.label(RichText::new("✔ Voxa plays through Sonar's Chat channel: set its volume with Sonar's Chat slider.").small().color(Color32::from_rgb(0x3B, 0xA5, 0x5D)));
+                                ui.label(RichText::new(t!("✔ Voxa plays through Sonar's Chat channel: set its volume with Sonar's Chat slider.")).small().color(Color32::from_rgb(0x3B, 0xA5, 0x5D)));
                             } else {
                                 ui.vertical(|ui| {
-                                    ui.label(RichText::new("Voxa isn't playing through Sonar's Chat channel, so Sonar's Chat slider won't change its volume.").small().color(Color32::YELLOW));
-                                    if ui.button("Use Sonar Chat and Sonar Microphone").clicked() {
+                                    ui.label(RichText::new(t!("Voxa isn't playing through Sonar's Chat channel, so Sonar's Chat slider won't change its volume.")).small().color(Color32::YELLOW));
+                                    if ui.button(t!("Use Sonar Chat and Sonar Microphone")).clicked() {
                                         d.audio.output_device = Some(chat.clone());
                                         if let Some(mic) = d.inputs.iter().find(|n| n.contains("Sonar") && n.contains("Microphone")) {
                                             d.audio.input_device = Some(mic.clone());
@@ -1031,96 +1041,96 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             }
                         });
                     }
-                    form_row(ui, "Voice volume:", |ui| {
+                    form_row(ui, t!("Voice volume:"), |ui| {
                         ui.add(egui::Slider::new(&mut d.audio.output_volume, 0.0..=2.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
                     });
-                    form_row(ui, "Notification sounds:", |ui| {
-                        ui.checkbox(&mut d.audio.sounds, "Play sounds for pokes, messages and joins");
+                    form_row(ui, t!("Notification sounds:"), |ui| {
+                        ui.checkbox(&mut d.audio.sounds, t!("Play sounds for pokes, messages and joins"));
                     });
-                    form_row(ui, "Muted warning:", |ui| {
-                        ui.checkbox(&mut d.audio.muted_warning, "Play a warning when I talk while my microphone is muted")
-                            .on_hover_text("Uses your Voice Activation level (or your push-to-talk key) to notice that you are talking.");
+                    form_row(ui, t!("Muted warning:"), |ui| {
+                        ui.checkbox(&mut d.audio.muted_warning, t!("Play a warning when I talk while my microphone is muted"))
+                            .on_hover_text(t!("Uses your Voice Activation level (or your push-to-talk key) to notice that you are talking."));
                     });
                     form_row(ui, "", |ui| {
-                        if ui.button("▶ Play test sound").clicked() {
+                        if ui.button(t!("▶ Play test sound")).clicked() {
                             app.voice_shared.play_tones(&[(523.0, 120), (659.0, 120), (784.0, 200)]);
                         }
-                        if ui.button("🎙 Hear the muted warning").clicked() {
+                        if ui.button(t!("🎙 Hear the muted warning")).clicked() {
                             app.voice_shared.queue_tones(crate::audio::MUTED_WARNING);
                         }
                     });
                 });
             }
             2 => {
-                ui.label(RichText::new("Camera").strong());
+                ui.label(RichText::new(t!("Camera")).strong());
                 egui::Grid::new("cam").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                    form_row(ui, "Camera:", |ui| {
+                    form_row(ui, t!("Camera:"), |ui| {
                         let current = d.cameras.iter().find(|c| c.id == d.camera.device).map(|c| c.name.clone());
                         let label = match (&current, d.camera.device.is_empty()) {
-                            (_, true) => "Default".to_string(),
+                            (_, true) => t!("Default").to_string(),
                             (Some(n), _) => n.clone(),
                             (None, _) => "(not connected)".to_string(),
                         };
                         egui::ComboBox::from_id_salt("camdev").selected_text(label).width(fit(ui, 260.0)).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut d.camera.device, String::new(), "Default");
+                            ui.selectable_value(&mut d.camera.device, String::new(), t!("Default"));
                             for c in &d.cameras {
                                 ui.selectable_value(&mut d.camera.device, c.id.clone(), &c.name);
                             }
                         });
                         if d.cameras.is_empty() {
-                            ui.label(RichText::new("No camera found").weak());
+                            ui.label(RichText::new(t!("No camera found")).weak());
                         }
                     });
-                    form_row(ui, "Picture size:", |ui| {
+                    form_row(ui, t!("Picture size:"), |ui| {
                         egui::ComboBox::from_id_salt("camres").selected_text(format!("{}p", d.camera.size().1)).show_ui(ui, |ui| {
                             for h in [360u32, 480, 720] {
                                 ui.selectable_value(&mut d.camera.height, h, format!("{h}p"));
                             }
                         });
                     });
-                    form_row(ui, "Frame rate:", |ui| {
+                    form_row(ui, t!("Frame rate:"), |ui| {
                         ui.add(egui::Slider::new(&mut d.camera.fps, 5..=30).suffix(" fps"));
                     });
-                    form_row(ui, "Image quality:", |ui| {
+                    form_row(ui, t!("Image quality:"), |ui| {
                         ui.add(egui::Slider::new(&mut d.camera.quality, 20..=90));
                     });
                 });
-                ui.label(RichText::new("Turn your camera on with the camera button while you are in a channel: everyone in the channel sees it (needs Voxa Server 1.21.0). Bigger pictures and more frames need a faster connection.").weak());
+                ui.label(RichText::new(t!("Turn your camera on with the camera button while you are in a channel: everyone in the channel sees it (needs Voxa Server 1.21.0). Bigger pictures and more frames need a faster connection.")).weak());
                 // Phones only watch screen shares.
                 if cfg!(windows) {
                     ui.add_space(8.0);
                     ui.separator();
-                    ui.label(RichText::new("Screen sharing").strong());
+                    ui.label(RichText::new(t!("Screen sharing")).strong());
                     egui::Grid::new("ss").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                        form_row(ui, "Watching:", |ui| {
-                            ui.checkbox(&mut d.auto_watch, "Open screen shares in my channel automatically")
-                                .on_hover_text("When someone in your channel starts sharing, their screen opens above the chat. With several streams, use the tabs to switch.");
+                        form_row(ui, t!("Watching:"), |ui| {
+                            ui.checkbox(&mut d.auto_watch, t!("Open screen shares in my channel automatically"))
+                                .on_hover_text(t!("When someone in your channel starts sharing, their screen opens above the chat. With several streams, use the tabs to switch."));
                         });
-                        form_row(ui, "Frame rate:", |ui| {
+                        form_row(ui, t!("Frame rate:"), |ui| {
                             ui.add(egui::Slider::new(&mut d.stream.fps, 1..=60).suffix(" fps"));
                         });
-                        form_row(ui, "Maximum width:", |ui| {
+                        form_row(ui, t!("Maximum width:"), |ui| {
                             egui::ComboBox::from_id_salt("ssw").selected_text(format!("{} px", d.stream.max_width)).show_ui(ui, |ui| {
                                 for w in [854u32, 1280, 1600, 1920, 2560, 3840] {
                                     ui.selectable_value(&mut d.stream.max_width, w, format!("{w} px"));
                                 }
                             });
                         });
-                        form_row(ui, "Image quality:", |ui| {
+                        form_row(ui, t!("Image quality:"), |ui| {
                             ui.add(egui::Slider::new(&mut d.stream.quality, 20..=95));
                         });
                     });
-                    ui.label(RichText::new("Screen shares are relayed through the server to viewers in your channel.").weak());
+                    ui.label(RichText::new(t!("Screen shares are relayed through the server to viewers in your channel.")).weak());
                 }
             }
             3 => {
                 use crate::hotkeys::{Binding, HotkeyAction, HotkeyEntry};
                 ui.label(
-                    RichText::new("Global hotkeys work even while Voxa is in the background, minimised or in the system tray. Use any key or mouse button (with Ctrl / Alt / Shift), or a button on an Xbox or PlayStation controller, flight stick or other game controller. An action can have several bindings.")
+                    RichText::new(t!("Global hotkeys work even while Voxa is in the background, minimised or in the system tray. Use any key or mouse button (with Ctrl / Alt / Shift), or a button on an Xbox or PlayStation controller, flight stick or other game controller. An action can have several bindings."))
                         .weak(),
                 );
                 let pads = crate::gamepad::connected();
-                ui.label(RichText::new(if pads.is_empty() { "🎮 No game controller found.".to_string() } else { format!("🎮 Found: {}", pads.join(", ")) }).small().weak());
+                ui.label(RichText::new(if pads.is_empty() { t!("🎮 No game controller found.").to_string() } else { tf!("🎮 Found: {}", pads.join(", ")) }).small().weak());
                 ui.add_space(4.0);
                 // Recording a new binding (key combination or controller button).
                 if let Some(action) = d.capturing_hotkey {
@@ -1138,21 +1148,21 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     app.hotkeys.paused.store(false, std::sync::atomic::Ordering::Relaxed);
                 }
                 egui::Grid::new("hotkeys").num_columns(2).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
-                    ui.label(RichText::new("Action").strong());
-                    ui.label(RichText::new("Bindings").strong());
+                    ui.label(RichText::new(t!("Action")).strong());
+                    ui.label(RichText::new(t!("Bindings")).strong());
                     ui.end_row();
                     for action in HotkeyAction::ALL {
                         ui.label(action.label());
                         ui.horizontal_wrapped(|ui| {
                             if action == HotkeyAction::PushToTalk && d.audio.ptt_key != 0 {
-                                ui.label(RichText::new(crate::audio::key_name(d.audio.ptt_key)).monospace()).on_hover_text("The push-to-talk key set under Capture");
+                                ui.label(RichText::new(crate::audio::key_name(d.audio.ptt_key)).monospace()).on_hover_text(t!("The push-to-talk key set under Capture"));
                             }
                             let mut remove = None;
                             for (i, e) in d.hotkeys.iter().enumerate().filter(|(_, e)| e.action == action && e.binding.is_set()) {
                                 Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(6).inner_margin(Margin::symmetric(6, 2)).show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new(e.binding.label()).monospace().color(ui.visuals().strong_text_color()));
-                                        if ui.small_button("✖").on_hover_text("Remove this binding").clicked() {
+                                        if ui.small_button("✖").on_hover_text(t!("Remove this binding")).clicked() {
                                             remove = Some(i);
                                         }
                                     });
@@ -1162,8 +1172,8 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                                 d.hotkeys.remove(i);
                             }
                             if d.capturing_hotkey == Some(action) {
-                                ui.label(RichText::new("Press a key or controller button... (Esc cancels)").color(Color32::YELLOW));
-                            } else if ui.add_enabled(d.capturing_hotkey.is_none(), egui::Button::new("+ Add")).clicked() {
+                                ui.label(RichText::new(t!("Press a key or controller button... (Esc cancels)")).color(Color32::YELLOW));
+                            } else if ui.add_enabled(d.capturing_hotkey.is_none(), egui::Button::new(t!("+ Add"))).clicked() {
                                 d.capturing_hotkey = Some(action);
                             }
                         });
@@ -1171,7 +1181,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     }
                 });
                 ui.add_space(6.0);
-                ui.label(RichText::new("Click OK or Apply to activate changed hotkeys.").small().weak());
+                ui.label(RichText::new(t!("Click OK or Apply to activate changed hotkeys.")).small().weak());
             }
             _ if d.app_tab == 1 => {
                 app_tabs(ui, &mut d.app_tab);
@@ -1196,27 +1206,28 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         });
                         ui.add_space(10.0);
                     }
-                    ui.label(RichText::new("Click OK or Apply to use the chosen theme.").small().weak());
+                    ui.label(RichText::new(t!("Click OK or Apply to use the chosen theme.")).small().weak());
                 });
             }
             _ => {
                 app_tabs(ui, &mut d.app_tab);
                 egui::Grid::new("app").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                    form_row(ui, "Default nickname:", |ui| {
+                    form_row(ui, t!("Default nickname:"), |ui| {
                         ui.text_edit_singleline(&mut d.nickname);
                     });
-                    form_row(ui, "Theme:", |ui| {
+                    form_row(ui, t!("🌐 Language:"), |ui| language_picker(ui, &mut d.language));
+                    form_row(ui, t!("Theme:"), |ui| {
                         ui.horizontal(|ui| {
                             ui.label(d.theme.name());
-                            if ui.small_button("Change...").clicked() {
+                            if ui.small_button(t!("Change...")).clicked() {
                                 d.app_tab = 1;
                             }
                         });
                     });
-                    form_row(ui, "UI scale:", |ui| {
+                    form_row(ui, t!("UI scale:"), |ui| {
                         ui.add(egui::Slider::new(&mut d.scale, 0.75..=2.0));
                     });
-                    form_row(ui, "Frame rate limit:", |ui| {
+                    form_row(ui, t!("Frame rate limit:"), |ui| {
                         let label = |f: u32| if f == 0 { "Monitor refresh rate".to_string() } else { format!("{f} fps") };
                         egui::ComboBox::from_id_salt("max_fps").selected_text(label(d.max_fps)).show_ui(ui, |ui| {
                             for f in [30u32, 60, 120, 144, 0] {
@@ -1224,40 +1235,40 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             }
                         })
                         .response
-                        .on_hover_text("Voxa only redraws when something changes (e.g. the mouse moves). Lower limits use less GPU; 60 fps is smooth for a chat app.");
+                        .on_hover_text(t!("Voxa only redraws when something changes (e.g. the mouse moves). Lower limits use less GPU; 60 fps is smooth for a chat app."));
                     });
-                    form_row(ui, "Chat:", |ui| {
+                    form_row(ui, t!("Chat:"), |ui| {
                         ui.vertical(|ui| {
-                            ui.checkbox(&mut d.timestamps, "Show timestamps");
-                            ui.checkbox(&mut d.link_previews, "Show previews of YouTube, TikTok and X links and play them in Voxa")
-                                .on_hover_text("Loading a preview contacts YouTube, TikTok or X from your device, like opening the link would.");
-                            ui.checkbox(&mut d.dm_window, "Open direct messages in their own window")
-                                .on_hover_text("Like Steam: conversations open in a Messages window you can move to another screen. A new message opens it (without taking the keyboard from your game) and flashes it in the taskbar. Off: direct messages are tabs in the chat.");
-                            ui.checkbox(&mut d.join_channel, "Join a channel when connecting")
-                                .on_hover_text("Off: you are on the server (shown online) without being in a channel, like Discord. Double-click a channel to join it. A bookmark's default channel is still joined.");
-                            ui.checkbox(&mut d.auto_away, "Set me away when I'm idle")
-                                .on_hover_text("After the time the server's admin chose (10 minutes by default) without keyboard, mouse or talking. Coming back sets you online again.");
+                            ui.checkbox(&mut d.timestamps, t!("Show timestamps"));
+                            ui.checkbox(&mut d.link_previews, t!("Show previews of YouTube, TikTok and X links and play them in Voxa"))
+                                .on_hover_text(t!("Loading a preview contacts YouTube, TikTok or X from your device, like opening the link would."));
+                            ui.checkbox(&mut d.dm_window, t!("Open direct messages in their own window"))
+                                .on_hover_text(t!("Like Steam: conversations open in a Messages window you can move to another screen. A new message opens it (without taking the keyboard from your game) and flashes it in the taskbar. Off: direct messages are tabs in the chat."));
+                            ui.checkbox(&mut d.join_channel, t!("Join a channel when connecting"))
+                                .on_hover_text(t!("Off: you are on the server (shown online) without being in a channel, like Discord. Double-click a channel to join it. A bookmark's default channel is still joined."));
+                            ui.checkbox(&mut d.auto_away, t!("Set me away when I'm idle"))
+                                .on_hover_text(t!("After the time the server's admin chose (10 minutes by default) without keyboard, mouse or talking. Coming back sets you online again."));
                         });
                     });
-                    form_row(ui, "System tray:", |ui| {
+                    form_row(ui, t!("System tray:"), |ui| {
                         ui.vertical(|ui| {
-                            ui.checkbox(&mut d.tray, "Minimize to the system tray when the window is closed (✕)");
+                            ui.checkbox(&mut d.tray, t!("Minimize to the system tray when the window is closed (✕)"));
                             // Test profiles (VOXA_CONFIG_DIR) would point Windows at the wrong settings.
                             let profile = std::env::var_os("VOXA_CONFIG_DIR").is_some();
-                            ui.add_enabled(!profile, egui::Checkbox::new(&mut d.autostart, "Start Voxa when I sign in to Windows"))
-                                .on_hover_text("Voxa starts hidden in the system tray (with the tray turned off, the window opens).")
-                                .on_disabled_hover_text("Not available for a custom profile (VOXA_CONFIG_DIR).");
+                            ui.add_enabled(!profile, egui::Checkbox::new(&mut d.autostart, t!("Start Voxa when I sign in to Windows")))
+                                .on_hover_text(t!("Voxa starts hidden in the system tray (with the tray turned off, the window opens)."))
+                                .on_disabled_hover_text(t!("Not available for a custom profile (VOXA_CONFIG_DIR)."));
                             ui.label(
-                                RichText::new("Voxa keeps running in the notification area so you stay connected. Right-click the tray icon to quit.")
+                                RichText::new(t!("Voxa keeps running in the notification area so you stay connected. Right-click the tray icon to quit."))
                                     .small()
                                     .weak(),
                             );
                         });
                     });
-                    form_row(ui, "Updates:", |ui| {
+                    form_row(ui, t!("Updates:"), |ui| {
                         ui.vertical(|ui| {
-                            ui.checkbox(&mut d.auto_update, "Automatically check GitHub for new versions");
-                            if ui.button("⬆ Check for updates now").clicked() {
+                            ui.checkbox(&mut d.auto_update, t!("Automatically check GitHub for new versions"));
+                            if ui.button(t!("⬆ Check for updates now")).clicked() {
                                 app.dlg.update = true;
                                 app.updater.check();
                             }
@@ -1268,14 +1279,14 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         }
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button("OK").clicked() {
+            if ui.button(t!("OK")).clicked() {
                 apply = true;
                 close = true;
             }
-            if ui.button("Apply").clicked() {
+            if ui.button(t!("Apply")).clicked() {
                 apply = true;
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button(t!("Cancel")).clicked() {
                 close = true;
             }
         });
@@ -1290,6 +1301,10 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         app.settings.camera = d.camera.clone();
         if !d.nickname.trim().is_empty() {
             app.settings.nickname = d.nickname.trim().to_string();
+        }
+        if app.settings.language != d.language {
+            app.settings.language = d.language.clone();
+            crate::i18n::apply(&crate::i18n::chosen(d.language.as_deref()), ctx);
         }
         app.settings.set_theme(d.theme);
         app.settings.background_image = d.background.clone();
@@ -1306,7 +1321,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         app.settings.auto_update = d.auto_update;
         if d.autostart != crate::autostart::enabled() && std::env::var_os("VOXA_CONFIG_DIR").is_none() {
             if let Err(e) = crate::autostart::set(d.autostart) {
-                app.dlg.error = Some(format!("Could not change starting with Windows: {e}"));
+                app.dlg.error = Some(tf!("Could not change starting with Windows: {e}"; e = e));
                 d.autostart = crate::autostart::enabled();
             }
         }
@@ -1331,8 +1346,8 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
 fn identities_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.identities.take() else { return };
     let mut open = true;
-    egui::Window::new("Identities").open(&mut open).collapsible(false).resizable(true).default_size([600.0, 380.0]).show_fill(ctx, |ui| {
-        ui.label(RichText::new("Your identity is a cryptographic key pair that the server uses to recognize you. Keep a backup (Export) to keep your permissions.").weak());
+    egui::Window::new(t!("Identities")).open(&mut open).collapsible(false).resizable(true).default_size([600.0, 380.0]).show_fill(ctx, |ui| {
+        ui.label(RichText::new(t!("Your identity is a cryptographic key pair that the server uses to recognize you. Keep a backup (Export) to keep your permissions.")).weak());
         ui.separator();
         let narrow = narrow_dialog(ui);
         ui.with_layout(side_or_stacked(narrow), |ui| {
@@ -1345,9 +1360,9 @@ fn identities_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     }
                 }
                 ui.add_space(6.0);
-                ui.add(egui::TextEdit::singleline(&mut d.new_name).hint_text("New identity name").desired_width(fit(ui, 180.0)));
-                if ui.button("➕ Create").clicked() {
-                    let name = if d.new_name.trim().is_empty() { format!("Identity {}", app.settings.identities.len() + 1) } else { d.new_name.trim().to_string() };
+                ui.add(egui::TextEdit::singleline(&mut d.new_name).hint_text(t!("New identity name")).desired_width(fit(ui, 180.0)));
+                if ui.button(t!("➕ Create")).clicked() {
+                    let name = if d.new_name.trim().is_empty() { tf!("Identity {}", app.settings.identities.len() + 1) } else { d.new_name.trim().to_string() };
                     app.settings.identities.push(Identity::generate(&name));
                     d.selected = app.settings.identities.len() - 1;
                     d.new_name.clear();
@@ -1360,23 +1375,23 @@ fn identities_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 let is_default = d.selected == app.settings.default_identity;
                 if let Some(id) = app.settings.identities.get_mut(d.selected) {
                     egui::Grid::new("idg").num_columns(2).show(ui, |ui| {
-                        form_row(ui, "Name:", |ui| {
+                        form_row(ui, t!("Name:"), |ui| {
                             ui.add(egui::TextEdit::singleline(&mut id.name).desired_width(fit(ui, 280.0)));
                         });
-                        form_row(ui, "Unique ID:", |ui| {
+                        form_row(ui, t!("Unique ID:"), |ui| {
                             // Long IDs wrap on phones instead of widening the page.
                             ui.add(egui::Label::new(RichText::new(id.uid()).monospace()).selectable(true).wrap());
                         });
                     });
                     let key = id.key.clone();
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button("📋 Export (copy key)").on_hover_text("Copies the private key to the clipboard. Keep it secret!").clicked() {
+                        if ui.button(t!("📋 Export (copy key)")).on_hover_text(t!("Copies the private key to the clipboard. Keep it secret!")).clicked() {
                             ctx.copy_text(key.clone());
                         }
-                        if ui.add_enabled(!is_default, egui::Button::new("Set as default")).clicked() {
+                        if ui.add_enabled(!is_default, egui::Button::new(t!("Set as default"))).clicked() {
                             app.settings.default_identity = d.selected;
                         }
-                        if ui.add_enabled(count > 1, egui::Button::new("🗑 Delete")).clicked() {
+                        if ui.add_enabled(count > 1, egui::Button::new(t!("🗑 Delete"))).clicked() {
                             app.settings.identities.remove(d.selected);
                             if app.settings.default_identity >= app.settings.identities.len() {
                                 app.settings.default_identity = 0;
@@ -1386,15 +1401,15 @@ fn identities_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                 }
                 ui.separator();
-                ui.label("Import identity (paste an exported key):");
+                ui.label(t!("Import identity (paste an exported key):"));
                 ui.add(egui::TextEdit::singleline(&mut d.import).password(true).desired_width(fit(ui, 300.0)));
-                if ui.button("Import").clicked() {
+                if ui.button(t!("Import")).clicked() {
                     if voxa_proto::identity::KeyPair::import(&d.import).is_some() {
                         app.settings.identities.push(Identity { name: format!("Imported {}", app.settings.identities.len() + 1), key: d.import.trim().to_string(), avatar_color: None, avatar_image: None });
                         d.selected = app.settings.identities.len() - 1;
                         d.import.clear();
                     } else {
-                        app.dlg.error = Some("That is not a valid Voxa identity key.".into());
+                        app.dlg.error = Some(t!("That is not a valid Voxa identity key.").into());
                     }
                 }
             });
@@ -1414,18 +1429,18 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(s) = &app.sess else { return };
     let mut open = true;
     let mut close = false;
-    let title = if d.id.is_some() { "Edit Channel" } else { "Create Channel" };
+    let title = if d.id.is_some() { t!("Edit Channel") } else { t!("Create Channel") };
     egui::Window::new(title).open(&mut open).collapsible(false).resizable(true).default_width(480.0).show_fill(ctx, |ui| {
         egui::Grid::new("chg").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
             // A separator is a channel whose name carries a TeamSpeak-style tag
             // ("[cspacer]Games"); the controls below edit the parts of that name.
             let mut sep = voxa_proto::spacer(&d.edit.name);
-            form_row(ui, "Kind:", |ui| {
+            form_row(ui, t!("Kind:"), |ui| {
                 ui.vertical(|ui| {
                     let was = sep.is_some();
                     let mut is_sep = was;
-                    ui.radio_value(&mut is_sep, false, "Channel");
-                    ui.radio_value(&mut is_sep, true, "Separator (organises the list, nobody can join it)");
+                    ui.radio_value(&mut is_sep, false, t!("Channel"));
+                    ui.radio_value(&mut is_sep, true, t!("Separator (organises the list, nobody can join it)"));
                     if is_sep && !was {
                         sep = Some(voxa_proto::Spacer { align: voxa_proto::SpacerAlign::Center, number: None, text: std::mem::take(&mut d.edit.name) });
                         if d.edit.kind == ChannelKind::Temporary {
@@ -1439,15 +1454,15 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             });
             if let Some(sp) = &mut sep {
                 use voxa_proto::SpacerAlign;
-                form_row(ui, "Style:", |ui| {
+                form_row(ui, t!("Style:"), |ui| {
                     ui.vertical(|ui| {
-                        ui.radio_value(&mut sp.align, SpacerAlign::Center, "Text in the middle");
-                        ui.radio_value(&mut sp.align, SpacerAlign::Left, "Text on the left");
-                        ui.radio_value(&mut sp.align, SpacerAlign::Right, "Text on the right");
-                        ui.radio_value(&mut sp.align, SpacerAlign::Repeat, "Line (the text repeated across the row)");
+                        ui.radio_value(&mut sp.align, SpacerAlign::Center, t!("Text in the middle"));
+                        ui.radio_value(&mut sp.align, SpacerAlign::Left, t!("Text on the left"));
+                        ui.radio_value(&mut sp.align, SpacerAlign::Right, t!("Text on the right"));
+                        ui.radio_value(&mut sp.align, SpacerAlign::Repeat, t!("Line (the text repeated across the row)"));
                     });
                 });
-                form_row(ui, "Text:", |ui| {
+                form_row(ui, t!("Text:"), |ui| {
                     ui.vertical(|ui| {
                         let hint = if sp.align == SpacerAlign::Repeat { "e.g. ─ or - (empty = a thin line)" } else { "e.g. Games" };
                         ui.add(egui::TextEdit::singleline(&mut sp.text).hint_text(hint).desired_width(320.0));
@@ -1463,49 +1478,49 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                 });
                 d.edit.name = sp.name();
-                form_row(ui, "Parent:", |ui| {
+                form_row(ui, t!("Parent:"), |ui| {
                     let label = d.edit.parent.and_then(|p| s.channels.get(&p)).map(|c| s.channel_path(c.id)).unwrap_or("(server root)".into());
                     egui::ComboBox::from_id_salt("chparent").width(fit(ui, 320.0)).selected_text(label).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut d.edit.parent, None, "(server root)");
+                        ui.selectable_value(&mut d.edit.parent, None, t!("(server root)"));
                         for c in s.channels.values().filter(|c| Some(c.id) != d.id && !voxa_proto::is_spacer(&c.name)) {
                             ui.selectable_value(&mut d.edit.parent, Some(c.id), s.channel_path(c.id));
                         }
                     });
                 });
-                form_row(ui, "Kept:", |ui| {
+                form_row(ui, t!("Kept:"), |ui| {
                     ui.vertical(|ui| {
-                        ui.radio_value(&mut d.edit.kind, ChannelKind::Permanent, "Permanent");
-                        ui.radio_value(&mut d.edit.kind, ChannelKind::SemiPermanent, "Until the server restarts");
+                        ui.radio_value(&mut d.edit.kind, ChannelKind::Permanent, t!("Permanent"));
+                        ui.radio_value(&mut d.edit.kind, ChannelKind::SemiPermanent, t!("Until the server restarts"));
                     });
                 });
-                form_row(ui, "Sort order:", |ui| {
+                form_row(ui, t!("Sort order:"), |ui| {
                     ui.add(egui::DragValue::new(&mut d.edit.sort));
                 });
                 return;
             }
-            form_row(ui, "Name:", |ui| {
+            form_row(ui, t!("Name:"), |ui| {
                 ui.add(egui::TextEdit::singleline(&mut d.edit.name).desired_width(320.0));
             });
-            form_row(ui, "Topic:", |ui| {
+            form_row(ui, t!("Topic:"), |ui| {
                 ui.add(egui::TextEdit::singleline(&mut d.edit.topic).desired_width(320.0));
             });
-            form_row(ui, "Description:", |ui| {
+            form_row(ui, t!("Description:"), |ui| {
                 ui.add(egui::TextEdit::multiline(&mut d.edit.description).desired_width(320.0).desired_rows(4));
             });
-            form_row(ui, "Password:", |ui| {
+            form_row(ui, t!("Password:"), |ui| {
                 ui.vertical(|ui| {
                     if d.id.is_some() {
-                        ui.checkbox(&mut d.change_password, if d.had_password { "Change password (empty = remove)" } else { "Set password" });
+                        ui.checkbox(&mut d.change_password, if d.had_password { t!("Change password (empty = remove)") } else { t!("Set password") });
                     }
                     if d.change_password {
                         ui.add(egui::TextEdit::singleline(&mut d.password).password(true).desired_width(320.0));
                     }
                 });
             });
-            form_row(ui, "Parent:", |ui| {
+            form_row(ui, t!("Parent:"), |ui| {
                 let label = d.edit.parent.and_then(|p| s.channels.get(&p)).map(|c| s.channel_path(c.id)).unwrap_or("(server root)".into());
                 egui::ComboBox::from_id_salt("chparent").width(fit(ui, 320.0)).selected_text(label).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut d.edit.parent, None, "(server root)");
+                    ui.selectable_value(&mut d.edit.parent, None, t!("(server root)"));
                     for c in s.channels.values() {
                         if Some(c.id) != d.id {
                             ui.selectable_value(&mut d.edit.parent, Some(c.id), s.channel_path(c.id));
@@ -1513,16 +1528,16 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     }
                 });
             });
-            form_row(ui, "Channel type:", |ui| {
+            form_row(ui, t!("Channel type:"), |ui| {
                 ui.vertical(|ui| {
-                    ui.radio_value(&mut d.edit.kind, ChannelKind::Permanent, "Permanent");
-                    ui.radio_value(&mut d.edit.kind, ChannelKind::SemiPermanent, "Semi-Permanent (until server restart)");
-                    ui.radio_value(&mut d.edit.kind, ChannelKind::Temporary, "Temporary (deleted when empty)");
-                    ui.checkbox(&mut d.edit.is_default, "Default channel");
+                    ui.radio_value(&mut d.edit.kind, ChannelKind::Permanent, t!("Permanent"));
+                    ui.radio_value(&mut d.edit.kind, ChannelKind::SemiPermanent, t!("Semi-Permanent (until server restart)"));
+                    ui.radio_value(&mut d.edit.kind, ChannelKind::Temporary, t!("Temporary (deleted when empty)"));
+                    ui.checkbox(&mut d.edit.is_default, t!("Default channel"));
                 });
             });
-            form_row(ui, "Max clients:", |ui| {
-                ui.checkbox(&mut d.unlimited, "Unlimited");
+            form_row(ui, t!("Max clients:"), |ui| {
+                ui.checkbox(&mut d.unlimited, t!("Unlimited"));
                 if !d.unlimited {
                     ui.add(egui::DragValue::new(&mut d.max).range(1..=1000));
                 }
@@ -1534,12 +1549,12 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             let mut codec = voxa_proto::codec_of(d.edit.codec_quality);
             let mut quality = voxa_proto::quality_of(d.edit.codec_quality);
             if music_ok {
-                form_row(ui, "Codec:", |ui| {
+                form_row(ui, t!("Codec:"), |ui| {
                     ui.vertical(|ui| {
-                        ui.radio_value(&mut codec, voxa_proto::VoiceCodec::OpusVoice, "Opus Voice").on_hover_text("Mono, tuned for speech. Best for talking.");
-                        ui.radio_value(&mut codec, voxa_proto::VoiceCodec::OpusMusic, "Opus Music").on_hover_text("Stereo, full sound quality, higher bitrate. For playing music; use Continuous transmission or push-to-talk so quiet passages are not cut off.");
+                        ui.radio_value(&mut codec, voxa_proto::VoiceCodec::OpusVoice, t!("Opus Voice")).on_hover_text(t!("Mono, tuned for speech. Best for talking."));
+                        ui.radio_value(&mut codec, voxa_proto::VoiceCodec::OpusMusic, t!("Opus Music")).on_hover_text(t!("Stereo, full sound quality, higher bitrate. For playing music; use Continuous transmission or push-to-talk so quiet passages are not cut off."));
                         if lossless_ok || codec == voxa_proto::VoiceCodec::Lossless {
-                            ui.radio_value(&mut codec, voxa_proto::VoiceCodec::Lossless, "Lossless (16-bit, FLAC quality)").on_hover_text("Uncompressed-quality 16-bit 48 kHz stereo, bit exact. Uses about 0.8-1.5 Mbit/s per listener (the server's upload must carry it for everyone listening).");
+                            ui.radio_value(&mut codec, voxa_proto::VoiceCodec::Lossless, t!("Lossless (16-bit, FLAC quality)")).on_hover_text(t!("Uncompressed-quality 16-bit 48 kHz stereo, bit exact. Uses about 0.8-1.5 Mbit/s per listener (the server's upload must carry it for everyone listening)."));
                         }
                     });
                 });
@@ -1547,33 +1562,33 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 codec = voxa_proto::VoiceCodec::OpusVoice;
             }
             if codec == voxa_proto::VoiceCodec::Lossless {
-                form_row(ui, "Bandwidth:", |ui| {
-                    ui.label(RichText::new("Up to 1.5 Mbit/s per listener (music is usually 0.8-1.1). No quality setting: every sample arrives exactly.").small().weak());
+                form_row(ui, t!("Bandwidth:"), |ui| {
+                    ui.label(RichText::new(t!("Up to 1.5 Mbit/s per listener (music is usually 0.8-1.1). No quality setting: every sample arrives exactly.")).small().weak());
                 });
             } else {
-                form_row(ui, "Codec quality:", |ui| {
+                form_row(ui, t!("Codec quality:"), |ui| {
                     ui.add(egui::Slider::new(&mut quality, 0..=10));
                     let packed = voxa_proto::pack_codec(codec, quality);
                     ui.label(format!("~{} kbit/s{}", voxa_proto::channel_bitrate(packed) / 1000, if codec.stereo() { " stereo" } else { "" }));
                 });
             }
             d.edit.codec_quality = voxa_proto::pack_codec(codec, quality);
-            form_row(ui, "Needed talk power:", |ui| {
+            form_row(ui, t!("Needed talk power:"), |ui| {
                 ui.add(egui::DragValue::new(&mut d.edit.needed_talk_power).range(0..=100));
             });
-            form_row(ui, "Needed join power:", |ui| {
+            form_row(ui, t!("Needed join power:"), |ui| {
                 ui.add(egui::DragValue::new(&mut d.edit.needed_join_power).range(0..=100));
-                ui.label(RichText::new("0 = everyone · 10 = members (Normal) · 75 = admins").small().weak());
+                ui.label(RichText::new(t!("0 = everyone · 10 = members (Normal) · 75 = admins")).small().weak());
             });
-            form_row(ui, "Voice encryption:", |ui| {
-                ui.checkbox(&mut d.edit.voice_encrypted, "Encrypt voice (always on in Voxa)");
+            form_row(ui, t!("Voice encryption:"), |ui| {
+                ui.checkbox(&mut d.edit.voice_encrypted, t!("Encrypt voice (always on in Voxa)"));
             });
-            form_row(ui, "Sort order:", |ui| {
+            form_row(ui, t!("Sort order:"), |ui| {
                 ui.add(egui::DragValue::new(&mut d.edit.sort));
             });
             // Voxa Server 1.25.0+: groups that do not see this channel at all.
             if let Some(hidden) = &mut d.hidden {
-                form_row(ui, "Hidden from:", |ui| {
+                form_row(ui, t!("Hidden from:"), |ui| {
                     ui.vertical(|ui| {
                         let mut groups: Vec<&GroupInfo> = s.groups.values().filter(|g| g.kind == GroupKind::Server).collect();
                         groups.sort_by_key(|g| (g.sort, g.id));
@@ -1582,7 +1597,7 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             let mut on = hidden.contains(&g.id);
                             let own = mine.contains(&g.id);
                             let r = ui.add_enabled(!own || on, egui::Checkbox::new(&mut on, g.name.as_str()));
-                            let r = if own { r.on_hover_text("You are in this group") } else { r };
+                            let r = if own { r.on_hover_text(t!("You are in this group")) } else { r };
                             if r.changed() {
                                 hidden.retain(|x| *x != g.id);
                                 if on {
@@ -1590,7 +1605,7 @@ fn channel_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                                 }
                             }
                         }
-                        ui.label(RichText::new("People in these groups do not see this channel, its sub-channels, people or chat. Administrators always see it.").small().weak());
+                        ui.label(RichText::new(t!("People in these groups do not see this channel, its sub-channels, people or chat. Administrators always see it.")).small().weak());
                     });
                 });
             }
@@ -1658,84 +1673,84 @@ fn server_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(s) = &app.sess else { return };
     let mut open = true;
     let mut close = false;
-    egui::Window::new("Edit Virtual Server").open(&mut open).collapsible(false).resizable(true).default_width(520.0).show_fill(ctx, |ui| {
+    egui::Window::new(t!("Edit Virtual Server")).open(&mut open).collapsible(false).resizable(true).default_width(520.0).show_fill(ctx, |ui| {
         egui::Grid::new("srv").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-            form_row(ui, "Server name:", |ui| {
+            form_row(ui, t!("Server name:"), |ui| {
                 ui.add(egui::TextEdit::singleline(&mut d.edit.name).desired_width(340.0));
             });
-            form_row(ui, "Welcome message:", |ui| {
+            form_row(ui, t!("Welcome message:"), |ui| {
                 ui.add(egui::TextEdit::multiline(&mut d.edit.welcome_message).desired_width(340.0).desired_rows(3));
             });
-            form_row(ui, "Host message (popup):", |ui| {
+            form_row(ui, t!("Host message (popup):"), |ui| {
                 ui.add(egui::TextEdit::multiline(&mut d.edit.host_message).desired_width(340.0).desired_rows(2));
             });
-            form_row(ui, "Max clients:", |ui| {
+            form_row(ui, t!("Max clients:"), |ui| {
                 ui.add(egui::DragValue::new(&mut d.edit.max_clients).range(1..=1024));
             });
-            form_row(ui, "Password:", |ui| {
+            form_row(ui, t!("Password:"), |ui| {
                 ui.vertical(|ui| {
-                    ui.checkbox(&mut d.change_password, if d.had_password { "Change password (empty = remove)" } else { "Set a server password" });
+                    ui.checkbox(&mut d.change_password, if d.had_password { t!("Change password (empty = remove)") } else { t!("Set a server password") });
                     if d.change_password {
                         ui.add(egui::TextEdit::singleline(&mut d.password).password(true));
                     }
                 });
             });
-            form_row(ui, "Default server group:", |ui| group_combo(ui, "dsg", s, GroupKind::Server, &mut d.edit.default_server_group));
-            form_row(ui, "Default channel group:", |ui| group_combo(ui, "dcg", s, GroupKind::Channel, &mut d.edit.default_channel_group));
-            form_row(ui, "Channel admin group:", |ui| group_combo(ui, "cag", s, GroupKind::Channel, &mut d.edit.channel_admin_group));
-            form_row(ui, "Chat history retention:", |ui| {
+            form_row(ui, t!("Default server group:"), |ui| group_combo(ui, "dsg", s, GroupKind::Server, &mut d.edit.default_server_group));
+            form_row(ui, t!("Default channel group:"), |ui| group_combo(ui, "dcg", s, GroupKind::Channel, &mut d.edit.default_channel_group));
+            form_row(ui, t!("Channel admin group:"), |ui| group_combo(ui, "cag", s, GroupKind::Channel, &mut d.edit.channel_admin_group));
+            form_row(ui, t!("Chat history retention:"), |ui| {
                 ui.add(egui::DragValue::new(&mut d.edit.chat_retention_days).range(0..=3650).suffix(" days"));
-                ui.label(RichText::new("(0 = keep forever)").weak());
+                ui.label(RichText::new(t!("(0 = keep forever)")).weak());
             });
             if let Some(m) = &mut d.auto_away {
-                form_row(ui, "Auto away after:", |ui| {
+                form_row(ui, t!("Auto away after:"), |ui| {
                     ui.add(egui::DragValue::new(m).range(0..=MAX_AUTO_AWAY_MINUTES).suffix(" min"));
-                    ui.label(RichText::new("without input (0 = never, at most 30)").weak());
+                    ui.label(RichText::new(t!("without input (0 = never, at most 30)")).weak());
                 });
             }
         });
         // Accounts (Voxa Server 1.25.0+).
         if let Some(p) = &mut d.accounts {
             ui.add_space(6.0);
-            ui.label(RichText::new("Accounts & security").strong());
-            ui.label(RichText::new("Accounts add a username and password (and optionally an authenticator app) on top of each identity, so a copied identity key alone is not enough. People who must sign in only get Guest permissions until they do.").small().weak());
+            ui.label(RichText::new(t!("Accounts & security")).strong());
+            ui.label(RichText::new(t!("Accounts add a username and password (and optionally an authenticator app) on top of each identity, so a copied identity key alone is not enough. People who must sign in only get Guest permissions until they do.")).small().weak());
             for (m, label, tip) in [
-                (AccountMode::Off, "Off", "The identity key alone, as before"),
-                (AccountMode::Optional, "Optional", "People may make an account to protect their identity"),
-                (AccountMode::RequiredForStaff, "Required for staff", "Staff must sign in: anyone whose groups give more than the default server group (e.g. moderators and admins)"),
-                (AccountMode::Required, "Required for everyone", "Everyone must sign in to get their permissions"),
+                (AccountMode::Off, t!("Off"), t!("The identity key alone, as before")),
+                (AccountMode::Optional, t!("Optional"), t!("People may make an account to protect their identity")),
+                (AccountMode::RequiredForStaff, t!("Required for staff"), t!("Staff must sign in: anyone whose groups give more than the default server group (e.g. moderators and admins)")),
+                (AccountMode::Required, t!("Required for everyone"), t!("Everyone must sign in to get their permissions")),
             ] {
                 ui.radio_value(&mut p.mode, m, label).on_hover_text(tip);
             }
             let required = matches!(p.mode, AccountMode::Required | AccountMode::RequiredForStaff);
-            ui.add_enabled(required, egui::Checkbox::new(&mut p.mfa_for_staff, "Staff must also use an authenticator app (MFA)"));
-            ui.label(RichText::new("Forgotten passwords: people use a recovery code, or an administrator right-clicks them ▸ Reset Account Password to give them a temporary one.").small().weak());
+            ui.add_enabled(required, egui::Checkbox::new(&mut p.mfa_for_staff, t!("Staff must also use an authenticator app (MFA)")));
+            ui.label(RichText::new(t!("Forgotten passwords: people use a recovery code, or an administrator right-clicks them ▸ Reset Account Password to give them a temporary one.")).small().weak());
         }
         ui.add_space(6.0);
-        ui.label(RichText::new("File transfers").strong());
+        ui.label(RichText::new(t!("File transfers")).strong());
         if d.limits.is_some() {
             egui::Grid::new("srvfiles").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                form_row(ui, "Max file size:", |ui| {
-                    ui.checkbox(&mut d.max_unlimited, "Unlimited");
+                form_row(ui, t!("Max file size:"), |ui| {
+                    ui.checkbox(&mut d.max_unlimited, t!("Unlimited"));
                     if !d.max_unlimited {
                         ui.add(egui::DragValue::new(&mut d.max_gb).range(0.01..=1_000_000.0).speed(0.5).max_decimals(2).suffix(" GB"));
                     }
                 });
-                form_row(ui, "Storage per channel:", |ui| {
-                    ui.checkbox(&mut d.quota_unlimited, "Unlimited");
+                form_row(ui, t!("Storage per channel:"), |ui| {
+                    ui.checkbox(&mut d.quota_unlimited, t!("Unlimited"));
                     if !d.quota_unlimited {
                         ui.add(egui::DragValue::new(&mut d.quota_gb).range(0.01..=10_000_000.0).speed(1.0).max_decimals(2).suffix(" GB"));
                     }
                 });
             });
-            ui.label(RichText::new("Applies to uploads in every channel's file browser. Make sure the server disk has room.").small().weak());
+            ui.label(RichText::new(t!("Applies to uploads in every channel's file browser. Make sure the server disk has room.")).small().weak());
         } else if s.server.as_ref().map(|i| crate::app::server_at_least(&i.version, "1.3.0")).unwrap_or(false) {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Loading file limits...");
+                ui.label(t!("Loading file limits..."));
             });
         } else {
-            ui.label(RichText::new("Update the server to 1.3.0 or newer to change file size limits here.").weak());
+            ui.label(RichText::new(t!("Update the server to 1.3.0 or newer to change file size limits here.")).weak());
         }
         let (ok, cancel) = ok_cancel(ui, "OK");
         if ok {
@@ -1777,7 +1792,7 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.groups.take() else { return };
     let Some(s) = &app.sess else { return };
     let mut open = true;
-    let title = if d.kind == GroupKind::Server { "Server Groups" } else { "Channel Groups" };
+    let title = if d.kind == GroupKind::Server { t!("Server Groups") } else { t!("Channel Groups") };
     egui::Window::new(title).open(&mut open).collapsible(false).resizable(true).default_size([760.0, 520.0]).show_fill(ctx, |ui| {
         let narrow = narrow_dialog(ui);
         ui.with_layout(side_or_stacked(narrow), |ui| {
@@ -1804,38 +1819,38 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     }
                 }
                 ui.separator();
-                ui.add(egui::TextEdit::singleline(&mut d.new_name).hint_text("New group name").desired_width(fit(ui, 180.0)));
-                if ui.button("➕ Create group").clicked() && !d.new_name.trim().is_empty() {
+                ui.add(egui::TextEdit::singleline(&mut d.new_name).hint_text(t!("New group name")).desired_width(fit(ui, 180.0)));
+                if ui.button(t!("➕ Create group")).clicked() && !d.new_name.trim().is_empty() {
                     s.conn.send(C2S::CreateGroup { kind: d.kind, name: d.new_name.trim().to_string(), copy_from: d.selected });
                     d.new_name.clear();
                 }
-                ui.label(RichText::new("New groups copy the selected group's permissions.").weak().small());
+                ui.label(RichText::new(t!("New groups copy the selected group's permissions.")).weak().small());
             });
             ui.separator();
             ui.vertical(|ui| {
                 let Some(g) = &mut d.edit else {
-                    ui.label("Select a group.");
+                    ui.label(t!("Select a group."));
                     return;
                 };
                 egui::Grid::new("gedit").num_columns(2).show(ui, |ui| {
-                    form_row(ui, "Name:", |ui| {
+                    form_row(ui, t!("Name:"), |ui| {
                         ui.add(egui::TextEdit::singleline(&mut g.name).desired_width(fit(ui, 280.0)));
                     });
-                    form_row(ui, "Talk power:", |ui| {
+                    form_row(ui, t!("Talk power:"), |ui| {
                         ui.add(egui::DragValue::new(&mut g.talk_power).range(0..=100));
                     });
-                    form_row(ui, "Join power:", |ui| {
+                    form_row(ui, t!("Join power:"), |ui| {
                         ui.add(egui::DragValue::new(&mut g.join_power).range(0..=100))
-                            .on_hover_text("Members can enter channels whose \"needed join power\" is at most this value.");
+                            .on_hover_text(t!("Members can enter channels whose \"needed join power\" is at most this value."));
                     });
-                    form_row(ui, "Sort:", |ui| {
+                    form_row(ui, t!("Sort:"), |ui| {
                         ui.add(egui::DragValue::new(&mut g.sort));
                     });
-                    form_row(ui, "Show name:", |ui| {
-                        ui.checkbox(&mut g.show_name, "Show group name next to members");
+                    form_row(ui, t!("Show name:"), |ui| {
+                        ui.checkbox(&mut g.show_name, t!("Show group name next to members"));
                     });
                 });
-                ui.label(RichText::new("Permissions").strong());
+                ui.label(RichText::new(t!("Permissions")).strong());
                 let q = perm_search(ui, "perm_search_groups");
                 crate::updater::fill_list(ui, "perms", 250.0, 140.0, |ui| {
                     for (bit, name) in perm::NAMES.iter().filter(|(_, n)| perm_matches(&q, n)) {
@@ -1850,27 +1865,27 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     }
                 });
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("💾 Save group").clicked() {
+                    if ui.button(t!("💾 Save group")).clicked() {
                         s.conn.send(C2S::EditGroup(g.clone()));
                     }
-                    if ui.add_enabled(!g.builtin, egui::Button::new("🗑 Delete group")).clicked() {
+                    if ui.add_enabled(!g.builtin, egui::Button::new(t!("🗑 Delete group"))).clicked() {
                         s.conn.send(C2S::DeleteGroup(g.id));
                         d.selected = None;
                     }
                 });
                 ui.separator();
-                ui.label(RichText::new("Members").strong());
+                ui.label(RichText::new(t!("Members")).strong());
                 let gid = g.id;
                 egui::ScrollArea::vertical().max_height(120.0).id_salt("members").show(ui, |ui| {
                     if d.members.is_empty() {
-                        ui.label(RichText::new("No members").weak());
+                        ui.label(RichText::new(t!("No members")).weak());
                     }
                     for m in &d.members {
                         ui.horizontal(|ui| {
                             ui.label(if m.online { "●" } else { "○" });
                             ui.label(&m.name);
                             ui.label(RichText::new(&m.uid).small().weak());
-                            if d.kind == GroupKind::Server && ui.small_button("Remove").clicked() {
+                            if d.kind == GroupKind::Server && ui.small_button(t!("Remove")).clicked() {
                                 s.conn.send(C2S::SetServerGroup { uid: m.uid.clone(), group: gid, add: false });
                                 s.conn.send(C2S::GroupMembers(gid));
                             }
@@ -1879,8 +1894,8 @@ fn groups_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 });
                 if d.kind == GroupKind::Server {
                     ui.horizontal_wrapped(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut d.add_uid).hint_text("Unique ID to add").desired_width(fit(ui, 220.0)));
-                        if ui.button("Add member").clicked() && !d.add_uid.trim().is_empty() {
+                        ui.add(egui::TextEdit::singleline(&mut d.add_uid).hint_text(t!("Unique ID to add")).desired_width(fit(ui, 220.0)));
+                        if ui.button(t!("Add member")).clicked() && !d.add_uid.trim().is_empty() {
                             s.conn.send(C2S::SetServerGroup { uid: d.add_uid.trim().to_string(), group: gid, add: true });
                             s.conn.send(C2S::GroupMembers(gid));
                             d.add_uid.clear();
@@ -1906,10 +1921,10 @@ fn bans_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.bans.take() else { return };
     let Some(s) = &app.sess else { return };
     let mut open = true;
-    egui::Window::new("Ban List").open(&mut open).collapsible(false).resizable(true).default_size([760.0, 420.0]).show_fill(ctx, |ui| {
+    egui::Window::new(t!("Ban List")).open(&mut open).collapsible(false).resizable(true).default_size([760.0, 420.0]).show_fill(ctx, |ui| {
         crate::updater::fill_list(ui, "list3", 200.0, 100.0, |ui| {
             egui::Grid::new("bans").num_columns(8).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
-                for h in ["Name", "Unique ID", "IP", "Hardware", "Reason", "Expires", "By", ""] {
+                for h in [t!("Name"), t!("Unique ID"), t!("IP"), t!("Hardware"), t!("Reason"), t!("Expires"), t!("By"), ""] {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.end_row();
@@ -1917,11 +1932,11 @@ fn bans_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     ui.label(b.name.clone().unwrap_or_default());
                     ui.label(RichText::new(b.uid.clone().unwrap_or_default()).small());
                     ui.label(b.ip.clone().unwrap_or_default());
-                    ui.label(if s.hw_bans.contains(&b.id) { "🖥 banned" } else { "" });
+                    ui.label(if s.hw_bans.contains(&b.id) { t!("🖥 banned") } else { "" });
                     ui.label(&b.reason);
-                    ui.label(b.expires.map(fmt_date).unwrap_or("Never".into()));
+                    ui.label(b.expires.map(fmt_date).unwrap_or(t!("Never").into()));
                     ui.label(&b.by);
-                    if ui.small_button("Unban").clicked() {
+                    if ui.small_button(t!("Unban")).clicked() {
                         s.conn.send(C2S::Unban(b.id));
                     }
                     ui.end_row();
@@ -1929,24 +1944,24 @@ fn bans_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             });
         });
         ui.separator();
-        ui.label(RichText::new("Add ban").strong());
+        ui.label(RichText::new(t!("Add ban")).strong());
         egui::Grid::new("addban").num_columns(2).show(ui, |ui| {
-            form_row(ui, "Unique ID:", |ui| {
+            form_row(ui, t!("Unique ID:"), |ui| {
                 ui.text_edit_singleline(&mut d.uid);
             });
-            form_row(ui, "or IP address:", |ui| {
+            form_row(ui, t!("or IP address:"), |ui| {
                 ui.text_edit_singleline(&mut d.ip);
             });
-            form_row(ui, "Reason:", |ui| {
+            form_row(ui, t!("Reason:"), |ui| {
                 ui.text_edit_singleline(&mut d.reason);
             });
-            form_row(ui, "Duration:", |ui| {
+            form_row(ui, t!("Duration:"), |ui| {
                 ui.add(egui::DragValue::new(&mut d.minutes).suffix(" min"));
-                ui.label(RichText::new("(0 = permanent)").weak());
+                ui.label(RichText::new(t!("(0 = permanent)")).weak());
             });
         });
         ui.horizontal(|ui| {
-            if ui.button("Add ban").clicked() {
+            if ui.button(t!("Add ban")).clicked() {
                 let target = if !d.uid.trim().is_empty() {
                     Some(BanTarget::Uid(d.uid.trim().into()))
                 } else if !d.ip.trim().is_empty() {
@@ -1961,7 +1976,7 @@ fn bans_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     d.ip.clear();
                 }
             }
-            if ui.button("⟲ Refresh").clicked() {
+            if ui.button(t!("⟲ Refresh")).clicked() {
                 s.conn.send(C2S::BanList);
             }
         });
@@ -1974,7 +1989,7 @@ fn bans_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
 fn privkey_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if let Some(mut key) = app.dlg.privkey_use.take() {
         let mut keep = true;
-        if text_prompt(ctx, "Use Privilege Key", "Enter the privilege key you received:", &mut key, &mut keep, false) && !key.trim().is_empty() {
+        if text_prompt(ctx, t!("Use Privilege Key"), "Enter the privilege key you received:", &mut key, &mut keep, false) && !key.trim().is_empty() {
             app.send(C2S::UsePrivilegeKey(key.trim().to_string()));
         }
         if keep {
@@ -1984,9 +1999,9 @@ fn privkey_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     let Some(mut d) = app.dlg.privkey_create.take() else { return };
     let Some(s) = &app.sess else { return };
     let mut open = true;
-    window("Create Privilege Key").open(&mut open).show_fill(ctx, |ui| {
+    window(t!("Create Privilege Key")).open(&mut open).show_fill(ctx, |ui| {
         egui::Grid::new("pk").num_columns(2).show(ui, |ui| {
-            form_row(ui, "Group:", |ui| {
+            form_row(ui, t!("Group:"), |ui| {
                 egui::ComboBox::from_id_salt("pkg").selected_text(s.group_name(d.group)).show_ui(ui, |ui| {
                     for g in s.groups.values() {
                         let label = format!("{} ({})", g.name, if g.kind == GroupKind::Server { "server" } else { "channel" });
@@ -1995,7 +2010,7 @@ fn privkey_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                 });
             });
             if s.groups.get(&d.group).map(|g| g.kind == GroupKind::Channel).unwrap_or(false) {
-                form_row(ui, "Channel:", |ui| {
+                form_row(ui, t!("Channel:"), |ui| {
                     egui::ComboBox::from_id_salt("pkc").selected_text(s.channel_path(d.channel)).show_ui(ui, |ui| {
                         for c in s.channels.values() {
                             ui.selectable_value(&mut d.channel, c.id, s.channel_path(c.id));
@@ -2003,19 +2018,19 @@ fn privkey_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                 });
             }
-            form_row(ui, "Description:", |ui| {
+            form_row(ui, t!("Description:"), |ui| {
                 ui.text_edit_singleline(&mut d.description);
             });
         });
-        if ui.button("Create key").clicked() {
+        if ui.button(t!("Create key")).clicked() {
             s.conn.send(C2S::CreatePrivilegeKey { group: d.group, channel: Some(d.channel), description: d.description.clone() });
         }
         if let Some(k) = &d.result {
             ui.separator();
-            ui.label("Key created (single use):");
+            ui.label(t!("Key created (single use):"));
             ui.horizontal(|ui| {
                 ui.add(egui::Label::new(RichText::new(k).monospace()).selectable(true));
-                if ui.button("📋 Copy").clicked() {
+                if ui.button(t!("📋 Copy")).clicked() {
                     ctx.copy_text(k.clone());
                 }
             });
@@ -2055,7 +2070,7 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     }
     let hovering_files = ctx.input(|i| !i.raw.hovered_files.is_empty());
 
-    egui::Window::new(format!("File Browser - {cname}"))
+    egui::Window::new(tf!("File Browser - {cname}"; cname = cname))
         .id(egui::Id::unique("filebrowser"))
         .open(&mut open)
         .collapsible(false)
@@ -2081,11 +2096,11 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             }
 
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!d.path.is_empty(), egui::Button::new("⬆ Up")).clicked() {
+                if ui.add_enabled(!d.path.is_empty(), egui::Button::new(t!("⬆ Up"))).clicked() {
                     d.path = d.path.rsplit_once('/').map(|(a, _)| a.to_string()).unwrap_or_default();
                     refresh(&mut d);
                 }
-                if ui.button("⟲ Refresh").clicked() {
+                if ui.button(t!("⟲ Refresh")).clicked() {
                     refresh(&mut d);
                 }
                 // Android: what was chosen in Voxa's file browser.
@@ -2096,22 +2111,22 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     }
                 }
                 ui.separator();
-                if ui.button("📄 Upload Files...").clicked() {
+                if ui.button(t!("📄 Upload Files...")).clicked() {
                     if let Some(files) = crate::files::pick(crate::files::PickKind::Upload, "Upload files", &[], true, false) {
                         ops.push(FileOp::UploadFiles(files));
                     }
                 }
-                if ui.button("📂 Upload Folder...").on_hover_text("Uploads a whole folder including its sub-folders").clicked() {
+                if ui.button(t!("📂 Upload Folder...")).on_hover_text(t!("Uploads a whole folder including its sub-folders")).clicked() {
                     if let Some(folder) = crate::files::pick(crate::files::PickKind::UploadFolder, "Upload folder", &[], false, true).and_then(|f| f.into_iter().next()) {
                         ops.push(FileOp::UploadFolder(folder));
                     }
                 }
-                if ui.button("📁 New Folder").clicked() {
+                if ui.button(t!("📁 New Folder")).clicked() {
                     d.new_folder = Some(String::new());
                 }
                 ui.separator();
                 let n = d.selected.len();
-                let dl_label = if n > 1 { format!("⬇ Download ({n})") } else { "⬇ Download".to_string() };
+                let dl_label = if n > 1 { tf!("⬇ Download ({n})"; n = n) } else { t!("⬇ Download").to_string() };
                 if ui.add_enabled(n > 0, egui::Button::new(dl_label)).clicked() {
                     let items: Vec<(String, bool)> = d
                         .entries
@@ -2128,7 +2143,7 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         ops.push(FileOp::DownloadMany(items, dest));
                     }
                 }
-                let del_label = if n > 1 { format!("🗑 Delete ({n})") } else { "🗑 Delete".to_string() };
+                let del_label = if n > 1 { tf!("🗑 Delete ({n})"; n = n) } else { t!("🗑 Delete").to_string() };
                 if ui.add_enabled(n > 0, egui::Button::new(del_label)).clicked() {
                     d.confirm_delete = true;
                 }
@@ -2138,9 +2153,9 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 let mut create = false;
                 let mut cancel = false;
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(name).hint_text("Folder name"));
-                    create = ui.button("Create").clicked();
-                    cancel = ui.button("Cancel").clicked();
+                    ui.add(egui::TextEdit::singleline(name).hint_text(t!("Folder name")));
+                    create = ui.button(t!("Create")).clicked();
+                    cancel = ui.button(t!("Cancel")).clicked();
                 });
                 if create && !name.trim().is_empty() {
                     let p = if d.path.is_empty() { name.trim().to_string() } else { format!("{}/{}", d.path, name.trim()) };
@@ -2157,17 +2172,17 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 let folders = d.entries.iter().filter(|e| e.is_dir && d.selected.contains(&e.name)).count();
                 Frame::new().fill(Color32::from_rgb(0x5A, 0x1E, 0x22)).corner_radius(6).inner_margin(Margin::same(8)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    let what = if folders > 0 { format!("{n} item(s), including everything inside {folders} folder(s)") } else { format!("{n} file(s)") };
-                    ui.label(RichText::new(format!("Delete {what}? This cannot be undone.")).color(Color32::WHITE));
+                    let what = if folders > 0 { tf!("{n} item(s), including everything inside {folders} folder(s)"; n = n, folders = folders) } else { format!("{n} file(s)") };
+                    ui.label(RichText::new(tf!("Delete {what}? This cannot be undone."; what = what)).color(Color32::WHITE));
                     ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(RichText::new("Delete").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
+                        if ui.add(egui::Button::new(RichText::new(t!("Delete")).color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
                             let names: Vec<String> = d.selected.iter().cloned().collect();
                             for name in names {
                                 s.conn.send(C2S::FileDelete { channel: d.channel, path: remote_of(&d, &name) });
                             }
                             refresh(&mut d);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(t!("Cancel")).clicked() {
                             d.confirm_delete = false;
                         }
                     });
@@ -2177,7 +2192,7 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("/{}", d.path)).monospace());
                 if !d.selected.is_empty() {
-                    ui.label(RichText::new(format!("· {} of {} selected", d.selected.len(), d.entries.len())).weak());
+                    ui.label(RichText::new(tf!("· {} of {} selected", d.selected.len(), d.entries.len())).weak());
                 }
             });
             ui.separator();
@@ -2187,22 +2202,22 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     ui.spinner();
                 }
                 if hovering_files {
-                    ui.label(RichText::new("⬇ Drop here to upload into this folder").strong().color(Color32::from_rgb(0x25, 0x80, 0xC3)));
+                    ui.label(RichText::new(t!("⬇ Drop here to upload into this folder")).strong().color(Color32::from_rgb(0x25, 0x80, 0xC3)));
                 }
                 egui::Grid::new("files").num_columns(4).striped(true).spacing([14.0, 4.0]).show(ui, |ui| {
                     // Header with "select all".
                     let all = !d.entries.is_empty() && d.selected.len() == d.entries.len();
                     let mut all_box = all;
-                    if ui.checkbox(&mut all_box, "").on_hover_text("Select all (Ctrl+A)").changed() {
+                    if ui.checkbox(&mut all_box, "").on_hover_text(t!("Select all (Ctrl+A)")).changed() {
                         if all_box {
                             d.selected = d.entries.iter().map(|e| e.name.clone()).collect();
                         } else {
                             d.selected.clear();
                         }
                     }
-                    ui.label(RichText::new("Name").strong());
-                    ui.label(RichText::new("Size").strong());
-                    ui.label(RichText::new("Modified").strong());
+                    ui.label(RichText::new(t!("Name")).strong());
+                    ui.label(RichText::new(t!("Size")).strong());
+                    ui.label(RichText::new(t!("Modified")).strong());
                     ui.end_row();
                     for (idx, e) in d.entries.clone().iter().enumerate() {
                         let mut checked = d.selected.contains(&e.name);
@@ -2247,17 +2262,17 @@ fn files_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     }
                 });
                 if d.entries.is_empty() && !d.loading {
-                    ui.label(RichText::new("This folder is empty. Upload files or a folder, or drag them in from Explorer.").weak());
+                    ui.label(RichText::new(t!("This folder is empty. Upload files or a folder, or drag them in from Explorer.")).weak());
                 }
             });
             if let Some(dir) = enter_dir {
                 d.path = remote_of(&d, &dir);
                 refresh(&mut d);
             }
-            ui.label(RichText::new("Tip: Ctrl+click / Shift+click to select several, Ctrl+A for all, Delete to remove.").small().weak());
+            ui.label(RichText::new(t!("Tip: Ctrl+click / Shift+click to select several, Ctrl+A for all, Delete to remove.")).small().weak());
             if let Some(l) = s.file_limits {
                 let lim = |mb: u64| if mb == 0 { "unlimited".to_string() } else { fmt_size(mb * 1024 * 1024) };
-                ui.label(RichText::new(format!("Max file size: {} · Storage per channel: {}", lim(l.max_upload_mb), lim(l.channel_quota_mb))).small().weak());
+                ui.label(RichText::new(tf!("Max file size: {} · Storage per channel: {}", lim(l.max_upload_mb), lim(l.channel_quota_mb))).small().weak());
             }
             ui.separator();
             egui::ScrollArea::vertical().id_salt("fb_transfers").max_height(130.0).auto_shrink([false, true]).show(ui, |ui| {
@@ -2292,7 +2307,7 @@ fn transfer_list(ui: &mut Ui, s: &Session, max: usize) -> Vec<TransferCmd> {
     let mut cmds = Vec::new();
     let list: Vec<(&u32, &Transfer)> = s.transfers.iter().rev().take(max).collect();
     if list.is_empty() {
-        ui.label(RichText::new("No file transfers").weak());
+        ui.label(RichText::new(t!("No file transfers")).weak());
     }
     for (id, t) in list {
         ui.horizontal(|ui| {
@@ -2305,7 +2320,7 @@ fn transfer_list(ui: &mut Ui, s: &Session, max: usize) -> Vec<TransferCmd> {
                 }
                 TransferState::Waiting => {
                     ui.spinner();
-                    ui.label("waiting for server...");
+                    ui.label(t!("waiting for server..."));
                 }
                 TransferState::Active => {
                     let frac = if t.size > 0 { done as f32 / t.size as f32 } else { 0.0 };
@@ -2319,10 +2334,10 @@ fn transfer_list(ui: &mut Ui, s: &Session, max: usize) -> Vec<TransferCmd> {
                 }
             }
             if t.is_running() || matches!(t.state, TransferState::Queued) {
-                if ui.small_button("✖ Cancel").clicked() {
+                if ui.small_button(t!("✖ Cancel")).clicked() {
                     cmds.push(TransferCmd::Cancel(*id));
                 }
-            } else if matches!(t.state, TransferState::Failed(_)) && ui.small_button("⟲ Retry").clicked() {
+            } else if matches!(t.state, TransferState::Failed(_)) && ui.small_button(t!("⟲ Retry")).clicked() {
                 cmds.push(TransferCmd::Retry(*id));
             }
         });
@@ -2347,11 +2362,11 @@ fn transfers_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut clear = false;
     let mut cmds = Vec::new();
     if let Some(s) = &app.sess {
-        egui::Window::new("File Transfers").open(&mut open).resizable(true).default_size([520.0, 320.0]).show_fill(ctx, |ui| {
+        egui::Window::new(t!("File Transfers")).open(&mut open).resizable(true).default_size([520.0, 320.0]).show_fill(ctx, |ui| {
             crate::updater::fill_list(ui, "list4", 36.0, 80.0, |ui| {
                 cmds = transfer_list(ui, s, 500);
             });
-            clear = ui.button("Clear finished").clicked();
+            clear = ui.button(t!("Clear finished")).clicked();
         });
     }
     run_transfer_cmds(app, cmds);
@@ -2369,7 +2384,7 @@ fn transfers_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
 pub fn start_share(app: &mut VoxaApp, ctx: &egui::Context, src: crate::capture::Source, settings: StreamSettings) {
     let Some(s) = &mut app.sess else { return };
     if !s.bulk_ready {
-        app.dlg.error = Some("The stream connection is not ready yet. Please try again in a moment.".into());
+        app.dlg.error = Some(t!("The stream connection is not ready yet. Please try again in a moment.").into());
         return;
     }
     app.settings.stream = settings.clone();
@@ -2391,11 +2406,11 @@ pub fn start_share(app: &mut VoxaApp, ctx: &egui::Context, src: crate::capture::
         .filter(|_| settings.audio && server_ok)
         .map(|target| crate::stream::AudioSetup { target, ctl: s.conn.bulk_ctl.clone() });
     let streamer = crate::stream::Streamer::start(src, settings.clone(), s.conn.bulk_tx.clone(), preview, audio);
-    s.log(EventKind::Good, "You started sharing your screen - your own preview is shown above the chat");
+    s.log(EventKind::Good, t!("You started sharing your screen - your own preview is shown above the chat"));
     if settings.audio && !server_ok {
-        s.log(EventKind::Info, "Sound is not shared: this needs Voxa Server 1.6.0 or newer.");
+        s.log(EventKind::Info, t!("Sound is not shared: this needs Voxa Server 1.6.0 or newer."));
     } else if let Some(e) = &streamer.audio_error {
-        s.log(EventKind::Warn, format!("Sound is not shared: {e}"));
+        s.log(EventKind::Warn, tf!("Sound is not shared: {e}"; e = e));
     }
     s.streamer = Some(streamer);
 }
@@ -2408,7 +2423,7 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         d.thumbs = Some(crate::share_picker::Thumbs::start(ctx, d.sources.clone()));
     }
     let (windows, screens): (Vec<_>, Vec<_>) = d.sources.iter().cloned().partition(|s| matches!(s, crate::capture::Source::Window { .. }));
-    egui::Window::new("Share your screen")
+    egui::Window::new(t!("Share your screen"))
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
@@ -2421,7 +2436,7 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⟲ Refresh").on_hover_text("Find newly opened windows").clicked() {
+                    if ui.button(t!("⟲ Refresh")).on_hover_text(t!("Find newly opened windows")).clicked() {
                         d.sources = crate::capture::sources();
                         if let Some(t) = &d.thumbs {
                             t.set_sources(d.sources.clone());
@@ -2435,7 +2450,7 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             crate::updater::fill_list(ui, "share_sources", 150.0, 160.0, |ui| {
                 if list.is_empty() {
                     ui.add_space(20.0);
-                    ui.label(RichText::new(if d.tab == 0 { "No application windows found. Open the app you want to share and press Refresh." } else { "No screens found." }).weak());
+                    ui.label(RichText::new(if d.tab == 0 { t!("No application windows found. Open the app you want to share and press Refresh.") } else { t!("No screens found.") }).weak());
                 }
                 if let Some(src) = crate::share_picker::grid(ui, list, thumbs, &mut d.selected) {
                     start = Some(src);
@@ -2443,15 +2458,15 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             });
             ui.separator();
             ui.horizontal_wrapped(|ui| {
-                ui.label("Frame rate:");
+                ui.label(t!("Frame rate:"));
                 ui.add(egui::Slider::new(&mut d.settings.fps, 1..=60).suffix(" fps"));
                 ui.add_space(8.0);
-                ui.label("Quality:");
+                ui.label(t!("Quality:"));
                 ui.add(egui::Slider::new(&mut d.settings.quality, 20..=95));
                 ui.add_space(8.0);
-                ui.checkbox(&mut d.settings.audio, "🔊 Share sound").on_hover_text("Screens: everything your PC plays, except Voxa itself (so nobody hears the voice chat twice). Applications: only that application's sound.");
+                ui.checkbox(&mut d.settings.audio, t!("🔊 Share sound")).on_hover_text(t!("Screens: everything your PC plays, except Voxa itself (so nobody hears the voice chat twice). Applications: only that application's sound."));
                 ui.add_space(8.0);
-                ui.label("Max width:");
+                ui.label(t!("Max width:"));
                 egui::ComboBox::from_id_salt("sharew").selected_text(format!("{} px", d.settings.max_width)).show_ui(ui, |ui| {
                     for w in [854u32, 1280, 1600, 1920, 2560, 3840] {
                         ui.selectable_value(&mut d.settings.max_width, w, format!("{w} px"));
@@ -2461,18 +2476,18 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             let chosen = d.selected.as_ref().and_then(|k| d.sources.iter().find(|s| &s.key() == k)).cloned();
             ui.horizontal(|ui| {
                 let label = match &chosen {
-                    Some(crate::capture::Source::Window { title, .. }) => format!("📺 Share \"{}\"", crate::share_picker::ellipsize(title, 40)),
-                    Some(crate::capture::Source::Monitor { name, .. }) => format!("📺 Share {name}"),
-                    None => "📺 Go Live".to_string(),
+                    Some(crate::capture::Source::Window { title, .. }) => tf!("📺 Share \"{}\"", crate::share_picker::ellipsize(title, 40)),
+                    Some(crate::capture::Source::Monitor { name, .. }) => tf!("📺 Share {name}"; name = name),
+                    None => t!("📺 Go Live").to_string(),
                 };
                 let go = egui::Button::new(RichText::new(label).color(Color32::WHITE).strong()).fill(Color32::from_rgb(0x25, 0x80, 0xC3));
-                if ui.add_enabled(chosen.is_some(), go).on_disabled_hover_text("Pick an application or screen first").clicked() {
+                if ui.add_enabled(chosen.is_some(), go).on_disabled_hover_text(t!("Pick an application or screen first")).clicked() {
                     start = chosen.clone();
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!("Cancel")).clicked() {
                     close = true;
                 }
-                ui.label(RichText::new("Tip: double-click a preview to start right away. The stream is relayed through the server.").small().weak());
+                ui.label(RichText::new(t!("Tip: double-click a preview to start right away. The stream is relayed through the server.")).small().weak());
             });
         });
     if let Some(src) = start {
@@ -2491,19 +2506,19 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if let Some((uid, name)) = app.dlg.forget.take() {
         let mut open = true;
         let mut close = false;
-        window("Remove from Server").open(&mut open).show_fill(ctx, |ui| {
+        window(t!("Remove from Server")).open(&mut open).show_fill(ctx, |ui| {
             ui.set_max_width(ui.available_width().min(440.0));
             ui.label(RichText::new(&name).strong());
             ui.label(RichText::new(&uid).small().monospace().weak());
             ui.add_space(4.0);
-            ui.label("The server forgets them: their server groups, personal permissions, channel groups, picture and messages waiting for them. Their chat messages stay.");
-            ui.label(RichText::new("If they connect again they start fresh, like someone new (to keep them out, ban them instead).").small().weak());
+            ui.label(t!("The server forgets them: their server groups, personal permissions, channel groups, picture and messages waiting for them. Their chat messages stay."));
+            ui.label(RichText::new(t!("If they connect again they start fresh, like someone new (to keep them out, ban them instead).")).small().weak());
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("Remove").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
+                if ui.add(egui::Button::new(RichText::new(t!("Remove")).color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
                     app.send_mut(C2S::ForgetClient(uid.clone()));
                     close = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!("Cancel")).clicked() {
                     close = true;
                 }
             });
@@ -2512,24 +2527,71 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             app.dlg.forget = Some((uid, name));
         }
     }
+    // "View as" (Voxa Server 1.30.0+): pick the server groups to preview the server as.
+    if let Some(mut picked) = app.dlg.view_as.take() {
+        let mut open = true;
+        let mut close = false;
+        let Some(s) = app.sess.as_ref() else { return };
+        let real = s.me().map(|m| s.real_server_perms_of(m)).unwrap_or(0);
+        let mut groups: Vec<GroupInfo> = s.groups.values().filter(|g| g.kind == GroupKind::Server).cloned().collect();
+        groups.sort_by_key(|g| (g.sort, g.id));
+        let mut send: Option<C2S> = None;
+        window(t!("View As")).open(&mut open).show_centered(ctx, |ui| {
+            ui.set_max_width(ui.available_width().min(440.0));
+            ui.label(t!("See the server as members of these groups see it: their permissions, the channels they see, their talk and join power. Your channel group counts as the default one. Nobody else notices."));
+            ui.label(RichText::new(t!("A yellow bar shows while you preview; ✖ Stop (or disconnecting) brings your own permissions back.")).small().weak());
+            ui.add_space(4.0);
+            for g in &groups {
+                let allowed = g.perms & !real == 0;
+                let mut on = picked.contains(&g.id);
+                let r = ui.add_enabled(allowed, egui::Checkbox::new(&mut on, g.name.as_str()));
+                let r = if allowed { r } else { r.on_disabled_hover_text(t!("It has permissions you do not have")) };
+                if r.changed() {
+                    picked.retain(|x| *x != g.id);
+                    if on {
+                        picked.push(g.id);
+                    }
+                }
+            }
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!picked.is_empty(), egui::Button::new(t!("👁 View as these groups"))).clicked() {
+                    send = Some(C2S::ViewAs(Some(picked.clone())));
+                    close = true;
+                }
+                if s.view_as.is_some() && ui.button(t!("✖ Stop viewing")).clicked() {
+                    send = Some(C2S::ViewAs(None));
+                    close = true;
+                }
+                if ui.button(t!("Cancel")).clicked() {
+                    close = true;
+                }
+            });
+        });
+        if let Some(m) = send {
+            app.send_mut(m);
+        }
+        if open && !close {
+            app.dlg.view_as = Some(picked);
+        }
+    }
     // Reset someone's account password (Voxa Server 1.25.1+).
     if let Some((uid, name, mut remove_mfa)) = app.dlg.reset_account.take() {
         let mut open = true;
         let mut close = false;
-        window("Reset Account Password").open(&mut open).show_centered(ctx, |ui| {
+        window(t!("Reset Account Password")).open(&mut open).show_centered(ctx, |ui| {
             ui.set_max_width(ui.available_width().min(440.0));
             ui.label(RichText::new(&name).strong());
             ui.label(RichText::new(&uid).small().monospace().weak());
             ui.add_space(4.0);
-            ui.label("The server makes a temporary password for their account and shows it to you once. Give it to them: they sign in with it and must then choose a new password. Their remembered devices are signed out.");
-            ui.checkbox(&mut remove_mfa, "Also turn off their authenticator app (they lost their phone or key)");
-            ui.label(RichText::new("Make sure it really is them asking (e.g. in person or by voice): whoever has the temporary password gets the account.").small().weak());
+            ui.label(t!("The server makes a temporary password for their account and shows it to you once. Give it to them: they sign in with it and must then choose a new password. Their remembered devices are signed out."));
+            ui.checkbox(&mut remove_mfa, t!("Also turn off their authenticator app (they lost their phone or key)"));
+            ui.label(RichText::new(t!("Make sure it really is them asking (e.g. in person or by voice): whoever has the temporary password gets the account.")).small().weak());
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("Reset password").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
+                if ui.add(egui::Button::new(RichText::new(t!("Reset password")).color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
                     app.send_mut(C2S::ResetAccount { uid: uid.clone(), remove_mfa });
                     close = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!("Cancel")).clicked() {
                     close = true;
                 }
             });
@@ -2542,18 +2604,18 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if let Some((user, pw)) = app.dlg.account_reset.take() {
         let mut open = true;
         let mut close = false;
-        window("Temporary Password").open(&mut open).show_centered(ctx, |ui| {
+        window(t!("Temporary Password")).open(&mut open).show_centered(ctx, |ui| {
             ui.set_max_width(ui.available_width().min(440.0));
-            ui.label(format!("The password of the account \"{user}\" was reset. Give them this temporary password (it is not shown again):"));
+            ui.label(tf!("The password of the account \"{user}\" was reset. Give them this temporary password (it is not shown again):"; user = user));
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(&pw).monospace().size(18.0).strong());
-                if ui.button("📋 Copy").clicked() {
+                if ui.button(t!("📋 Copy")).clicked() {
                     ui.ctx().copy_text(pw.clone());
                 }
             });
-            ui.label(RichText::new("They sign in with username and this password, then choose a new password.").small().weak());
-            if ui.button("Done").clicked() {
+            ui.label(RichText::new(t!("They sign in with username and this password, then choose a new password.")).small().weak());
+            if ui.button(t!("Done")).clicked() {
                 close = true;
             }
         });
@@ -2565,25 +2627,25 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if let Some((target, id, author, text)) = app.dlg.delete_msg.take() {
         let mut open = true;
         let mut close = false;
-        window("Delete Message").open(&mut open).show_fill(ctx, |ui| {
+        window(t!("Delete Message")).open(&mut open).show_fill(ctx, |ui| {
             ui.set_max_width(ui.available_width().min(420.0));
-            ui.label("Delete this message? It is removed for everyone and from the chat history.");
+            ui.label(t!("Delete this message? It is removed for everyone and from the chat history."));
             Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(6).inner_margin(Margin::same(8)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new(&author).strong());
                 let preview: String = text.chars().take(300).collect();
                 ui.label(RichText::new(preview).font(crate::ui::chat_font(13.0)));
             });
-            ui.label(RichText::new("Tip: hold Shift while clicking 🗑 to delete without this question.").small().weak());
+            ui.label(RichText::new(t!("Tip: hold Shift while clicking 🗑 to delete without this question.")).small().weak());
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("Delete").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
+                if ui.add(egui::Button::new(RichText::new(t!("Delete")).color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
                     match app.dlg.chat_key {
                         Some(key) => app.send_mut_as(key, C2S::DeleteMessage { target, id }),
                         None => app.send_mut(C2S::DeleteMessage { target, id }),
                     }
                     close = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!("Cancel")).clicked() {
                     close = true;
                 }
             });
@@ -2604,23 +2666,23 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             ),
             TextTarget::Private(_) | TextTarget::Group(_) => "this conversation".into(),
         };
-        window("Clear Chat History").open(&mut open).show_fill(ctx, |ui| {
+        window(t!("Clear Chat History")).open(&mut open).show_fill(ctx, |ui| {
             ui.set_max_width(ui.available_width().min(420.0));
-            ui.label(RichText::new(format!("Delete every message in {what}?")).strong());
+            ui.label(RichText::new(tf!("Delete every message in {what}?"; what = what)).strong());
             ui.label(if matches!(target, TextTarget::Private(_)) {
                 "This deletes your copy of the conversation from this PC. The other person keeps their own copy. It cannot be undone."
             } else {
                 "This removes all messages for everyone and permanently deletes them from the server's chat history. It cannot be undone."
             });
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("Clear history").color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
+                if ui.add(egui::Button::new(RichText::new(t!("Clear history")).color(Color32::WHITE)).fill(Color32::from_rgb(0xED, 0x42, 0x45))).clicked() {
                     match app.dlg.chat_key {
                         Some(key) => app.send_mut_as(key, C2S::ClearChat(target)),
                         None => app.send_mut(C2S::ClearChat(target)),
                     }
                     close = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!("Cancel")).clicked() {
                     close = true;
                 }
             });
@@ -2639,20 +2701,20 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             Some(c) => (s.server_perms_of(c), s.groups.get(&c.channel_group).map(|g| g.perms).unwrap_or(0)),
             None => (0, 0),
         };
-        egui::Window::new(format!("Permissions - {}", d.name))
+        egui::Window::new(tf!("Permissions - {}", d.name))
             .id(egui::Id::unique(("clientperms", d.uid.as_str())))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
             .default_size([460.0, 520.0])
             .show_fill(ctx, |ui| {
-                ui.label("Personal permissions apply to this user on top of their server and channel groups.");
-                ui.label(RichText::new(format!("Unique ID: {}", d.uid)).small().weak());
+                ui.label(t!("Personal permissions apply to this user on top of their server and channel groups."));
+                ui.label(RichText::new(tf!("Unique ID: {}", d.uid)).small().weak());
                 ui.separator();
                 if d.perms.is_none() {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Loading...");
+                        ui.label(t!("Loading..."));
                     });
                     return;
                 }
@@ -2672,21 +2734,21 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                                 }
                             }
                             if via_group {
-                                ui.label(RichText::new("✔ already via group").small().color(Color32::from_rgb(0x3B, 0xA5, 0x5D)));
+                                ui.label(RichText::new(t!("✔ already via group")).small().color(Color32::from_rgb(0x3B, 0xA5, 0x5D)));
                             }
                         });
                     }
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("💾 Save").clicked() {
+                    if ui.button(t!("💾 Save")).clicked() {
                         s.conn.send(C2S::SetClientPerms { uid: d.uid.clone(), perms: d.edit });
                         close = true;
                     }
-                    if ui.button("Clear all").clicked() {
+                    if ui.button(t!("Clear all")).clicked() {
                         d.edit = 0;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(t!("Cancel")).clicked() {
                         close = true;
                     }
                 });
@@ -2701,7 +2763,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     // Channel password.
     if let Some((ch, mut pw)) = app.dlg.channel_password.take() {
         let mut keep = true;
-        if text_prompt(ctx, "Channel Password", "This channel is password protected:", &mut pw, &mut keep, false) {
+        if text_prompt(ctx, t!("Channel Password"), "This channel is password protected:", &mut pw, &mut keep, false) {
             app.send(C2S::SwitchChannel { channel: ch, password: Some(pw.clone()) });
         }
         if keep {
@@ -2711,7 +2773,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     // Away.
     if let Some(mut m) = app.dlg.away.take() {
         let mut keep = true;
-        if text_prompt(ctx, "Set Away", "Away message (optional):", &mut m, &mut keep, false) {
+        if text_prompt(ctx, t!("Set Away"), "Away message (optional):", &mut m, &mut keep, false) {
             app.send(C2S::UpdateSelf(SelfUpdate { away: Some(Some(m.clone())), ..Default::default() }));
         }
         if keep {
@@ -2721,7 +2783,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     // Talk power request.
     if let Some(mut m) = app.dlg.talk_request.take() {
         let mut keep = true;
-        if text_prompt(ctx, "Request Talk Power", "Message to the channel moderators:", &mut m, &mut keep, false) {
+        if text_prompt(ctx, t!("Request Talk Power"), "Message to the channel moderators:", &mut m, &mut keep, false) {
             app.send(C2S::UpdateSelf(SelfUpdate { talk_request: Some(Some(m.clone())), ..Default::default() }));
         }
         if keep {
@@ -2731,7 +2793,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     // Nickname.
     if let Some(mut n) = app.dlg.nickname.take() {
         let mut keep = true;
-        if text_prompt(ctx, "Change Nickname", "New nickname:", &mut n, &mut keep, false) && !n.trim().is_empty() {
+        if text_prompt(ctx, t!("Change Nickname"), "New nickname:", &mut n, &mut keep, false) && !n.trim().is_empty() {
             app.send(C2S::UpdateSelf(SelfUpdate { nickname: Some(n.trim().to_string()), ..Default::default() }));
         }
         if keep {
@@ -2741,7 +2803,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     // Description.
     if let Some(mut p) = app.dlg.description.take() {
         let mut keep = true;
-        if text_prompt(ctx, "Edit Description", "Description:", &mut p.text, &mut keep, false) {
+        if text_prompt(ctx, t!("Edit Description"), "Description:", &mut p.text, &mut keep, false) {
             app.send(C2S::EditClientDescription { target: p.target, description: p.text.clone() });
         }
         if keep {
@@ -2752,7 +2814,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if let Some(mut p) = app.dlg.poke.take() {
         let mut keep = true;
         let name = app.sess.as_ref().map(|s| s.client_name(p.target)).unwrap_or_default();
-        if text_prompt(ctx, "Poke Client", &format!("Message to poke {name} with:"), &mut p.text, &mut keep, false) {
+        if text_prompt(ctx, t!("Poke Client"), &tf!("Message to poke {name} with:"; name = name), &mut p.text, &mut keep, false) {
             app.send(C2S::Poke { target: p.target, message: p.text.clone() });
         }
         if keep {
@@ -2763,8 +2825,8 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if let Some(mut p) = app.dlg.kick.take() {
         let mut keep = true;
         let name = app.sess.as_ref().map(|s| s.client_name(p.target)).unwrap_or_default();
-        let title = if p.flag { "Kick from Server" } else { "Kick from Channel" };
-        if text_prompt(ctx, title, &format!("Reason for kicking {name}:"), &mut p.text, &mut keep, false) {
+        let title = if p.flag { t!("Kick from Server") } else { t!("Kick from Channel") };
+        if text_prompt(ctx, title, &tf!("Reason for kicking {name}:"; name = name), &mut p.text, &mut keep, false) {
             app.send(C2S::Kick { target: p.target, from_server: p.flag, reason: p.text.clone() });
         }
         if keep {
@@ -2778,29 +2840,29 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let name = app.sess.as_ref().map(|s| s.client_name(p.target)).unwrap_or_default();
         let (hw_ok, web) = app.sess.as_ref().map(|s| (s.supports("1.16.0"), s.clients.get(&p.target).map(|c| c.platform == "Web").unwrap_or(false))).unwrap_or((false, false));
         let mut what = app.dlg.ban_what;
-        window("Ban Client").open(&mut open).show_fill(ctx, |ui| {
-            ui.label(RichText::new(format!("Ban {name}")).strong());
-            ui.label("Ban by (choose any):");
-            ui.checkbox(&mut what[0], "Unique ID (this identity)");
-            ui.checkbox(&mut what[1], "IP address (their current address)");
+        window(t!("Ban Client")).open(&mut open).show_fill(ctx, |ui| {
+            ui.label(RichText::new(tf!("Ban {name}"; name = name)).strong());
+            ui.label(t!("Ban by (choose any):"));
+            ui.checkbox(&mut what[0], t!("Unique ID (this identity)"));
+            ui.checkbox(&mut what[1], t!("IP address (their current address)"));
             ui.add_enabled_ui(hw_ok && !web, |ui| {
-                ui.checkbox(&mut what[2], "Hardware (this PC's network adapters and Windows machine ID)").on_disabled_hover_text(if web { "The web page has no hardware to ban" } else { "Needs Voxa Server 1.16.0" });
+                ui.checkbox(&mut what[2], t!("Hardware (this PC's network adapters and Windows machine ID)")).on_disabled_hover_text(if web { t!("The web page has no hardware to ban") } else { t!("Needs Voxa Server 1.16.0") });
             });
             if what[2] {
-                ui.label(RichText::new("Stops new identities from the same PC. Voxa only sends this server scrambled tokens, never the MAC addresses themselves.").small().weak());
+                ui.label(RichText::new(t!("Stops new identities from the same PC. Voxa only sends this server scrambled tokens, never the MAC addresses themselves.")).small().weak());
             }
             egui::Grid::new("banc").num_columns(2).show(ui, |ui| {
-                form_row(ui, "Reason:", |ui| {
+                form_row(ui, t!("Reason:"), |ui| {
                     ui.text_edit_singleline(&mut p.text);
                 });
-                form_row(ui, "Duration:", |ui| {
+                form_row(ui, t!("Duration:"), |ui| {
                     ui.add(egui::DragValue::new(&mut p.number).suffix(" min"));
-                    ui.label(RichText::new("(0 = permanent)").weak());
+                    ui.label(RichText::new(t!("(0 = permanent)")).weak());
                 });
             });
             let (ok, cancel) = ok_cancel(ui, "Ban");
             if ok && !what.iter().any(|w| *w) {
-                app.dlg.error = Some("Choose at least one thing to ban.".into());
+                app.dlg.error = Some(t!("Choose at least one thing to ban.").into());
             } else if ok {
                 let duration_secs = Some(p.number * 60);
                 if hw_ok {
@@ -2825,10 +2887,10 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut close = false;
         let name = app.sess.as_ref().and_then(|s| s.channels.get(&id)).map(|c| c.name.clone()).unwrap_or_default();
         let occupied = app.sess.as_ref().map(|s| s.clients.values().any(|c| c.channel == id)).unwrap_or(false);
-        window("Delete Channel").open(&mut open).show_fill(ctx, |ui| {
-            ui.label(format!("Really delete channel \"{name}\" and all its sub-channels, files and chat history?"));
+        window(t!("Delete Channel")).open(&mut open).show_fill(ctx, |ui| {
+            ui.label(tf!("Really delete channel \"{name}\" and all its sub-channels, files and chat history?"; name = name));
             if occupied {
-                ui.checkbox(&mut force, "The channel is not empty - move clients out and delete anyway");
+                ui.checkbox(&mut force, t!("The channel is not empty - move clients out and delete anyway"));
             }
             let (ok, cancel) = ok_cancel(ui, "Delete");
             if ok {
@@ -2852,11 +2914,11 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             .as_ref()
             .map(|s| (s.channels.get(&id).map(|c| c.name.clone()).unwrap_or_default(), s.channels.values().any(|c| c.parent == Some(id))))
             .unwrap_or_default();
-        window("Clone Channel").open(&mut open).show_fill(ctx, |ui| {
-            ui.label(format!("Makes a copy of \"{src}\" with all its settings, password and channel groups (e.g. channel admins), right below the original."));
+        window(t!("Clone Channel")).open(&mut open).show_fill(ctx, |ui| {
+            ui.label(tf!("Makes a copy of \"{src}\" with all its settings, password and channel groups (e.g. channel admins), right below the original."; src = src));
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.label("New name:");
+                ui.label(t!("New name:"));
                 let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(240.0));
                 if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !name.trim().is_empty() {
                     app.send(C2S::CloneChannel { source: id, name: name.trim().to_string(), with_children: children });
@@ -2864,9 +2926,9 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                 }
             });
             if has_kids {
-                ui.checkbox(&mut children, "Also clone all sub-channels");
+                ui.checkbox(&mut children, t!("Also clone all sub-channels"));
             }
-            ui.label(RichText::new("Chat history and files are not copied.").small().weak());
+            ui.label(RichText::new(t!("Chat history and files are not copied.")).small().weak());
             let (ok, cancel) = ok_cancel(ui, "📋 Clone");
             if ok && !name.trim().is_empty() {
                 app.send(C2S::CloneChannel { source: id, name: name.trim().to_string(), with_children: children });
@@ -2887,14 +2949,14 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut close = false;
         let mut opened: Option<(String, String)> = None;
         let total: usize = list.iter().map(|x| x.count).sum();
-        egui::Window::new("📬 Messages while you were away")
+        egui::Window::new(t!("📬 Messages while you were away"))
             .id(egui::Id::unique("offline_messages"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show_centered(ctx, |ui| {
             ui.set_min_width(ui.available_width().min(380.0));
-            ui.label(RichText::new(format!("You got {total} direct message{} while you were offline:", if total == 1 { "" } else { "s" })).strong());
+            ui.label(RichText::new(tf!("You got {total} direct message{} while you were offline:", if total == 1 || voxa_proto::i18n::current() != "en" { "" } else { "s" }; total = total)).strong());
             ui.add_space(4.0);
             egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                 for x in &list {
@@ -2905,7 +2967,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                             ui.label(RichText::new(crate::share_picker::ellipsize(&x.last.replace('\n', " "), 70)).small().weak());
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("💬 Open").clicked() {
+                            if ui.button(t!("💬 Open")).clicked() {
                                 opened = Some((x.uid.clone(), x.name.clone()));
                             }
                         });
@@ -2913,7 +2975,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                     ui.separator();
                 }
             });
-            close = ui.button("Close").clicked();
+            close = ui.button(t!("Close")).clicked();
         });
         let keep = open && !close && opened.is_none();
         if let Some((uid, name)) = opened {
@@ -2928,26 +2990,26 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut open = true;
         let (mut go, mut cancel) = (false, false);
         let known: Vec<String> = app.settings.known_servers.iter().filter(|(_, fp)| !w.fingerprint.is_empty() && fp.eq_ignore_ascii_case(&w.fingerprint)).map(|(a, _)| a.clone()).collect();
-        egui::Window::new("Sign in to the web admin page?")
+        egui::Window::new(t!("Sign in to the web admin page?"))
             .id(egui::Id::unique("voxa_web_login"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show_centered(ctx, |ui| {
                 ui.set_max_width(ui.available_width().min(420.0));
-                ui.label("A web page wants to sign in with your Voxa identity:");
+                ui.label(t!("A web page wants to sign in with your Voxa identity:"));
                 ui.label(RichText::new(&w.origin).strong().monospace().size(15.0));
                 if !w.server_name.is_empty() {
-                    ui.label(format!("Server: {}", w.server_name));
+                    ui.label(tf!("Server: {}", w.server_name));
                 }
                 if known.is_empty() {
-                    ui.label(RichText::new("Voxa has not connected to this server before.").color(Color32::from_rgb(0xE0, 0x9B, 0x30)));
+                    ui.label(RichText::new(t!("Voxa has not connected to this server before.")).color(Color32::from_rgb(0xE0, 0x9B, 0x30)));
                 } else {
-                    ui.label(RichText::new(format!("✔ The server you connect to as {}", known.join(", "))).color(crate::ui::GREEN));
+                    ui.label(RichText::new(tf!("✔ The server you connect to as {}", known.join(", "))).color(crate::ui::GREEN));
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label("Identity:");
+                    ui.label(t!("Identity:"));
                     let label = app.settings.identities.get(identity).map(|i| i.name.clone()).unwrap_or_default();
                     egui::ComboBox::from_id_salt("web_login_identity").selected_text(label).show_ui(ui, |ui| {
                         for (i, id) in app.settings.identities.iter().enumerate() {
@@ -2955,17 +3017,17 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
                         }
                     });
                 });
-                ui.label(RichText::new("Only continue if you opened this page yourself. It gets the rights this identity has on that server. Your identity key stays in Voxa: only a proof for this address is sent.").small().weak());
+                ui.label(RichText::new(t!("Only continue if you opened this page yourself. It gets the rights this identity has on that server. Your identity key stays in Voxa: only a proof for this address is sent.")).small().weak());
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    go = ui.add(egui::Button::new(RichText::new("Sign in").color(Color32::WHITE)).fill(crate::ui::accent())).clicked();
-                    cancel = ui.button("Cancel").clicked();
+                    go = ui.add(egui::Button::new(RichText::new(t!("Sign in")).color(Color32::WHITE)).fill(crate::ui::accent())).clicked();
+                    cancel = ui.button(t!("Cancel")).clicked();
                 });
             });
         if go {
             match app.settings.identities.get(identity).and_then(|i| i.keypair()).and_then(|kp| w.hand_back_url(&kp)) {
                 Some(url) => crate::markdown::open_link(&url),
-                None => app.dlg.error = Some("This identity could not sign in.".into()),
+                None => app.dlg.error = Some(t!("This identity could not sign in.").into()),
             }
         } else if open && !cancel {
             app.dlg.web_login = Some((w, identity));
@@ -2976,10 +3038,10 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let (from, msg) = app.dlg.pokes[0].clone();
         let mut open = true;
         let mut ok = false;
-        window("You were poked").id(egui::Id::unique("poked")).open(&mut open).show_fill(ctx, |ui| {
-            ui.label(RichText::new(format!("{from} poked you:")).strong());
+        window(t!("You were poked")).id(egui::Id::unique("poked")).open(&mut open).show_fill(ctx, |ui| {
+            ui.label(RichText::new(tf!("{from} poked you:"; from = from)).strong());
             ui.label(&msg);
-            ok = ui.button("OK").clicked();
+            ok = ui.button(t!("OK")).clicked();
         });
         if !open || ok {
             app.dlg.pokes.remove(0);
@@ -2989,20 +3051,20 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if let Some((req, expected, got)) = app.dlg.fingerprint.take() {
         let mut open = true;
         let mut close = false;
-        window("Server identity changed!").open(&mut open).show_fill(ctx, |ui| {
-            ui.label(RichText::new("⚠ The identity of this server has changed.").color(Color32::from_rgb(0xE0, 0x9B, 0x30)).strong());
-            ui.label("This can happen after a server reinstall, but it could also mean someone is intercepting your connection.");
-            ui.label(format!("Server: {}", req.address));
-            ui.label(format!("Known fingerprint: {expected}"));
-            ui.label(format!("New fingerprint:   {got}"));
+        window(t!("Server identity changed!")).open(&mut open).show_fill(ctx, |ui| {
+            ui.label(RichText::new(t!("⚠ The identity of this server has changed.")).color(Color32::from_rgb(0xE0, 0x9B, 0x30)).strong());
+            ui.label(t!("This can happen after a server reinstall, but it could also mean someone is intercepting your connection."));
+            ui.label(tf!("Server: {}", req.address));
+            ui.label(tf!("Known fingerprint: {expected}"; expected = expected));
+            ui.label(tf!("New fingerprint:   {got}"; got = got));
             ui.horizontal(|ui| {
-                if ui.button("Trust new identity and connect").clicked() {
+                if ui.button(t!("Trust new identity and connect")).clicked() {
                     app.settings.known_servers.insert(req.address.clone(), got.clone());
                     app.settings.save();
                     app.actions.push(Action::Connect(req.clone()));
                     close = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(t!("Cancel")).clicked() {
                     close = true;
                 }
             });
@@ -3018,26 +3080,26 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut cancel = false;
         let address = crate::config::normalize_address(&link);
         let known = app.settings.known_servers.contains_key(&address);
-        egui::Window::new("Join server?")
+        egui::Window::new(t!("Join server?"))
             .id(egui::Id::unique("voxa_link_prompt"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show_centered(ctx, |ui| {
             ui.set_max_width(ui.available_width().min(380.0));
-            ui.label("A link wants to connect you to this server:");
+            ui.label(t!("A link wants to connect you to this server:"));
             ui.label(RichText::new(&address).strong().monospace());
             if !known {
-                ui.label(RichText::new("You have not connected to this server before.").color(Color32::from_rgb(0xE0, 0x9B, 0x30)));
+                ui.label(RichText::new(t!("You have not connected to this server before.")).color(Color32::from_rgb(0xE0, 0x9B, 0x30)));
             }
             if let Some(s) = &app.sess {
-                ui.label(format!("You will be disconnected from {}.", s.req.address));
+                ui.label(tf!("You will be disconnected from {}.", s.req.address));
             }
-            ui.label(RichText::new("Only continue if you trust where this link came from. The server will see your nickname and IP address.").weak());
+            ui.label(RichText::new(t!("Only continue if you trust where this link came from. The server will see your nickname and IP address.")).weak());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                go = ui.button("Connect").clicked();
-                cancel = ui.button("Cancel").clicked();
+                go = ui.button(t!("Connect")).clicked();
+                cancel = ui.button(t!("Cancel")).clicked();
             });
         });
         if go {
@@ -3051,36 +3113,36 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut open = true;
         if let Some(s) = &app.sess {
             let v = &app.voice_shared;
-            window("Connection Info").open(&mut open).show_fill(ctx, |ui| {
+            window(t!("Connection Info")).open(&mut open).show_fill(ctx, |ui| {
                 egui::Grid::new("ci").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                    form_row(ui, "Server:", |ui| {
+                    form_row(ui, t!("Server:"), |ui| {
                         ui.label(s.req.address.as_str());
                     });
-                    form_row(ui, "Resolved address:", |ui| {
+                    form_row(ui, t!("Resolved address:"), |ui| {
                         ui.label(s.server_addr.map(|a| a.to_string()).unwrap_or_default());
                     });
-                    form_row(ui, "Control ping:", |ui| {
+                    form_row(ui, t!("Control ping:"), |ui| {
                         ui.label(format!("{} ms", s.tcp_ping));
                     });
-                    form_row(ui, "Voice ping:", |ui| {
+                    form_row(ui, t!("Voice ping:"), |ui| {
                         ui.label(format!("{} ms", v.ping_ms.load(Ordering::Relaxed)));
                     });
-                    form_row(ui, "Voice packets sent:", |ui| {
+                    form_row(ui, t!("Voice packets sent:"), |ui| {
                         ui.label(v.packets_out.load(Ordering::Relaxed).to_string());
                     });
-                    form_row(ui, "Voice packets received:", |ui| {
+                    form_row(ui, t!("Voice packets received:"), |ui| {
                         ui.label(v.packets_in.load(Ordering::Relaxed).to_string());
                     });
-                    form_row(ui, "Voice packets lost:", |ui| {
+                    form_row(ui, t!("Voice packets lost:"), |ui| {
                         ui.label(v.packets_lost.load(Ordering::Relaxed).to_string());
                     });
-                    form_row(ui, "Voice bitrate:", |ui| {
+                    form_row(ui, t!("Voice bitrate:"), |ui| {
                         ui.label(format!("{} kbit/s (Opus)", v.bitrate.load(Ordering::Relaxed) / 1000));
                     });
-                    form_row(ui, "Encryption:", |ui| {
-                        ui.label("Noise XX (X25519, ChaCha20-Poly1305) / per-session voice keys");
+                    form_row(ui, t!("Encryption:"), |ui| {
+                        ui.label(t!("Noise XX (X25519, ChaCha20-Poly1305) / per-session voice keys"));
                     });
-                    form_row(ui, "Connected for:", |ui| {
+                    form_row(ui, t!("Connected for:"), |ui| {
                         ui.label(crate::ui::fmt_duration(s.connected_at.elapsed().as_secs()));
                     });
                 });
@@ -3093,26 +3155,26 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     let mut show_notes = false;
     if app.dlg.about {
         let mut open = true;
-        window("About Voxa").open(&mut open).show_fill(ctx, |ui| {
-            ui.heading(format!("Voxa {}", APP_VERSION));
-            ui.label("Free and open source voice chat, text chat and screen sharing.");
-            ui.label("No license keys, no accounts, no registration.");
+        window(t!("About Voxa")).open(&mut open).show_fill(ctx, |ui| {
+            ui.heading(tf!("Voxa {}", APP_VERSION));
+            ui.label(t!("Free and open source voice chat, text chat and screen sharing."));
+            ui.label(t!("No license keys, no accounts, no registration."));
             ui.add_space(6.0);
-            ui.label("• Encrypted voice (Opus over ChaCha20-Poly1305)");
-            ui.label("• Channel and server chat stored encrypted on the server");
-            ui.label("• Screen / application sharing relayed by the server");
+            ui.label(t!("• Encrypted voice (Opus over ChaCha20-Poly1305)"));
+            ui.label(t!("• Channel and server chat stored encrypted on the server"));
+            ui.label(t!("• Screen / application sharing relayed by the server"));
             ui.add_space(6.0);
-            ui.label(RichText::new("Licensed under MIT OR Apache-2.0").weak());
+            ui.label(RichText::new(t!("Licensed under MIT OR Apache-2.0")).weak());
             if let Some(gpu) = crate::gpu::adapter_info() {
-                ui.label(RichText::new(format!("Graphics: {gpu}")).weak());
+                ui.label(RichText::new(tf!("Graphics: {gpu}"; gpu = gpu)).weak());
             }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("⬆ Check for updates").clicked() {
+                if ui.button(t!("⬆ Check for updates")).clicked() {
                     app.dlg.update = true;
                     app.updater.check();
                 }
-                if ui.button("🎉 What's new").clicked() {
+                if ui.button(t!("🎉 What's new")).clicked() {
                     show_notes = true;
                 }
             });
@@ -3130,7 +3192,7 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     // Updates.
     if app.dlg.update {
         let mut open = true;
-        window("Voxa Updates").open(&mut open).show_fill(ctx, |ui| {
+        window(t!("Voxa Updates")).open(&mut open).show_fill(ctx, |ui| {
             ui.set_min_width(ui.available_width().min(380.0));
             crate::updater::ui(&mut app.updater, ui, "Voxa");
         });
@@ -3140,9 +3202,9 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
     if let Some(e) = app.dlg.error.take() {
         let mut open = true;
         let mut ok = false;
-        window("Voxa").id(egui::Id::unique("errorbox")).open(&mut open).show_fill(ctx, |ui| {
+        window(t!("Voxa")).id(egui::Id::unique("errorbox")).open(&mut open).show_fill(ctx, |ui| {
             ui.label(&e);
-            ok = ui.button("OK").clicked();
+            ok = ui.button(t!("OK")).clicked();
         });
         if open && !ok {
             app.dlg.error = Some(e);
@@ -3156,15 +3218,29 @@ fn device_now(ui: &mut Ui, cache: &mut HashMap<(bool, Option<String>), Option<St
     let now = cache.entry((input, setting.clone())).or_insert_with(|| crate::audio::resolved_device_name(input, setting)).clone();
     if is_default {
         form_row(ui, "", |ui| {
-            ui.label(RichText::new(format!("Now: {}", now.unwrap_or_else(|| "no device found".into()))).small().weak());
+            ui.label(RichText::new(tf!("Now: {}", now.unwrap_or_else(|| "no device found".into()))).small().weak());
         });
     }
 }
 
+/// The language list: the system's language first, then each language in its own name.
+fn language_picker(ui: &mut Ui, choice: &mut Option<String>) {
+    let system = voxa_proto::i18n::lang(&crate::i18n::chosen(None)).map(|l| l.name).unwrap_or("English");
+    let shown = match choice.as_deref().and_then(voxa_proto::i18n::lang) {
+        Some(l) => l.name.to_string(),
+        None => format!("{} ({system})", t!("System language")),
+    };
+    egui::ComboBox::from_id_salt("language").selected_text(shown).height(420.0).show_ui(ui, |ui| {
+        ui.selectable_value(choice, None, format!("{} ({system})", t!("System language")));
+        for l in voxa_proto::i18n::LANGS {
+            ui.selectable_value(choice, Some(l.code.to_string()), l.name).on_hover_text(l.english);
+        }
+    });
+}
 /// Options ▸ Application: General / Themes.
 fn app_tabs(ui: &mut Ui, tab: &mut u8) {
     ui.horizontal(|ui| {
-        for (i, t) in ["General", "Themes"].iter().enumerate() {
+        for (i, t) in [t!("General"), t!("Themes")].iter().enumerate() {
             if ui.selectable_label(*tab == i as u8, *t).clicked() {
                 *tab = i as u8;
             }
@@ -3180,22 +3256,22 @@ fn background_picker(ui: &mut Ui, d: &mut OptionsDlg) {
     if let Some((_, files)) = crate::files::take(|k| *k == crate::files::PickKind::Background) {
         use_background(d, files.first());
     }
-    ui.label(RichText::new("Your picture").strong());
-    ui.label(RichText::new("Any picture of yours behind see-through panels. It is copied into Voxa's folder and stays on this device.").small().weak());
+    ui.label(RichText::new(t!("Your picture")).strong());
+    ui.label(RichText::new(t!("Any picture of yours behind see-through panels. It is copied into Voxa's folder and stays on this device.")).small().weak());
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         theme_tile(ui, &mut d.theme, ThemeKind::OwnPicture, d.background.as_deref());
         ui.vertical(|ui| {
-            if ui.button("🖼 Choose picture…").clicked() {
+            if ui.button(t!("🖼 Choose picture…")).clicked() {
                 if let Some(files) = crate::files::pick(crate::files::PickKind::Background, "Background picture", crate::chat_images::IMAGE_EXTENSIONS, false, false) {
                     use_background(d, files.first());
                 }
             }
-            if d.background.is_some() && ui.button("Remove picture").clicked() {
+            if d.background.is_some() && ui.button(t!("Remove picture")).clicked() {
                 d.background = None;
             }
             ui.add(egui::Slider::new(&mut d.background_dim, 0.0..=0.8).text("Darken").custom_formatter(|v, _| format!("{:.0}%", v * 100.0)))
-                .on_hover_text("Darkens the picture so text stays easy to read");
+                .on_hover_text(t!("Darkens the picture so text stays easy to read"));
             if let Some(e) = &d.background_error {
                 ui.label(RichText::new(e).small().color(Color32::from_rgb(0xED, 0x42, 0x45)));
             }
@@ -3221,11 +3297,11 @@ fn use_background(d: &mut OptionsDlg, file: Option<&std::path::PathBuf>) {
 fn import_background(src: &std::path::Path) -> Result<String, String> {
     let len = std::fs::metadata(src).map_err(|e| e.to_string())?.len();
     if len > crate::ui::BACKGROUND_MAX_BYTES {
-        return Err("That picture is larger than 40 MB.".into());
+        return Err(t!("That picture is larger than 40 MB.").into());
     }
     let (w, h) = image::image_dimensions(src).map_err(|_| "That file is not a picture Voxa can show.".to_string())?;
     if w < 16 || h < 16 || w > 16_000 || h > 16_000 {
-        return Err("That picture is too small or too large.".into());
+        return Err(t!("That picture is too small or too large.").into());
     }
     let ext = src
         .extension()
@@ -3314,8 +3390,8 @@ fn mic_test_ui(ui: &mut Ui, d: &mut OptionsDlg, shared: &crate::audio::VoiceShar
                 ui.add(egui::ProgressBar::new(frac).desired_width(140.0).text(format!("{:.0} dB", t.level_db())));
                 ui.ctx().request_repaint();
             } else {
-                let label = if t.has_clip() { "⏺ Record again" } else { "⏺ Record a test" };
-                if ui.button(label).on_hover_text(format!("Records up to {} seconds so you can hear how you sound", crate::audio::MIC_TEST_SECONDS as u32)).clicked() {
+                let label = if t.has_clip() { t!("⏺ Record again") } else { t!("⏺ Record a test") };
+                if ui.button(label).on_hover_text(tf!("Records up to {} seconds so you can hear how you sound", crate::audio::MIC_TEST_SECONDS as u32)).clicked() {
                     *err = t.start(audio).err();
                 }
                 if t.has_clip() {
@@ -3333,7 +3409,7 @@ fn mic_test_ui(ui: &mut Ui, d: &mut OptionsDlg, shared: &crate::audio::VoiceShar
         if let Some(e) = err.as_ref() {
             ui.label(RichText::new(e).small().color(Color32::from_rgb(0xED, 0x42, 0x45)));
         } else if t.recording() {
-            ui.label(RichText::new("Recording... you are not transmitting meanwhile.").small().weak());
+            ui.label(RichText::new(t!("Recording... you are not transmitting meanwhile.")).small().weak());
         }
     });
     shared.testing.store(t.recording(), Ordering::Relaxed);

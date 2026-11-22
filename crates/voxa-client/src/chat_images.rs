@@ -1,6 +1,7 @@
 //! Images in chat (servers 1.5.0+): sending (file, paste, drag & drop), fetching,
 //! decoding off the UI thread, inline display and a full-size viewer.
 
+use crate::i18n::{t, tf};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -96,7 +97,7 @@ impl ChatImages {
         let name = match &src {
             ImageSource::File(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "image".into()),
             ImageSource::Pasted(_) => format!("pasted-{}.png", chrono::Local::now().format("%Y%m%d-%H%M%S")),
-            ImageSource::Link(_) => "GIF".into(),
+            ImageSource::Link(_) => t!("GIF").into(),
         };
         self.sends.lock().insert(id, ImageSend { name: name.clone(), error: None });
         let sends = self.sends.clone();
@@ -185,7 +186,7 @@ impl ChatImages {
 fn prepare(src: ImageSource, name: &str) -> Result<(Vec<u8>, u32, u32, String), String> {
     let mut name = name.to_string();
     let data = match src {
-        ImageSource::File(p) => std::fs::read(&p).map_err(|e| format!("Cannot read {}: {e}", p.display()))?,
+        ImageSource::File(p) => std::fs::read(&p).map_err(|e| tf!("Cannot read {}: {e}", p.display(); e = e))?,
         ImageSource::Link(url) => {
             let f = crate::gifs::fetch_link(&url)?;
             name = f.name;
@@ -205,16 +206,16 @@ fn prepare(src: ImageSource, name: &str) -> Result<(Vec<u8>, u32, u32, String), 
         return Ok((data, w, h, name));
     }
     if image_kind(&data) == Some("gif") {
-        return Err(format!("Animated GIFs can be at most {} MB", MAX_CHAT_IMAGE / (1024 * 1024)));
+        return Err(tf!("Animated GIFs can be at most {} MB", MAX_CHAT_IMAGE / (1024 * 1024)));
     }
     // Too big (or an unusual format): scale down and send as JPEG.
-    let img = image::load_from_memory(&data).map_err(|e| format!("Cannot read the image: {e}"))?;
+    let img = image::load_from_memory(&data).map_err(|e| tf!("Cannot read the image: {e}"; e = e))?;
     let img = if w.max(h) > SHRINK_SIDE { img.resize(SHRINK_SIDE, SHRINK_SIDE, image::imageops::FilterType::Triangle) } else { img };
     let mut out = std::io::Cursor::new(Vec::new());
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85).encode_image(&img.to_rgb8()).map_err(|e| e.to_string())?;
     let data = out.into_inner();
     if data.len() > MAX_CHAT_IMAGE {
-        return Err(format!("The image is too large even after shrinking (limit {} MB)", MAX_CHAT_IMAGE / (1024 * 1024)));
+        return Err(tf!("The image is too large even after shrinking (limit {} MB)", MAX_CHAT_IMAGE / (1024 * 1024)));
     }
     if let Some(stem) = Path::new(&name).file_stem() {
         name = format!("{}.jpg", stem.to_string_lossy());
@@ -237,7 +238,7 @@ fn decode(data: &[u8]) -> Result<(egui::ColorImage, [u32; 2]), String> {
     limits.max_image_height = Some(MAX_DECODE_SIDE);
     limits.max_alloc = Some(MAX_DECODE_BYTES);
     reader.limits(limits);
-    let img = reader.decode().map_err(|e| format!("Cannot show this image: {e}"))?;
+    let img = reader.decode().map_err(|e| tf!("Cannot show this image: {e}"; e = e))?;
     let size = [img.width(), img.height()];
     let img = if img.width().max(img.height()) > MAX_TEXTURE_SIDE {
         img.resize(MAX_TEXTURE_SIDE, MAX_TEXTURE_SIDE, image::imageops::FilterType::Triangle)
@@ -312,7 +313,7 @@ pub fn chat_image(ui: &mut Ui, imgs: &mut ChatImages, conn: &crate::net::Connect
             };
             let resp = ui
                 .put(rect, egui::Image::new((id, size)).corner_radius(6).sense(Sense::click()))
-                .on_hover_text(format!("{} · {w}×{h} · click to enlarge{}", r.name, if anim.is_some() { " · GIF" } else { "" }))
+                .on_hover_text(tf!("{} · {w}×{h} · click to enlarge{}", r.name, if anim.is_some() { " · GIF" } else { "" }; w = w, h = h))
                 .on_hover_cursor(egui::CursorIcon::ZoomIn);
             if resp.clicked() {
                 drop(cache);
@@ -339,11 +340,11 @@ pub fn pending_sends(ui: &mut Ui, imgs: &ChatImages, dim: Color32) {
         ui.horizontal(|ui| match &s.error {
             None => {
                 ui.spinner();
-                ui.label(RichText::new(format!("Sending {}...", s.name)).small().color(dim));
+                ui.label(RichText::new(tf!("Sending {}...", s.name)).small().color(dim));
             }
             Some(e) => {
-                ui.label(RichText::new(format!("⚠ {} was not sent: {e}", s.name)).small().color(Color32::from_rgb(0xED, 0x42, 0x45)));
-                if ui.small_button("✖").on_hover_text("Dismiss").clicked() {
+                ui.label(RichText::new(tf!("⚠ {} was not sent: {e}", s.name; e = e)).small().color(Color32::from_rgb(0xED, 0x42, 0x45)));
+                if ui.small_button("✖").on_hover_text(t!("Dismiss")).clicked() {
                     dismiss = Some(*id);
                 }
             }
@@ -380,13 +381,13 @@ pub fn viewer(ctx: &egui::Context, imgs: &mut ChatImages, can_add: bool) -> Opti
                 return;
             };
             ui.horizontal(|ui| {
-                if ui.button("💾 Save as...").clicked() {
+                if ui.button(t!("💾 Save as...")).clicked() {
                     save = Some(bytes.clone());
                 }
-                if anim.is_some() && ui.button("⭐ Add to GIF favourites").on_hover_text("Find it under ⭐ in the GIF picker").clicked() {
+                if anim.is_some() && ui.button(t!("⭐ Add to GIF favourites")).on_hover_text(t!("Find it under ⭐ in the GIF picker")).clicked() {
                     favourite = Some(bytes.clone());
                 }
-                if can_add && anim.is_some() && ui.button("📚 Add to server GIFs").on_hover_text("Everyone on this server finds it under 📚 Server in the GIF picker").clicked() {
+                if can_add && anim.is_some() && ui.button(t!("📚 Add to server GIFs")).on_hover_text(t!("Everyone on this server finds it under 📚 Server in the GIF picker")).clicked() {
                     to_server = Some(bytes.clone());
                 }
                 ui.label(RichText::new(format!("{w}×{h} · {}", crate::ui::fmt_size(bytes.len() as u64))).weak());

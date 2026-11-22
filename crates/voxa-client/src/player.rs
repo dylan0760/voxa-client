@@ -4,6 +4,8 @@
 
 #[cfg(windows)]
 use std::borrow::Cow;
+#[allow(unused_imports)]
+use crate::i18n::tf;
 
 use crate::links::{Site, Video};
 
@@ -136,7 +138,7 @@ impl Player {
                     self.webview = Some(w);
                     self.loaded = Some(url);
                 }
-                Err(e) => self.error = Some(format!("The video player could not start: {e}")),
+                Err(e) => self.error = Some(tf!("The video player could not start: {e}"; e = e)),
             },
             None => {}
         }

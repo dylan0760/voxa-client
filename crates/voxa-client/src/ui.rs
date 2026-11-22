@@ -13,6 +13,7 @@
 //! +----+-----------------+------------------------------------+-----------+
 //! ```
 
+use crate::i18n::{t, tf};
 use std::sync::atomic::Ordering;
 
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, Ui, Vec2};
@@ -516,6 +517,20 @@ pub fn install_fonts(ctx: &egui::Context) {
             }
         }
     }
+    // The chosen language's letters (Chinese, Japanese, Korean, Arabic, Hindi, Bengali,
+    // Thai): a font of the system, right after the main font.
+    if let Some(script) = voxa_proto::i18n::lang(voxa_proto::i18n::current()).map(|l| l.script) {
+        if let Some((bytes, index)) = voxa_proto::i18n::system_font(script) {
+            let mut data = egui::FontData::from_owned(bytes);
+            data.index = index;
+            fonts.font_data.insert("language".to_owned(), std::sync::Arc::new(data));
+            for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace, chat_family(), chat_bold_family()] {
+                if let Some(list) = fonts.families.get_mut(&fam) {
+                    list.insert(1.min(list.len()), "language".to_owned());
+                }
+            }
+        }
+    }
     ctx.set_fonts(fonts);
 }
 
@@ -650,11 +665,13 @@ fn paint_avatar(ui: &Ui, center: egui::Pos2, r: f32, name: &str, uid: &str, ring
 /// "Away", "Away: <message>", or the message itself if it already says away.
 pub fn away_text(m: &str) -> String {
     if m.is_empty() {
-        "Away".into()
+        t!("Away").into()
+    } else if m == crate::app::AUTO_AWAY {
+        t!("Away (idle)").into()
     } else if m.to_ascii_lowercase().starts_with("away") {
         m.to_string()
     } else {
-        format!("Away: {m}")
+        tf!("Away: {m}"; m = m)
     }
 }
 
@@ -732,10 +749,10 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
     let t = theme();
     let title = match &app.sess {
         Some(s) => match &s.server {
-            Some(info) => format!("Voxa - {}", info.name),
-            None => format!("Voxa - connecting to {}", s.req.label),
+            Some(info) => tf!("Voxa - {}", info.name),
+            None => tf!("Voxa - connecting to {}", s.req.label),
         },
-        None => "Voxa".to_string(),
+        None => t!("Voxa").to_string(),
     };
     if title != app.window_title {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -1042,15 +1059,15 @@ fn mobile_home(app: &mut VoxaApp, ui: &mut Ui) {
     let t = theme();
     egui::Panel::top("m_home_head").frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin::symmetric(10, 8))).show(ui, |ui| {
         ui.horizontal(|ui| {
-            if icon_button(ui, "☰", "Servers and channels", None).clicked() {
+            if icon_button(ui, "☰", t!("Servers and channels"), None).clicked() {
                 app.mobile_drawer = Drawer::Left;
             }
-            ui.label(RichText::new("Voxa").strong().size(18.0));
+            ui.label(RichText::new(t!("Voxa")).strong().size(18.0));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, "⚙", "Settings", None).clicked() {
+                if icon_button(ui, "⚙", t!("Settings"), None).clicked() {
                     app.actions.push(Action::Dialog(dialogs::Open::Options));
                 }
-                if icon_button(ui, "➕", "Connect to a server", None).clicked() {
+                if icon_button(ui, "➕", t!("Connect to a server"), None).clicked() {
                     app.actions.push(Action::Dialog(dialogs::Open::Connect));
                 }
             });
@@ -1076,17 +1093,17 @@ fn mobile_home_bar(app: &mut VoxaApp, ui: &mut Ui) {
                 a.push(Action::Home(false));
             }
         }
-        if ui.button("📑 Bookmarks").clicked() {
+        if ui.button(t!("📑 Bookmarks")).clicked() {
             a.push(Action::Dialog(dialogs::Open::Bookmarks));
         }
-        if ui.button("👤 Identities").clicked() {
+        if ui.button(t!("👤 Identities")).clicked() {
             a.push(Action::Dialog(dialogs::Open::Identities));
         }
-        if ui.button("? About").clicked() {
+        if ui.button(t!("? About")).clicked() {
             a.push(Action::Dialog(dialogs::Open::About));
         }
         if let Some(rel) = app.updater.available() {
-            if ui.add(egui::Button::new(RichText::new(format!("⬆ Voxa {}", rel.version)).color(Color32::WHITE)).fill(GREEN)).clicked() {
+            if ui.add(egui::Button::new(RichText::new(tf!("⬆ Voxa {}", rel.version)).color(Color32::WHITE)).fill(GREEN)).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Updates));
             }
         }
@@ -1190,11 +1207,11 @@ fn rail(app: &mut VoxaApp, ui: &mut Ui) {
 fn home_column(app: &mut VoxaApp, ui: &mut Ui) {
     let t = theme();
     Frame::new().inner_margin(Margin::same(14)).show(ui, |ui| {
-        ui.label(RichText::new("Bookmarks").strong().size(16.0));
+        ui.label(RichText::new(t!("Bookmarks")).strong().size(16.0));
         ui.add_space(6.0);
         let a = &mut app.actions;
         if app.settings.bookmarks.is_empty() {
-            ui.label(RichText::new("No bookmarks yet.").color(t.dim));
+            ui.label(RichText::new(t!("No bookmarks yet.")).color(t.dim));
         }
         for (i, b) in app.settings.bookmarks.iter().enumerate() {
             let label = if b.name.is_empty() { b.address.clone() } else { b.name.clone() };
@@ -1212,16 +1229,16 @@ fn home_column(app: &mut VoxaApp, ui: &mut Ui) {
             if r.double_clicked() || r.clicked() {
                 a.push(Action::ConnectBookmark(i));
             }
-            r.on_hover_text("Click to connect");
+            r.on_hover_text(t!("Click to connect"));
             ui.add_space(4.0);
         }
         ui.add_space(8.0);
-        if ui.button("📑 Manage bookmarks").clicked() {
+        if ui.button(t!("📑 Manage bookmarks")).clicked() {
             a.push(Action::Dialog(dialogs::Open::Bookmarks));
         }
         if !app.settings.recent.is_empty() {
             ui.add_space(14.0);
-            ui.label(RichText::new("Recent").strong().size(16.0));
+            ui.label(RichText::new(t!("Recent")).strong().size(16.0));
             for r in app.settings.recent.clone() {
                 if ui.add(egui::Button::new(RichText::new(format!("🕘 {r}")).color(t.dim)).frame(false)).clicked() {
                     a.push(Action::Connect(ConnectRequest {
@@ -1247,24 +1264,24 @@ fn home_view(app: &mut VoxaApp, ui: &mut Ui) {
         ui.painter().rect_filled(r, CornerRadius::same(22), accent());
         ui.painter().text(r.center(), Align2::CENTER_CENTER, "🎧", FontId::proportional(42.0), Color32::WHITE);
         ui.add_space(12.0);
-        ui.label(RichText::new("Welcome to Voxa").size(26.0).strong());
-        ui.label(RichText::new("Free and open source voice, chat and screen sharing").color(t.dim));
+        ui.label(RichText::new(t!("Welcome to Voxa")).size(26.0).strong());
+        ui.label(RichText::new(t!("Free and open source voice, chat and screen sharing")).color(t.dim));
         ui.add_space(18.0);
         ui.horizontal(|ui| {
             let w = 340.0;
             ui.add_space((ui.available_width() - w).max(0.0) / 2.0);
-            let b = egui::Button::new(RichText::new("🔌  Connect to a server").color(Color32::WHITE).size(15.0)).fill(accent()).min_size(egui::vec2(170.0, 36.0));
+            let b = egui::Button::new(RichText::new(t!("🔌  Connect to a server")).color(Color32::WHITE).size(15.0)).fill(accent()).min_size(egui::vec2(170.0, 36.0));
             if ui.add(b).clicked() {
                 app.actions.push(Action::Dialog(dialogs::Open::Connect));
             }
-            if ui.add(egui::Button::new(RichText::new("📑  Bookmarks").size(15.0)).min_size(egui::vec2(150.0, 36.0))).clicked() {
+            if ui.add(egui::Button::new(RichText::new(t!("📑  Bookmarks")).size(15.0)).min_size(egui::vec2(150.0, 36.0))).clicked() {
                 app.actions.push(Action::Dialog(dialogs::Open::Bookmarks));
             }
         });
         if let Some(s) = &app.sess {
             ui.add_space(12.0);
             let name = s.server.as_ref().map(|i| i.name.clone()).unwrap_or(s.req.label.clone());
-            if ui.link(format!("Return to {name}")).clicked() {
+            if ui.link(tf!("Return to {name}"; name = name)).clicked() {
                 app.actions.push(Action::Home(false));
             }
         }
@@ -1295,25 +1312,29 @@ fn server_menu(s: &Session, ui: &mut Ui, a: &mut Vec<Action>) {
             ui.close();
         }
     };
-    item(ui, true, "ℹ  Server Info", Action::Select(Selection::Server));
+    item(ui, true, t!("ℹ  Server Info"), Action::Select(Selection::Server));
     if s.account.is_some() {
-        item(ui, true, "🔐  Account & Security…", Action::Dialog(dialogs::Open::Account));
+        item(ui, true, t!("🔐  Account & Security…"), Action::Dialog(dialogs::Open::Account));
     }
-    item(ui, create, "➕  Create Channel", Action::Dialog(dialogs::Open::CreateChannel(None)));
-    item(ui, true, "⭐  Add to Bookmarks", Action::Dialog(dialogs::Open::AddBookmark));
+    // "View as" (servers 1.30.0+): preview the server as other groups.
+    if s.supports("1.30.0") && s.me().is_some_and(|m| s.real_server_perms_of(m) & perm::GROUP_MANAGE != 0) {
+        item(ui, true, t!("👁  View as…"), Action::Dialog(dialogs::Open::ViewAs));
+    }
+    item(ui, create, t!("➕  Create Channel"), Action::Dialog(dialogs::Open::CreateChannel(None)));
+    item(ui, true, t!("⭐  Add to Bookmarks"), Action::Dialog(dialogs::Open::AddBookmark));
     ui.separator();
-    item(ui, perms & perm::SERVER_EDIT != 0, "⚙  Edit Virtual Server", Action::Dialog(dialogs::Open::ServerEdit));
+    item(ui, perms & perm::SERVER_EDIT != 0, t!("⚙  Edit Virtual Server"), Action::Dialog(dialogs::Open::ServerEdit));
     item(ui, perms & (perm::GROUP_MANAGE | perm::GROUP_ASSIGN_SERVER) != 0, "👥  Server Groups", Action::Dialog(dialogs::Open::Groups(GroupKind::Server)));
     item(ui, perms & (perm::GROUP_MANAGE | perm::GROUP_ASSIGN_SERVER) != 0, "👥  Channel Groups", Action::Dialog(dialogs::Open::Groups(GroupKind::Channel)));
-    item(ui, perms & perm::BAN_LIST != 0, "🚫  Ban List", Action::Dialog(dialogs::Open::Bans));
-    item(ui, perms & perm::PRIVILEGE_KEY_CREATE != 0, "🔑  Create Privilege Key", Action::Dialog(dialogs::Open::CreatePrivKey));
-    item(ui, true, "🔑  Use Privilege Key", Action::Dialog(dialogs::Open::UsePrivKey));
+    item(ui, perms & perm::BAN_LIST != 0, t!("🚫  Ban List"), Action::Dialog(dialogs::Open::Bans));
+    item(ui, perms & perm::PRIVILEGE_KEY_CREATE != 0, t!("🔑  Create Privilege Key"), Action::Dialog(dialogs::Open::CreatePrivKey));
+    item(ui, true, t!("🔑  Use Privilege Key"), Action::Dialog(dialogs::Open::UsePrivKey));
     ui.separator();
-    item(ui, true, "📁  File Browser", Action::Dialog(dialogs::Open::Files(s.my_channel())));
-    item(ui, true, "⇅  File Transfers", Action::Dialog(dialogs::Open::Transfers));
-    item(ui, true, "📶  Connection Info", Action::Dialog(dialogs::Open::ConnectionInfo));
+    item(ui, true, t!("📁  File Browser"), Action::Dialog(dialogs::Open::Files(s.my_channel())));
+    item(ui, true, t!("⇅  File Transfers"), Action::Dialog(dialogs::Open::Transfers));
+    item(ui, true, t!("📶  Connection Info"), Action::Dialog(dialogs::Open::ConnectionInfo));
     ui.separator();
-    if ui.add(egui::Button::new(RichText::new("⏏  Disconnect").color(RED)).frame(false)).clicked() {
+    if ui.add(egui::Button::new(RichText::new(t!("⏏  Disconnect")).color(RED)).frame(false)).clicked() {
         a.push(Action::Disconnect);
         ui.close();
     }
@@ -1334,7 +1355,7 @@ fn server_column(app: &mut VoxaApp, ui: &mut Ui) {
                 });
             } else {
                 ui.spinner();
-                ui.label(RichText::new(format!("Connecting to {name}...")).strong());
+                ui.label(RichText::new(tf!("Connecting to {name}..."; name = name)).strong());
             }
         });
     });
@@ -1366,9 +1387,9 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         let in_channel = s.my_channel() != NO_CHANNEL;
         let (title, sub) = if in_channel {
             let ch = s.channels.get(&s.my_channel()).map(|c| c.name.clone()).unwrap_or_default();
-            ("📶 Voice Connected", format!("{ch} / {srv}"))
+            (t!("📶 Voice Connected"), format!("{ch} / {srv}"))
         } else {
-            ("🌐 Connected", format!("Not in a channel / {srv}"))
+            (t!("🌐 Connected"), tf!("Not in a channel / {srv}"; srv = srv))
         };
         let sharing = s.streamer.is_some();
         let cam_on = s.camera.is_some();
@@ -1386,26 +1407,26 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         let vping = shared.ping_ms.load(Ordering::Relaxed);
         let ping = format!("{} ms", if vping > 0 { vping } else { s.tcp_ping });
         let buttons = |ui: &mut Ui, a: &mut Vec<Action>, show_ping: bool| {
-            if icon_button(ui, "⏏", "Disconnect from the server", Some(RED)).clicked() {
+            if icon_button(ui, "⏏", t!("Disconnect from the server"), Some(RED)).clicked() {
                 a.push(Action::Disconnect);
             }
-            if show_leave && icon_button(ui, "🚪", "Leave the channel (stay connected to the server)", None).clicked() {
+            if show_leave && icon_button(ui, "🚪", t!("Leave the channel (stay connected to the server)"), None).clicked() {
                 a.push(Action::Send(C2S::SwitchChannel { channel: NO_CHANNEL, password: None }));
             }
-            if show_preview && icon_button(ui, "👁", "Show the preview of your own stream", None).clicked() {
+            if show_preview && icon_button(ui, "👁", t!("Show the preview of your own stream"), None).clicked() {
                 a.push(Action::Watch(s.me, true));
             }
-            if show_cam && icon_button(ui, "📷", if cam_on { "Turn your camera off" } else { "Turn your camera on (video for everyone in the channel)" }, cam_on.then_some(GREEN)).clicked() {
+            if show_cam && icon_button(ui, "📷", if cam_on { t!("Turn your camera off") } else { t!("Turn your camera on (video for everyone in the channel)") }, cam_on.then_some(GREEN)).clicked() {
                 a.push(Action::ToggleCamera);
             }
-            if show_share && icon_button(ui, "🖥", if sharing { "Stop sharing your screen" } else { "Share your screen or an application" }, sharing.then_some(RED)).clicked() {
+            if show_share && icon_button(ui, "🖥", if sharing { t!("Stop sharing your screen") } else { t!("Share your screen or an application") }, sharing.then_some(RED)).clicked() {
                 a.push(Action::ShareScreen);
             }
-            if show_cal && icon_button(ui, "📆", if cal_open { "Close the server calendar" } else { "Server calendar: game nights and events of the whole server" }, cal_open.then_some(accent())).clicked() {
+            if show_cal && icon_button(ui, "📆", if cal_open { t!("Close the server calendar") } else { t!("Server calendar: game nights and events of the whole server") }, cal_open.then_some(accent())).clicked() {
                 a.push(if cal_open { Action::SetTab(s.tab) } else { Action::OpenServerCalendar });
             }
             if show_ping {
-                ui.label(RichText::new(&ping).small().color(t.dim)).on_hover_text("Voice ping. All traffic is end-to-server encrypted.");
+                ui.label(RichText::new(&ping).small().color(t.dim)).on_hover_text(t!("Voice ping. All traffic is end-to-server encrypted."));
             }
         };
         // Side by side when it fits, otherwise the buttons go on a row of their own (a
@@ -1420,8 +1441,8 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         let status = |ui: &mut Ui| {
             ui.vertical(|ui| {
                 ui.add(egui::Label::new(RichText::new(title).color(GREEN).strong()).truncate());
-                ui.add(egui::Label::new(RichText::new(&sub).small().color(t.dim)).truncate()).on_hover_text(format!("{sub}
-{ping} voice ping"));
+                ui.add(egui::Label::new(RichText::new(&sub).small().color(t.dim)).truncate()).on_hover_text(tf!("{sub}
+{ping} voice ping"; sub = sub, ping = ping));
             });
         };
         if text_w + buttons_w + gap <= ui.available_width() {
@@ -1442,7 +1463,7 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         }
         if let Some(m) = &me {
             if !s.can_talk(m) {
-                ui.label(RichText::new("✋ You need talk power to speak here").small().color(YELLOW));
+                ui.label(RichText::new(t!("✋ You need talk power to speak here")).small().color(YELLOW));
             }
         }
         // Shown for a few seconds after talking while muted.
@@ -1450,11 +1471,11 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
         let since = now_ms.saturating_sub(warned);
         if warned > 0 && since < 4000 && me.as_ref().map(|m| m.input_muted).unwrap_or(false) {
-            ui.label(RichText::new("🎙 You're muted - unmute to be heard").small().strong().color(RED));
+            ui.label(RichText::new(t!("🎙 You're muted - unmute to be heard")).small().strong().color(RED));
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(4100 - since));
         }
         if s.streamer.is_some() {
-            ui.label(RichText::new("🔴 You are sharing your screen").small().color(RED));
+            ui.label(RichText::new(t!("🔴 You are sharing your screen")).small().color(RED));
         }
         ui.separator();
     }
@@ -1465,12 +1486,12 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         let r = avatar(ui, 32.0, &name, &uid, ring);
         let status = match &me {
             Some(m) if m.away.is_some() => (m.away.as_deref().map(away_text).unwrap_or_default(), YELLOW),
-            Some(_) if settings.presence == Presence::Busy => ("Do not disturb".to_string(), RED),
-            Some(_) if settings.presence == Presence::Invisible => ("Invisible".to_string(), t.dim),
-            Some(m) if m.input_muted => ("Microphone muted".to_string(), RED),
-            Some(_) if talking => ("Speaking".to_string(), GREEN),
-            Some(_) => ("Online".to_string(), GREEN),
-            None => ("Connecting".to_string(), t.dim),
+            Some(_) if settings.presence == Presence::Busy => (t!("Do not disturb").to_string(), RED),
+            Some(_) if settings.presence == Presence::Invisible => (t!("Invisible").to_string(), t.dim),
+            Some(m) if m.input_muted => (t!("Microphone muted").to_string(), RED),
+            Some(_) if talking => (t!("Speaking").to_string(), GREEN),
+            Some(_) => (t!("Online").to_string(), GREEN),
+            None => (t!("Connecting").to_string(), t.dim),
         };
         // Room for the buttons on the right whatever the name's length. Narrow: the buttons
         // closer together, and no ⚙ (Settings is in the rail on the left too).
@@ -1493,12 +1514,12 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
             // Status, like Discord: kept for the next time you connect.
             let away = me.as_ref().map(|m| m.away.is_some()).unwrap_or(false);
             let cur = if away { Presence::Away } else { settings.presence };
-            ui.label(RichText::new("Status").small().color(t.dim));
+            ui.label(RichText::new(t!("Status")).small().color(t.dim));
             for (p, dot, label, tip) in [
-                (Presence::Online, GREEN, "Online", "Everyone sees you online"),
-                (Presence::Away, YELLOW, "Away", "Shown as away (Voxa also sets this when you are idle)"),
-                (Presence::Busy, RED, "Do not disturb", "No sounds or pop-ups for messages, pokes or joins"),
-                (Presence::Invisible, Color32::GRAY, "Invisible", "Appear offline while you are not in a channel (administrators still see you)"),
+                (Presence::Online, GREEN, t!("Online"), t!("Everyone sees you online")),
+                (Presence::Away, YELLOW, t!("Away"), t!("Shown as away (Voxa also sets this when you are idle)")),
+                (Presence::Busy, RED, t!("Do not disturb"), t!("No sounds or pop-ups for messages, pokes or joins")),
+                (Presence::Invisible, Color32::GRAY, t!("Invisible"), t!("Appear offline while you are not in a channel (administrators still see you)")),
             ] {
                 let on = cur == p;
                 let text = RichText::new(format!("{}  {label}", if on { "◉" } else { "○" })).color(if on { dot } else { ui.visuals().text_color() });
@@ -1507,7 +1528,7 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
                     ui.close();
                 }
             }
-            if ui.button("🌙 Away with a message...").clicked() {
+            if ui.button(t!("🌙 Away with a message...")).clicked() {
                 if away {
                     a.push(Action::SetPresence(Presence::Online));
                 }
@@ -1515,52 +1536,56 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
                 ui.close();
             }
             ui.separator();
-            if s.my_channel() != NO_CHANNEL && s.supports("1.17.0") && ui.button("🚪 Leave Channel").on_hover_text("Stay on the server without being in a channel").clicked() {
+            if s.my_channel() != NO_CHANNEL && s.supports("1.17.0") && ui.button(t!("🚪 Leave Channel")).on_hover_text(t!("Stay on the server without being in a channel")).clicked() {
                 a.push(Action::Send(C2S::SwitchChannel { channel: NO_CHANNEL, password: None }));
                 ui.close();
             }
-            if ui.button("✏ Change Nickname...").clicked() {
+            if ui.button(t!("✏ Change Nickname...")).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Nickname));
                 ui.close();
             }
-            if ui.button("📝 Edit Description...").clicked() {
+            if ui.button(t!("📝 Edit Description...")).clicked() {
                 a.push(Action::Dialog(dialogs::Open::MyDescription));
                 ui.close();
             }
-            if ui.button("🖼 Change Avatar...").on_hover_text("A colour for your initials, or your own picture").clicked() {
+            if ui.button(t!("🖼 Change Avatar...")).on_hover_text(t!("A colour for your initials, or your own picture")).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Avatar(s.req.identity)));
                 ui.close();
             }
             let req = me.as_ref().map(|m| m.talk_request.is_some()).unwrap_or(false);
-            if ui.button(if req { "✋ Cancel Talk Request" } else { "✋ Request Talk Power..." }).clicked() {
+            if ui.button(if req { t!("✋ Cancel Talk Request") } else { t!("✋ Request Talk Power...") }).clicked() {
                 a.push(Action::RequestTalkPower);
                 ui.close();
             }
             let cmd = me.as_ref().map(|m| m.commander).unwrap_or(false);
-            if ui.button(if cmd { "★ Disable Channel Commander" } else { "★ Enable Channel Commander" }).clicked() {
+            if ui.button(if cmd { t!("★ Disable Channel Commander") } else { t!("★ Enable Channel Commander") }).clicked() {
                 a.push(Action::ToggleCommander);
                 ui.close();
             }
             ui.separator();
-            if s.account.is_some() && ui.button("🔐 Account & Security...").on_hover_text("Your username, password and authenticator app on this server").clicked() {
+            if s.account.is_some() && ui.button(t!("🔐 Account & Security...")).on_hover_text(t!("Your username, password and authenticator app on this server")).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Account));
                 ui.close();
             }
-            if ui.button("👤 Identities...").clicked() {
+            if s.supports("1.30.0") && s.me().is_some_and(|m| s.real_server_perms_of(m) & perm::GROUP_MANAGE != 0) && ui.button(t!("👁 View as...")).on_hover_text(t!("See the server as members of other groups (e.g. Guest) see it")).clicked() {
+                a.push(Action::Dialog(dialogs::Open::ViewAs));
+                ui.close();
+            }
+            if ui.button(t!("👤 Identities...")).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Identities));
                 ui.close();
             }
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if gear && icon_button(ui, "⚙", "Settings", None).clicked() {
+            if gear && icon_button(ui, "⚙", t!("Settings"), None).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Options));
             }
             let spk = me.as_ref().map(|m| m.output_muted).unwrap_or(false);
-            if icon_button(ui, if spk { "🔇" } else { "🎧" }, if spk { "Unmute speakers" } else { "Mute speakers" }, spk.then_some(RED)).clicked() {
+            if icon_button(ui, if spk { "🔇" } else { "🎧" }, if spk { t!("Unmute speakers") } else { t!("Mute speakers") }, spk.then_some(RED)).clicked() {
                 a.push(Action::ToggleSpeakers);
             }
             let mic = me.as_ref().map(|m| m.input_muted).unwrap_or(false);
-            if icon_button(ui, if mic { "🔇" } else { "🎤" }, if mic { "Unmute microphone" } else { "Mute microphone" }, if mic { Some(RED) } else if talking { Some(GREEN) } else { None }).clicked() {
+            if icon_button(ui, if mic { "🔇" } else { "🎤" }, if mic { t!("Unmute microphone") } else { t!("Mute microphone") }, if mic { Some(RED) } else if talking { Some(GREEN) } else { None }).clicked() {
                 a.push(Action::ToggleMic);
             }
         });
@@ -1624,7 +1649,7 @@ fn channel_rows(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, pa
                     ui.label(RichText::new(clients.len().to_string()).small().color(t.dim));
                 }
                 if c.kind == ChannelKind::Temporary {
-                    ui.label(RichText::new("⌛").small().color(t.dim)).on_hover_text("Temporary channel");
+                    ui.label(RichText::new("⌛").small().color(t.dim)).on_hover_text(t!("Temporary channel"));
                 }
                 if !s.can_join(c) {
                     ui.label(RichText::new("⛔").small().color(RED)).on_hover_text(if c.needed_join_power > 0 {
@@ -1634,10 +1659,10 @@ fn channel_rows(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, pa
                     });
                 }
                 if c.needed_talk_power > 0 {
-                    ui.label(RichText::new("🎙").small().color(t.dim)).on_hover_text(format!("Moderated (talk power {})", c.needed_talk_power));
+                    ui.label(RichText::new("🎙").small().color(t.dim)).on_hover_text(tf!("Moderated (talk power {})", c.needed_talk_power));
                 }
                 if c.is_default {
-                    ui.label(RichText::new("🏠").small().color(t.dim)).on_hover_text("Default channel");
+                    ui.label(RichText::new("🏠").small().color(t.dim)).on_hover_text(t!("Default channel"));
                 }
             });
         });
@@ -1845,29 +1870,29 @@ fn channel_menu(s: &Session, r: &egui::Response, c: &ChannelInfo, a: &mut Vec<Ac
     let perms = s.perms();
     r.context_menu(|ui| {
         if s.my_channel() == c.id && s.supports("1.17.0") {
-            if ui.button("🚪  Leave Channel").on_hover_text("Stay connected to the server without being in a channel").clicked() {
+            if ui.button(t!("🚪  Leave Channel")).on_hover_text(t!("Stay connected to the server without being in a channel")).clicked() {
                 a.push(Action::Send(C2S::SwitchChannel { channel: NO_CHANNEL, password: None }));
                 ui.close();
             }
-        } else if ui.add_enabled(s.my_channel() != c.id && !voxa_proto::is_spacer(&c.name), egui::Button::new("➡  Join Channel")).clicked() {
+        } else if ui.add_enabled(s.my_channel() != c.id && !voxa_proto::is_spacer(&c.name), egui::Button::new(t!("➡  Join Channel"))).clicked() {
             a.push(Action::Join(c.id));
             ui.close();
         }
-        if ui.button("ℹ  Channel Info").clicked() {
+        if ui.button(t!("ℹ  Channel Info")).clicked() {
             a.push(Action::Select(Selection::Channel(c.id)));
             ui.close();
         }
         ui.separator();
         let can_create = perms & (perm::CHANNEL_CREATE_PERMANENT | perm::CHANNEL_CREATE_SEMI_PERMANENT | perm::CHANNEL_CREATE_TEMPORARY) != 0;
-        if ui.add_enabled(can_create, egui::Button::new("➕  Create Channel")).clicked() {
+        if ui.add_enabled(can_create, egui::Button::new(t!("➕  Create Channel"))).clicked() {
             a.push(Action::Dialog(dialogs::Open::CreateChannel(c.parent)));
             ui.close();
         }
-        if ui.add_enabled(can_create, egui::Button::new("➕  Create Sub-Channel")).clicked() {
+        if ui.add_enabled(can_create, egui::Button::new(t!("➕  Create Sub-Channel"))).clicked() {
             a.push(Action::Dialog(dialogs::Open::CreateChannel(Some(c.id))));
             ui.close();
         }
-        if ui.button("✏  Edit Channel").clicked() {
+        if ui.button(t!("✏  Edit Channel")).clicked() {
             a.push(Action::Dialog(dialogs::Open::EditChannel(c.id)));
             ui.close();
         }
@@ -1879,32 +1904,32 @@ fn channel_menu(s: &Session, r: &egui::Response, c: &ChannelInfo, a: &mut Vec<Ac
                 ChannelKind::Temporary => perm::CHANNEL_CREATE_TEMPORARY,
             };
             let b = ui
-                .add_enabled(perms & need != 0, egui::Button::new("📋  Clone Channel..."))
-                .on_hover_text("Copy this channel with its settings, password and channel groups under a new name");
+                .add_enabled(perms & need != 0, egui::Button::new(t!("📋  Clone Channel...")))
+                .on_hover_text(t!("Copy this channel with its settings, password and channel groups under a new name"));
             if b.clicked() {
                 a.push(Action::Dialog(dialogs::Open::CloneChannel(c.id)));
                 ui.close();
             }
         }
-        if ui.add_enabled(!c.is_default, egui::Button::new("🗑  Delete Channel")).clicked() {
+        if ui.add_enabled(!c.is_default, egui::Button::new(t!("🗑  Delete Channel"))).clicked() {
             a.push(Action::Dialog(dialogs::Open::DeleteChannel(c.id)));
             ui.close();
         }
         ui.separator();
-        if ui.button("⬆  Move Up").clicked() {
+        if ui.button(t!("⬆  Move Up")).clicked() {
             move_channel(s, c, -1, a);
             ui.close();
         }
-        if ui.button("⬇  Move Down").clicked() {
+        if ui.button(t!("⬇  Move Down")).clicked() {
             move_channel(s, c, 1, a);
             ui.close();
         }
         ui.separator();
-        if ui.button("📁  File Browser").clicked() {
+        if ui.button(t!("📁  File Browser")).clicked() {
             a.push(Action::Dialog(dialogs::Open::Files(c.id)));
             ui.close();
         }
-        if ui.button("📋  Copy Channel Name").clicked() {
+        if ui.button(t!("📋  Copy Channel Name")).clicked() {
             a.push(Action::CopyText(c.name.clone()));
             ui.close();
         }
@@ -1954,36 +1979,36 @@ fn client_row(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, c: &
             if let Some(st) = &c.streaming {
                 let watching = s.watching.contains(&c.id);
                 let b = Frame::new().fill(if watching { accent() } else { RED }).corner_radius(4).inner_margin(Margin::symmetric(5, 1)).show(ui, |ui| {
-                    ui.label(RichText::new(if watching { "WATCHING" } else { "LIVE" }).small().strong().color(Color32::WHITE));
+                    ui.label(RichText::new(if watching { t!("WATCHING") } else { t!("LIVE") }).small().strong().color(Color32::WHITE));
                 });
-                let b = b.response.interact(Sense::click()).on_hover_text(format!("{} ({}x{}) - click to {}", st.title, st.width, st.height, if watching { "stop watching" } else { "watch" }));
+                let b = b.response.interact(Sense::click()).on_hover_text(tf!("{} ({}x{}) - click to {}", st.title, st.width, st.height, if watching { "stop watching" } else { "watch" }));
                 if b.clicked() && c.id != s.me && c.channel == s.my_channel() {
                     a.push(Action::Watch(c.id, !watching));
                 }
             }
             if c.output_muted {
-                ui.label(RichText::new("🔇").small().color(RED)).on_hover_text("Speakers muted");
+                ui.label(RichText::new("🔇").small().color(RED)).on_hover_text(t!("Speakers muted"));
             }
             if c.input_muted {
-                ui.label(RichText::new("🎤").small().color(RED)).on_hover_text("Microphone muted");
+                ui.label(RichText::new("🎤").small().color(RED)).on_hover_text(t!("Microphone muted"));
             }
             if !s.can_talk(c) && !c.input_muted {
-                ui.label(RichText::new("🎙").small().color(YELLOW)).on_hover_text("No talk power");
+                ui.label(RichText::new("🎙").small().color(YELLOW)).on_hover_text(t!("No talk power"));
             }
             match s.presences.get(&c.id) {
                 Some(Presence::Busy) => {
-                    ui.label(RichText::new("⛔").small().color(RED)).on_hover_text("Do not disturb");
+                    ui.label(RichText::new("⛔").small().color(RED)).on_hover_text(t!("Do not disturb"));
                 }
                 Some(Presence::Invisible) => {
-                    ui.label(RichText::new("👻").small().color(t.dim)).on_hover_text("Invisible: others see them as offline");
+                    ui.label(RichText::new("👻").small().color(t.dim)).on_hover_text(t!("Invisible: others see them as offline"));
                 }
                 _ => {}
             }
             if c.talk_request.is_some() {
-                ui.label("✋").on_hover_text(format!("Requests talk power: {}", c.talk_request.clone().unwrap_or_default()));
+                ui.label("✋").on_hover_text(tf!("Requests talk power: {}", c.talk_request.clone().unwrap_or_default()));
             }
             if c.commander {
-                ui.label(RichText::new("★").color(YELLOW)).on_hover_text("Channel commander");
+                ui.label(RichText::new("★").color(YELLOW)).on_hover_text(t!("Channel commander"));
             }
             if let Some(m) = &c.away {
                 ui.label(RichText::new("🌙").small().color(YELLOW)).on_hover_text(away_text(m));
@@ -2017,60 +2042,60 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
     r.context_menu(|ui| {
         ui.set_min_width(220.0);
         if me {
-            if ui.button("✏  Change Nickname").clicked() {
+            if ui.button(t!("✏  Change Nickname")).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Nickname));
                 ui.close();
             }
-            if ui.button("🌙  Set Away / Online").clicked() {
+            if ui.button(t!("🌙  Set Away / Online")).clicked() {
                 a.push(Action::ToggleAway);
                 ui.close();
             }
-            if ui.button(if c.talk_request.is_some() { "✋  Cancel Talk Power Request" } else { "✋  Request Talk Power" }).clicked() {
+            if ui.button(if c.talk_request.is_some() { t!("✋  Cancel Talk Power Request") } else { t!("✋  Request Talk Power") }).clicked() {
                 a.push(Action::RequestTalkPower);
                 ui.close();
             }
-            if ui.button("★  Toggle Channel Commander").clicked() {
+            if ui.button(t!("★  Toggle Channel Commander")).clicked() {
                 a.push(Action::ToggleCommander);
                 ui.close();
             }
-            if ui.button("📝  Edit Description").clicked() {
+            if ui.button(t!("📝  Edit Description")).clicked() {
                 a.push(Action::Dialog(dialogs::Open::MyDescription));
                 ui.close();
             }
         } else {
-            if ui.button("💬  Send Message").clicked() {
+            if ui.button(t!("💬  Send Message")).clicked() {
                 a.push(Action::OpenPrivate(c.id));
                 ui.close();
             }
-            if ui.add_enabled(perms & perm::CLIENT_POKE != 0, egui::Button::new("👉  Poke")).clicked() {
+            if ui.add_enabled(perms & perm::CLIENT_POKE != 0, egui::Button::new(t!("👉  Poke"))).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Poke(c.id)));
                 ui.close();
             }
             if c.streaming.is_some() && c.channel == s.my_channel() {
                 let w = s.watching.contains(&c.id);
-                if ui.button(if w { "🖥  Stop Watching Stream" } else { "🖥  Watch Stream" }).clicked() {
+                if ui.button(if w { t!("🖥  Stop Watching Stream") } else { t!("🖥  Watch Stream") }).clicked() {
                     a.push(Action::Watch(c.id, !w));
                     ui.close();
                 }
             }
             ui.separator();
             let mut vol = shared.volumes.lock().get(&c.id).copied().unwrap_or(1.0);
-            ui.label("User volume");
+            ui.label(t!("User volume"));
             if ui.add(egui::Slider::new(&mut vol, 0.0..=3.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).changed() {
                 a.push(Action::SetVolume(c.id, vol));
             }
             let muted = shared.local_muted.lock().contains(&c.id);
-            if ui.button(if muted { "🔊  Unmute for me" } else { "🔇  Mute for me" }).clicked() {
+            if ui.button(if muted { t!("🔊  Unmute for me") } else { t!("🔇  Mute for me") }).clicked() {
                 a.push(Action::ToggleLocalMute(c.id));
                 ui.close();
             }
             ui.separator();
-            if ui.add_enabled(perms & perm::TALK_POWER_GRANT != 0, egui::Button::new(if c.is_talker { "🎙  Revoke Talk Power" } else { "🎙  Grant Talk Power" })).clicked() {
+            if ui.add_enabled(perms & perm::TALK_POWER_GRANT != 0, egui::Button::new(if c.is_talker { t!("🎙  Revoke Talk Power") } else { t!("🎙  Grant Talk Power") })).clicked() {
                 a.push(Action::Send(C2S::SetTalker { target: c.id, talker: !c.is_talker }));
                 ui.close();
             }
             if perms & perm::CLIENT_MOVE != 0 {
-                ui.menu_button("➡  Move to Channel", |ui| {
+                ui.menu_button(t!("➡  Move to Channel"), |ui| {
                     for ch in s.channels.values().filter(|ch| !voxa_proto::is_spacer(&ch.name)) {
                         if ui.add_enabled(ch.id != c.channel, egui::Button::new(s.channel_path(ch.id))).clicked() {
                             a.push(Action::Send(C2S::MoveClient { target: c.id, channel: ch.id }));
@@ -2079,22 +2104,22 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
                     }
                 });
             }
-            if ui.add_enabled(perms & perm::CLIENT_KICK_CHANNEL != 0, egui::Button::new("⤴  Kick from Channel")).clicked() {
+            if ui.add_enabled(perms & perm::CLIENT_KICK_CHANNEL != 0, egui::Button::new(t!("⤴  Kick from Channel"))).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Kick(c.id, false)));
                 ui.close();
             }
-            if ui.add_enabled(perms & perm::CLIENT_KICK_SERVER != 0, egui::Button::new("⏏  Kick from Server")).clicked() {
+            if ui.add_enabled(perms & perm::CLIENT_KICK_SERVER != 0, egui::Button::new(t!("⏏  Kick from Server"))).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Kick(c.id, true)));
                 ui.close();
             }
-            if ui.add_enabled(perms & perm::CLIENT_BAN != 0, egui::Button::new(RichText::new("🚫  Ban").color(RED))).clicked() {
+            if ui.add_enabled(perms & perm::CLIENT_BAN != 0, egui::Button::new(RichText::new(t!("🚫  Ban")).color(RED))).clicked() {
                 a.push(Action::Dialog(dialogs::Open::Ban(c.id)));
                 ui.close();
             }
         }
         ui.separator();
         if perms & perm::GROUP_ASSIGN_SERVER != 0 {
-            ui.menu_button("👥  Server Groups", |ui| {
+            ui.menu_button(t!("👥  Server Groups"), |ui| {
                 for g in s.groups.values().filter(|g| g.kind == GroupKind::Server) {
                     let mut member = c.server_groups.contains(&g.id);
                     if ui.checkbox(&mut member, &g.name).changed() {
@@ -2104,7 +2129,7 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
             });
         }
         if perms & perm::GROUP_ASSIGN_CHANNEL != 0 {
-            ui.menu_button("👥  Channel Group", |ui| {
+            ui.menu_button(t!("👥  Channel Group"), |ui| {
                 for g in s.groups.values().filter(|g| g.kind == GroupKind::Channel) {
                     if ui.radio(c.channel_group == g.id, &g.name).clicked() {
                         a.push(Action::Send(C2S::SetChannelGroup { uid: c.uid.clone(), channel: c.channel, group: g.id }));
@@ -2113,7 +2138,7 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
                 }
             });
         }
-        if !me && perms & perm::CLIENT_DESCRIPTION_EDIT != 0 && ui.button("📝  Edit Description").clicked() {
+        if !me && perms & perm::CLIENT_DESCRIPTION_EDIT != 0 && ui.button(t!("📝  Edit Description")).clicked() {
             a.push(Action::Dialog(dialogs::Open::Description(c.id)));
             ui.close();
         }
@@ -2122,21 +2147,21 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
             && perms & perm::CLIENT_DESCRIPTION_EDIT != 0
             && s.supports("1.15.0")
             && crate::avatars::image_version(&c.uid) != 0
-            && ui.button(RichText::new("🖼  Remove Avatar Picture").color(RED)).on_hover_text("They cannot use the same picture again on this server").clicked()
+            && ui.button(RichText::new(t!("🖼  Remove Avatar Picture")).color(RED)).on_hover_text(t!("They cannot use the same picture again on this server")).clicked()
         {
             a.push(Action::Send(C2S::ClearAvatar(c.uid.clone())));
             ui.close();
         }
-        if perms & perm::GROUP_MANAGE != 0 && s.supports("1.4.0") && ui.button("🔐  Permissions...").clicked() {
+        if perms & perm::GROUP_MANAGE != 0 && s.supports("1.4.0") && ui.button(t!("🔐  Permissions...")).clicked() {
             a.push(Action::Dialog(dialogs::Open::ClientPerms(c.id)));
             ui.close();
         }
         // Accounts (Voxa Server 1.25.1+): give them a temporary password.
-        if c.id != s.me && s.account_policy.is_some() && s.my_server_perms() & perm::SERVER_EDIT != 0 && ui.button("🔑  Reset Account Password…").on_hover_text("They forgot their password: give them a temporary one").clicked() {
+        if c.id != s.me && s.account_policy.is_some() && s.my_server_perms() & perm::SERVER_EDIT != 0 && ui.button(t!("🔑  Reset Account Password…")).on_hover_text(t!("They forgot their password: give them a temporary one")).clicked() {
             a.push(Action::Dialog(dialogs::Open::ResetAccount(c.uid.clone(), c.nickname.clone())));
             ui.close();
         }
-        if ui.button("📋  Copy Unique ID").clicked() {
+        if ui.button(t!("📋  Copy Unique ID")).clicked() {
             a.push(Action::CopyText(c.uid.clone()));
             ui.close();
         }
@@ -2165,8 +2190,8 @@ fn traffic_table(ui: &mut Ui, s: &voxa_proto::traffic::TrafficStats, dim: Color3
     use voxa_proto::traffic::fmt_bytes;
     egui::Grid::new("traffic").num_columns(3).spacing([12.0, 4.0]).show(ui, |ui| {
         ui.label("");
-        ui.label(RichText::new("⬇ Received").small().color(dim));
-        ui.label(RichText::new("⬆ Sent").small().color(dim));
+        ui.label(RichText::new(t!("⬇ Received")).small().color(dim));
+        ui.label(RichText::new(t!("⬆ Sent")).small().color(dim));
         ui.end_row();
         for (name, rx, tx) in s.rows() {
             ui.label(RichText::new(name).color(dim));
@@ -2174,13 +2199,13 @@ fn traffic_table(ui: &mut Ui, s: &voxa_proto::traffic::TrafficStats, dim: Color3
             ui.label(fmt_bytes(tx));
             ui.end_row();
         }
-        ui.label(RichText::new("Total").strong());
+        ui.label(RichText::new(t!("Total")).strong());
         ui.label(RichText::new(fmt_bytes(s.total_in())).strong());
         ui.label(RichText::new(fmt_bytes(s.total_out())).strong());
         ui.end_row();
     });
-    ui.label(RichText::new(format!("All traffic combined: {}", fmt_bytes(s.total_in() + s.total_out()))).small().color(dim))
-        .on_hover_text("Bytes as sent over the network by Voxa (encrypted), without TCP/IP headers.");
+    ui.label(RichText::new(tf!("All traffic combined: {}", fmt_bytes(s.total_in() + s.total_out()))).small().color(dim))
+        .on_hover_text(t!("Bytes as sent over the network by Voxa (encrypted), without TCP/IP headers."));
 }
 
 /// The right panel: Info (server / channel / person) or People.
@@ -2190,7 +2215,7 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
     }
     let t = theme();
     ui.horizontal(|ui| {
-        for (people, label) in [(false, "ℹ Info"), (true, "👥 People")] {
+        for (people, label) in [(false, t!("ℹ Info")), (true, t!("👥 People"))] {
             let on = app.people_view == people;
             let b = egui::Button::new(RichText::new(label).color(if on { Color32::WHITE } else { t.dim })).fill(if on { accent() } else { t.card }).corner_radius(12);
             if ui.add(b).clicked() {
@@ -2211,7 +2236,7 @@ fn info_panel(app: &mut VoxaApp, ui: &mut Ui) {
 fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
     let t = theme();
     // Like Steam's friends list: the people (and chats) in a window of their own.
-    if app.settings.dm_window && ui.button("⧉ Open in its own window").on_hover_text("People and chats in a separate window, like Steam's friends list").clicked() {
+    if app.settings.dm_window && ui.button(t!("⧉ Open in its own window")).on_hover_text(t!("People and chats in a separate window, like Steam's friends list")).clicked() {
         app.actions.push(Action::PeopleWindow);
     }
     let Some(s) = &mut app.sess else { return };
@@ -2223,7 +2248,7 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
         }
         s.stored_dms = crate::dm_store::list(&s.server_key);
     }
-    ui.add(egui::TextEdit::singleline(&mut app.people_search).hint_text("🔍 Search people").desired_width(f32::INFINITY));
+    ui.add(egui::TextEdit::singleline(&mut app.people_search).hint_text(t!("🔍 Search people")).desired_width(f32::INFINITY));
     let q = app.people_search.trim().to_lowercase();
     let matches = |name: &str| q.is_empty() || name.to_lowercase().contains(&q);
     let has_dm = |uid: &str| s.stored_dms.iter().any(|(u, _, _)| u == uid) || s.dms.iter().any(|d| d.uid == uid && !d.log.lines.is_empty());
@@ -2262,7 +2287,7 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(name).strong().color(if online { ui.visuals().strong_text_color() } else { t.dim }));
                             if has_dm(uid) {
-                                ui.label(RichText::new("💬").small().color(t.dim)).on_hover_text("You have a conversation stored on this PC");
+                                ui.label(RichText::new("💬").small().color(t.dim)).on_hover_text(t!("You have a conversation stored on this PC"));
                             }
                         });
                         ui.label(RichText::new(sub).small().color(t.dim));
@@ -2270,7 +2295,7 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
                     // Calls need them online (the call's channel password goes to them).
                     if online && can_call {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if icon_button(ui, "📞", "Call (voice, camera optional)", None).clicked() {
+                            if icon_button(ui, "📞", t!("Call (voice, camera optional)"), None).clicked() {
                                 a.push(Action::CallPerson(uid.to_string(), name.to_string()));
                             }
                         });
@@ -2280,32 +2305,32 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
             if r.response.hovered() {
                 ui.painter().set(bg, egui::Shape::rect_filled(r.response.rect.expand(2.0), CornerRadius::same(6), t.hover));
             }
-            let tip = if online { "Send a direct message" } else { "Send a message: it is delivered when they come online" };
+            let tip = if online { t!("Send a direct message") } else { t!("Send a message: it is delivered when they come online") };
             let r = r.response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip);
             if r.clicked() {
                 a.push(Action::OpenDm(uid.to_string(), name.to_string()));
             }
             r.context_menu(|ui| {
                 ui.label(RichText::new(name).strong());
-                if ui.button("💬  Send message").clicked() {
+                if ui.button(t!("💬  Send message")).clicked() {
                     a.push(Action::OpenDm(uid.to_string(), name.to_string()));
                     ui.close();
                 }
-                if online && can_call && ui.button("📞  Call").clicked() {
+                if online && can_call && ui.button(t!("📞  Call")).clicked() {
                     a.push(Action::CallPerson(uid.to_string(), name.to_string()));
                     ui.close();
                 }
-                if !online && can_forget && ui.button(RichText::new("🗑  Remove from server…").color(RED)).on_hover_text("Forget them: groups, permissions, picture (they start fresh if they come back)").clicked() {
+                if !online && can_forget && ui.button(RichText::new(t!("🗑  Remove from server…")).color(RED)).on_hover_text(t!("Forget them: groups, permissions, picture (they start fresh if they come back)")).clicked() {
                     a.push(Action::Dialog(dialogs::Open::ForgetClient(uid.to_string(), name.to_string())));
                     ui.close();
                 }
-                if can_reset && uid != my_uid && ui.button("🔑  Reset Account Password…").on_hover_text("They forgot their password: give them a temporary one").clicked() {
+                if can_reset && uid != my_uid && ui.button(t!("🔑  Reset Account Password…")).on_hover_text(t!("They forgot their password: give them a temporary one")).clicked() {
                     a.push(Action::Dialog(dialogs::Open::ResetAccount(uid.to_string(), name.to_string())));
                     ui.close();
                 }
             });
         };
-        section(ui, &format!("Online — {}", online.len()));
+        section(ui, &tf!("Online — {}", online.len()));
         for c in &online {
             // Where they are (or just on the server, like Discord) and their status.
             let place = match s.channels.get(&c.channel) {
@@ -2314,8 +2339,8 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
             };
             let (dot, status) = match (c.away.as_deref(), s.presences.get(&c.id)) {
                 (Some(m), _) => (YELLOW, Some(away_text(m))),
-                (None, Some(Presence::Busy)) => (RED, Some("Do not disturb".to_string())),
-                (None, Some(Presence::Invisible)) => (Color32::GRAY, Some("Invisible".to_string())),
+                (None, Some(Presence::Busy)) => (RED, Some(t!("Do not disturb").to_string())),
+                (None, Some(Presence::Invisible)) => (Color32::GRAY, Some(t!("Invisible").to_string())),
                 _ => (GREEN, None),
             };
             let sub = match status {
@@ -2326,12 +2351,12 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
         }
         if !can_list {
             ui.add_space(8.0);
-            ui.label(RichText::new("This server does not list offline people (it needs Voxa Server 1.13.0).").small().color(t.dim));
+            ui.label(RichText::new(t!("This server does not list offline people (it needs Voxa Server 1.13.0).")).small().color(t.dim));
         }
         if !offline.is_empty() {
-            section(ui, &format!("Offline — {}", offline.len()));
+            section(ui, &tf!("Offline — {}", offline.len()));
             for (uid, name, seen) in &offline {
-                let sub = if *seen == 0 { "offline".to_string() } else { format!("last seen {} ago", fmt_duration(now.saturating_sub(*seen))) };
+                let sub = if *seen == 0 { "offline".to_string() } else { tf!("last seen {} ago", fmt_duration(now.saturating_sub(*seen))) };
                 row(ui, uid, name, sub, None);
             }
         }
@@ -2354,43 +2379,43 @@ fn info_view(app: &mut VoxaApp, ui: &mut Ui) {
                     ui.label(RichText::new(s.req.address.as_str()).small().color(t.dim));
                 });
             });
-            section(ui, "Server");
+            section(ui, t!("Server"));
             egui::Grid::new("srvinfo").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                grid_row(ui, "Version", format!("Voxa Server {}", info.version));
-                grid_row(ui, "Platform", info.platform.as_str());
-                grid_row(ui, "Online", format!("{} / {}", s.clients.len(), info.max_clients));
-                grid_row(ui, "Channels", s.channels.len().to_string());
-                grid_row(ui, "Uptime", fmt_duration(now_unix().saturating_sub(info.started)));
-                grid_row(ui, "Created", fmt_date(info.created));
+                grid_row(ui, t!("Version"), tf!("Voxa Server {}", info.version));
+                grid_row(ui, t!("Platform"), info.platform.as_str());
+                grid_row(ui, t!("Online"), format!("{} / {}", s.clients.len(), info.max_clients));
+                grid_row(ui, t!("Channels"), s.channels.len().to_string());
+                grid_row(ui, t!("Uptime"), fmt_duration(now_unix().saturating_sub(info.started)));
+                grid_row(ui, t!("Created"), fmt_date(info.created));
             });
-            section(ui, "Security");
+            section(ui, t!("Security"));
             egui::Grid::new("srvsec").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
                 // The fingerprint this client verified, not the one the server claims.
                 let verified = app.settings.known_servers.get(&s.req.address).map(String::as_str).unwrap_or("unknown");
-                grid_row(ui, "Fingerprint", RichText::new(verified).monospace().small());
-                grid_row(ui, "Chat history", if info.chat_retention_days == 0 { "Encrypted on server".to_string() } else { format!("Encrypted, {} days", info.chat_retention_days) });
-                grid_row(ui, "Voice", "Encrypted");
+                grid_row(ui, t!("Fingerprint"), RichText::new(verified).monospace().small());
+                grid_row(ui, t!("Chat history"), if info.chat_retention_days == 0 { t!("Encrypted on server").to_string() } else { tf!("Encrypted, {} days", info.chat_retention_days) });
+                grid_row(ui, t!("Voice"), "Encrypted");
             });
             // Only for server admins ("Edit virtual server settings", server-wide).
             let admin = s.me().map(|me| s.server_perms_of(me) & perm::SERVER_EDIT != 0).unwrap_or(false);
             if admin {
-                section(ui, "Traffic since Voxa started");
+                section(ui, t!("Traffic since Voxa started"));
                 traffic_table(ui, &voxa_proto::traffic::TRAFFIC.snapshot(), t.dim);
             }
             if !info.welcome_message.is_empty() {
-                section(ui, "Welcome message");
+                section(ui, t!("Welcome message"));
                 ui.label(&info.welcome_message);
             }
         }
         Selection::Channel(id) => {
             let Some(c) = s.channels.get(&id) else { return };
             if let Some(sp) = voxa_proto::spacer(&c.name) {
-                ui.label(RichText::new("Separator").strong().size(17.0));
+                ui.label(RichText::new(t!("Separator")).strong().size(17.0));
                 if !sp.text.trim().is_empty() {
                     ui.label(RichText::new(sp.text.trim()).color(t.dim));
                 }
                 ui.add_space(6.0);
-                ui.label("Separators only organise the channel list. Nobody can join them.");
+                ui.label(t!("Separators only organise the channel list. Nobody can join them."));
                 return;
             }
             ui.label(RichText::new(format!("🔊 {}", c.name)).strong().size(17.0));
@@ -2399,41 +2424,41 @@ fn info_view(app: &mut VoxaApp, ui: &mut Ui) {
             }
             ui.add_space(6.0);
             if s.my_channel() != id {
-                let b = egui::Button::new(RichText::new("➡ Join Channel").color(Color32::WHITE)).fill(accent()).min_size(egui::vec2(ui.available_width(), 30.0));
+                let b = egui::Button::new(RichText::new(t!("➡ Join Channel")).color(Color32::WHITE)).fill(accent()).min_size(egui::vec2(ui.available_width(), 30.0));
                 if ui.add(b).clicked() {
                     a.push(Action::Join(id));
                 }
             } else if s.supports("1.17.0") {
-                let b = egui::Button::new("🚪 Leave Channel").min_size(egui::vec2(ui.available_width(), 30.0));
-                if ui.add(b).on_hover_text("Stay connected to the server without being in a channel").clicked() {
+                let b = egui::Button::new(t!("🚪 Leave Channel")).min_size(egui::vec2(ui.available_width(), 30.0));
+                if ui.add(b).on_hover_text(t!("Stay connected to the server without being in a channel")).clicked() {
                     a.push(Action::Send(C2S::SwitchChannel { channel: NO_CHANNEL, password: None }));
                 }
             }
-            section(ui, "Channel");
+            section(ui, t!("Channel"));
             egui::Grid::new("chinfo").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                grid_row(ui, "Type", c.kind.label());
-                grid_row(ui, "Clients", match c.max_clients {
+                grid_row(ui, t!("Type"), c.kind.label());
+                grid_row(ui, t!("Clients"), match c.max_clients {
                     Some(m) => format!("{} / {m}", s.clients_in(id).len()),
                     None => format!("{} / unlimited", s.clients_in(id).len()),
                 });
                 let codec = voxa_proto::codec_of(c.codec_quality);
                 if codec == voxa_proto::VoiceCodec::Lossless {
-                    grid_row(ui, "Codec", "Lossless, 16-bit 48 kHz stereo (up to 1.5 Mbit/s)".to_string());
+                    grid_row(ui, t!("Codec"), t!("Lossless, 16-bit 48 kHz stereo (up to 1.5 Mbit/s)").to_string());
                 } else {
-                    grid_row(ui, "Codec", format!("{}, quality {} (~{} kbit/s)", codec.name(), voxa_proto::quality_of(c.codec_quality), voxa_proto::channel_bitrate(c.codec_quality) / 1000));
+                    grid_row(ui, t!("Codec"), format!("{}, quality {} (~{} kbit/s)", codec.name(), voxa_proto::quality_of(c.codec_quality), voxa_proto::channel_bitrate(c.codec_quality) / 1000));
                 }
-                grid_row(ui, "Encryption", "Encrypted voice");
-                grid_row(ui, "Talk power", c.needed_talk_power.to_string());
-                grid_row(ui, "Join power", if c.needed_join_power > 0 { c.needed_join_power.to_string() } else { "Anyone".into() });
-                grid_row(ui, "Password", if c.has_password { "Yes" } else { "No" });
+                grid_row(ui, t!("Encryption"), "Encrypted voice");
+                grid_row(ui, t!("Talk power"), c.needed_talk_power.to_string());
+                grid_row(ui, t!("Join power"), if c.needed_join_power > 0 { c.needed_join_power.to_string() } else { t!("Anyone").into() });
+                grid_row(ui, t!("Password"), if c.has_password { t!("Yes") } else { t!("No") });
             });
             if !c.description.is_empty() {
-                section(ui, "Description");
+                section(ui, t!("Description"));
                 ui.label(&c.description);
             }
             let members = s.clients_in(id);
             if !members.is_empty() {
-                section(ui, &format!("In channel — {}", members.len()));
+                section(ui, &tf!("In channel — {}", members.len()));
                 for m in members {
                     ui.horizontal(|ui| {
                         avatar(ui, 20.0, &m.nickname, &m.uid, None);
@@ -2447,7 +2472,7 @@ fn info_view(app: &mut VoxaApp, ui: &mut Ui) {
             ui.vertical_centered(|ui| {
                 avatar(ui, 72.0, &c.nickname, &c.uid, None);
                 ui.label(RichText::new(&c.nickname).strong().size(18.0));
-                let status = if let Some(m) = &c.away { away_text(m) } else { "Online".to_string() };
+                let status = if let Some(m) = &c.away { away_text(m) } else { t!("Online").to_string() };
                 ui.label(RichText::new(status).color(if c.away.is_some() { YELLOW } else { GREEN }));
                 if !c.description.is_empty() {
                     ui.label(RichText::new(&c.description).italics().color(t.dim));
@@ -2456,21 +2481,21 @@ fn info_view(app: &mut VoxaApp, ui: &mut Ui) {
             ui.add_space(6.0);
             if id != s.me {
                 ui.horizontal(|ui| {
-                    if ui.button("💬 Message").clicked() {
+                    if ui.button(t!("💬 Message")).clicked() {
                         a.push(Action::OpenPrivate(id));
                     }
-                    if ui.button("👉 Poke").clicked() {
+                    if ui.button(t!("👉 Poke")).clicked() {
                         a.push(Action::Dialog(dialogs::Open::Poke(id)));
                     }
                     if c.streaming.is_some() && c.channel == s.my_channel() {
                         let w = s.watching.contains(&id);
-                        if ui.button(if w { "Stop Watching" } else { "🖥 Watch" }).clicked() {
+                        if ui.button(if w { t!("Stop Watching") } else { t!("🖥 Watch") }).clicked() {
                             a.push(Action::Watch(id, !w));
                         }
                     }
                 });
             }
-            section(ui, "Groups");
+            section(ui, t!("Groups"));
             ui.horizontal_wrapped(|ui| {
                 for g in c.server_groups.iter().chain(std::iter::once(&c.channel_group)) {
                     let name = s.group_name(*g);
@@ -2480,21 +2505,21 @@ fn info_view(app: &mut VoxaApp, ui: &mut Ui) {
                     });
                 }
             });
-            section(ui, "Details");
+            section(ui, t!("Details"));
             egui::Grid::new("clinfo").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                grid_row(ui, "Channel", s.channels.get(&c.channel).map(|x| x.name.clone()).unwrap_or_default());
-                grid_row(ui, "Online for", fmt_duration(now_unix().saturating_sub(c.connected_at)));
-                grid_row(ui, "Talk power", format!("{}{}", s.talk_power(c), if c.is_talker { " (granted)" } else { "" }));
-                grid_row(ui, "Join power", s.join_power(c).to_string());
-                grid_row(ui, "Client", format!("Voxa {} ({})", c.version, c.platform));
+                grid_row(ui, t!("Channel"), s.channels.get(&c.channel).map(|x| x.name.clone()).unwrap_or_default());
+                grid_row(ui, t!("Online for"), fmt_duration(now_unix().saturating_sub(c.connected_at)));
+                grid_row(ui, t!("Talk power"), format!("{}{}", s.talk_power(c), if c.is_talker { " (granted)" } else { "" }));
+                grid_row(ui, t!("Join power"), s.join_power(c).to_string());
+                grid_row(ui, t!("Client"), tf!("Voxa {} ({})", c.version, c.platform));
                 if let Some(tr) = &c.talk_request {
-                    grid_row(ui, "Talk request", tr.as_str());
+                    grid_row(ui, t!("Talk request"), tr.as_str());
                 }
                 if let Some(st) = &c.streaming {
-                    grid_row(ui, "Sharing", format!("{} ({}x{})", st.title, st.width, st.height));
+                    grid_row(ui, t!("Sharing"), format!("{} ({}x{})", st.title, st.width, st.height));
                 }
             });
-            section(ui, "Unique ID");
+            section(ui, t!("Unique ID"));
             ui.add(egui::Label::new(RichText::new(&c.uid).monospace().small()).selectable(true));
         }
     });
@@ -2515,7 +2540,7 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
     let (title, topic) = match s.tab {
         ChatKey::Server => (
             format!("{SERVER_ICON}  {}", s.server.as_ref().map(|i| i.name.clone()).unwrap_or_default()),
-            if s.sees_server_events() { "Server events".to_string() } else { "Welcome".to_string() },
+            if s.sees_server_events() { t!("Server events").to_string() } else { t!("Welcome").to_string() },
         ),
         ChatKey::Channel => {
             let c = s.channels.get(&s.my_channel());
@@ -2525,11 +2550,11 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
             Some(g) => (format!("👥  {}", s.dm_name(id)), format!("Group chat · {} people", g.members.len())),
             None => (
                 format!("@  {}", s.dm_name(id)),
-                if s.dm_online(id).is_some() { "Direct message".to_string() } else { "Offline · gets your messages later".to_string() },
+                if s.dm_online(id).is_some() { t!("Direct message").to_string() } else { t!("Offline · gets your messages later").to_string() },
             ),
         },
     };
-    let (title, topic) = if s.server_calendar_open && s.sees_server_calendar() { ("📆  Server calendar".to_string(), "Game nights and events of the whole server".to_string()) } else { (title, topic) };
+    let (title, topic) = if s.server_calendar_open && s.sees_server_calendar() { (t!("📆  Server calendar").to_string(), t!("Game nights and events of the whole server").to_string()) } else { (title, topic) };
     let my_channel = s.my_channel();
     let a = &mut app.actions;
     egui::Panel::top("mainhead").frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin::symmetric(14, 8))).show(ui, |ui| {
@@ -2537,20 +2562,20 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
         // shortened with … when it is narrow (so nothing overlaps).
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if icon_button(ui, "👥", "Show / hide info panel", app.show_members.then_some(accent())).clicked() {
+                if icon_button(ui, "👥", t!("Show / hide info panel"), app.show_members.then_some(accent())).clicked() {
                     a.push(Action::ToggleMembers);
                 }
                 let people_on = app.show_members && app.people_view;
-                if ui.add(egui::Button::new(RichText::new("👥 People").small().color(if people_on { Color32::WHITE } else { t.dim })).fill(if people_on { accent() } else { t.card }).corner_radius(12)).on_hover_text("Everyone on this server, online and offline: click someone to message them").clicked() {
+                if ui.add(egui::Button::new(RichText::new(t!("👥 People")).small().color(if people_on { Color32::WHITE } else { t.dim })).fill(if people_on { accent() } else { t.card }).corner_radius(12)).on_hover_text(t!("Everyone on this server, online and offline: click someone to message them")).clicked() {
                     a.push(Action::People);
                 }
-                if my_channel != NO_CHANNEL && icon_button(ui, "📁", "Channel files", None).clicked() {
+                if my_channel != NO_CHANNEL && icon_button(ui, "📁", t!("Channel files"), None).clicked() {
                     a.push(Action::Dialog(dialogs::Open::Files(my_channel)));
                 }
-                if my_channel != NO_CHANNEL && s.supports("1.21.0") && icon_button(ui, "📷", if s.camera.is_some() { "Turn your camera off" } else { "Turn your camera on" }, s.camera.is_some().then_some(GREEN)).clicked() {
+                if my_channel != NO_CHANNEL && s.supports("1.21.0") && icon_button(ui, "📷", if s.camera.is_some() { t!("Turn your camera off") } else { t!("Turn your camera on") }, s.camera.is_some().then_some(GREEN)).clicked() {
                     a.push(Action::ToggleCamera);
                 }
-                if CAN_SHARE && my_channel != NO_CHANNEL && icon_button(ui, "🖥", "Share your screen", s.streamer.is_some().then_some(RED)).clicked() {
+                if CAN_SHARE && my_channel != NO_CHANNEL && icon_button(ui, "🖥", t!("Share your screen"), s.streamer.is_some().then_some(RED)).clicked() {
                     a.push(Action::ShareScreen);
                 }
                 let chat_target = match s.tab {
@@ -2558,22 +2583,22 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                     ChatKey::Channel => Some(TextTarget::Channel(my_channel)),
                     ChatKey::Dm(_) => None,
                 };
-                if matches!(s.tab, ChatKey::Dm(_)) && icon_button(ui, "🗑", "Delete this conversation from this PC", None).clicked() {
+                if matches!(s.tab, ChatKey::Dm(_)) && icon_button(ui, "🗑", t!("Delete this conversation from this PC"), None).clicked() {
                     a.push(Action::Dialog(dialogs::Open::ClearChat(TextTarget::Private(0))));
                 }
                 if let ChatKey::Dm(id) = s.tab {
-                    if icon_button(ui, "📞", "Start a call with this chat (voice and video)", None).clicked() {
+                    if icon_button(ui, "📞", t!("Start a call with this chat (voice and video)"), None).clicked() {
                         a.push(Action::StartCall(id));
                     }
                 }
                 if let Some(tg) = chat_target.filter(|tg| s.supports("1.4.0") && s.chat_perm(*tg, perm::CHAT_CLEAR)) {
-                    if icon_button(ui, "🗑", "Clear the entire chat history of this conversation", None).clicked() {
+                    if icon_button(ui, "🗑", t!("Clear the entire chat history of this conversation"), None).clicked() {
                         a.push(Action::Dialog(dialogs::Open::ClearChat(tg)));
                     }
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     // Phones: ☰ at the top left slides in the servers and channels.
-                    if is_mobile(ui.ctx()) && icon_button(ui, "☰", "Servers and channels", None).clicked() {
+                    if is_mobile(ui.ctx()) && icon_button(ui, "☰", t!("Servers and channels"), None).clicked() {
                         a.push(Action::MobileDrawer(Drawer::Left));
                     }
                     ui.add(egui::Label::new(RichText::new(&title).strong().size(16.0)).truncate()).on_hover_text(&title);
@@ -2607,8 +2632,8 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 tab(ui, ChatKey::Channel, format!("# {cname}"), s.channel_logs.get(&my_channel).map(|l| l.unread).unwrap_or(0));
                 if s.sees_calendar() {
                     let on = s.calendar_open;
-                    let b = egui::Button::new(RichText::new("📅 Calendar").small().color(if on { Color32::WHITE } else { t.dim })).fill(if on { accent() } else { t.card }).corner_radius(12);
-                    if ui.add(b).on_hover_text("This channel's calendar: what is arranged, and who is going").clicked() {
+                    let b = egui::Button::new(RichText::new(t!("📅 Calendar")).small().color(if on { Color32::WHITE } else { t.dim })).fill(if on { accent() } else { t.card }).corner_radius(12);
+                    if ui.add(b).on_hover_text(t!("This channel's calendar: what is arranged, and who is going")).clicked() {
                         open_cal = true;
                     }
                 }
@@ -2617,8 +2642,8 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
             // The server calendar: whatever channel I am in (servers 1.23.0+).
             if s.sees_server_calendar() {
                 let on = s.server_calendar_open;
-                let b = egui::Button::new(RichText::new("📆 Server calendar").small().color(if on { Color32::WHITE } else { t.dim })).fill(if on { accent() } else { t.card }).corner_radius(12);
-                if ui.add(b).on_hover_text("The whole server's calendar: game nights and the channel to meet in").clicked() {
+                let b = egui::Button::new(RichText::new(t!("📆 Server calendar")).small().color(if on { Color32::WHITE } else { t.dim })).fill(if on { accent() } else { t.card }).corner_radius(12);
+                if ui.add(b).on_hover_text(t!("The whole server's calendar: game nights and the channel to meet in")).clicked() {
                     open_server_cal = true;
                 }
             }
@@ -2627,9 +2652,9 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 let unread: usize = s.dms.iter().map(|d| d.log.unread).sum();
                 let open = s.dms.iter().any(|d| d.open);
                 if open || unread > 0 {
-                    let label = if unread > 0 { format!("💬 Messages  {unread}") } else { "💬 Messages".into() };
+                    let label = if unread > 0 { tf!("💬 Messages  {unread}"; unread = unread) } else { t!("💬 Messages").into() };
                     let rt = if unread > 0 { RichText::new(label).small().strong().color(YELLOW) } else { RichText::new(label).small() };
-                    if ui.add(egui::Button::new(rt).fill(t.card).corner_radius(12)).on_hover_text("Open the Messages window").clicked() {
+                    if ui.add(egui::Button::new(rt).fill(t.card).corner_radius(12)).on_hover_text(t!("Open the Messages window")).clicked() {
                         a.push(Action::ShowMessages);
                     }
                 }
@@ -2651,7 +2676,7 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 a.push(Action::OpenServerCalendar);
             }
             if let ChatKey::Dm(id) = s.tab {
-                if ui.small_button("✖").on_hover_text("Close conversation").clicked() {
+                if ui.small_button("✖").on_hover_text(t!("Close conversation")).clicked() {
                     a.push(Action::CloseTab(id));
                 }
             }
@@ -2674,9 +2699,9 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
     let selected = s.stage.selected;
     let side_by_side = s.stage.side_by_side;
     let tab_label = |item: StageItem| match item {
-        StageItem::Stream(id) if id == me => "📺 Your stream".to_string(),
+        StageItem::Stream(id) if id == me => t!("📺 Your stream").to_string(),
         StageItem::Stream(id) => format!("🔴 {}", s.client_name(id)),
-        StageItem::Player => "▶ Video".to_string(),
+        StageItem::Player => t!("▶ Video").to_string(),
     };
     let labels: Vec<(StageItem, String)> = items.iter().map(|i| (*i, tab_label(*i))).collect();
     if !items.is_empty() {
@@ -2693,7 +2718,7 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                             let b = egui::Button::new(RichText::new(label).color(if on { Color32::WHITE } else { t.dim }))
                                 .fill(if on { accent() } else { t.card })
                                 .corner_radius(12);
-                            if ui.add(b).on_hover_text("Show this stream").clicked() {
+                            if ui.add(b).on_hover_text(t!("Show this stream")).clicked() {
                                 if let Some(s) = &mut app.sess {
                                     s.stage.selected = Some(*item);
                                     s.stage.side_by_side = false;
@@ -2701,10 +2726,10 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                             }
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let b = egui::Button::new(RichText::new("⊞ Side by side").color(if side_by_side { Color32::WHITE } else { t.dim }))
+                            let b = egui::Button::new(RichText::new(t!("⊞ Side by side")).color(if side_by_side { Color32::WHITE } else { t.dim }))
                                 .fill(if side_by_side { accent() } else { t.card })
                                 .corner_radius(12);
-                            if ui.add(b).on_hover_text("Show all streams next to each other").clicked() {
+                            if ui.add(b).on_hover_text(t!("Show all streams next to each other")).clicked() {
                                 if let Some(s) = &mut app.sess {
                                     s.stage.side_by_side = !side_by_side;
                                 }
@@ -2765,16 +2790,16 @@ fn server_welcome(s: &Session, ui: &mut Ui) {
     let (name, welcome) = s.server.as_ref().map(|i| (i.name.clone(), i.welcome_message.clone())).unwrap_or_default();
     egui::CentralPanel::default().frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin::same(24))).show(ui, |ui| {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            ui.label(RichText::new(format!("Welcome to {name}")).strong().size(20.0));
+            ui.label(RichText::new(tf!("Welcome to {name}"; name = name)).strong().size(20.0));
             ui.add_space(10.0);
             if welcome.trim().is_empty() {
-                ui.label(RichText::new("The server has no welcome message.").color(t.dim));
+                ui.label(RichText::new(t!("The server has no welcome message.")).color(t.dim));
             } else {
                 message_text(ui, &welcome, (0, 0));
             }
             ui.add_space(16.0);
             ui.label(
-                RichText::new(if is_mobile(ui.ctx()) { "Chat in a channel (☰, then tap one to join it), or with direct and group messages in 👥 People." } else { "Chat in a channel (double-click one to join it), or with direct and group messages in 💬 Messages." })
+                RichText::new(if is_mobile(ui.ctx()) { t!("Chat in a channel (☰, then tap one to join it), or with direct and group messages in 👥 People.") } else { t!("Chat in a channel (double-click one to join it), or with direct and group messages in 💬 Messages.") })
                     .small()
                     .color(t.dim),
             );
@@ -2883,7 +2908,7 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
             s.dm_win.minimized = false;
             s.dm_win.egui_shown = false;
         }
-        let builder = messages_builder("Voxa Messages".into(), false);
+        let builder = messages_builder(t!("Voxa Messages").into(), false);
         let made = guarded(|| ctx.show_viewport_immediate(vid, builder, |_ui, _| {}));
         app.dm_create_blocked |= made.is_none();
         return;
@@ -2971,8 +2996,8 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
     let egui_shown = !quiet && !s.dm_win.show_minimized;
     s.dm_win.egui_shown = egui_shown;
     let unread: usize = s.dms.iter().map(|d| d.log.unread).sum();
-    let what = sel.map(|i| s.dm_name(i)).unwrap_or_else(|| "People".into());
-    let title = if unread > 0 { format!("({unread}) {what} - Voxa Messages") } else { format!("{what} - Voxa Messages") };
+    let what = sel.map(|i| s.dm_name(i)).unwrap_or_else(|| t!("People").into());
+    let title = if unread > 0 { tf!("({unread}) {what} - Voxa Messages"; unread = unread, what = what) } else { tf!("{what} - Voxa Messages"; what = what) };
     let builder = messages_builder(title, egui_shown);
     let t = theme();
     let VoxaApp { sess, actions, settings, previews, dm_create_blocked, .. } = app;
@@ -3013,8 +3038,8 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
                 ui.vertical_centered(|ui| {
                     ui.add_space(ui.available_height() * 0.35);
                     ui.label(RichText::new("💬").size(40.0));
-                    ui.label(RichText::new("Pick someone on the left to chat with").strong());
-                    ui.label(RichText::new("or start a group chat with several people at once.").color(t.dim));
+                    ui.label(RichText::new(t!("Pick someone on the left to chat with")).strong());
+                    ui.label(RichText::new(t!("or start a group chat with several people at once.")).color(t.dim));
                 });
             }
         });
@@ -3076,7 +3101,7 @@ fn messages_row(ui: &mut Ui, selected: bool, avatar_of: (&str, &str), dot: Optio
 /// The left side of the Messages window: chats, then the people on the server.
 fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option<DmId>) {
     let t = theme();
-    ui.add(egui::TextEdit::singleline(&mut s.dm_win.search).hint_text("🔍 Search people and chats").desired_width(f32::INFINITY));
+    ui.add(egui::TextEdit::singleline(&mut s.dm_win.search).hint_text(t!("🔍 Search people and chats")).desired_width(f32::INFINITY));
     let q = s.dm_win.search.trim().to_lowercase();
     let matches = |name: &str| q.is_empty() || name.to_lowercase().contains(&q);
     let groups_ok = s.supports("1.19.0");
@@ -3085,19 +3110,19 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
         // Chats.
         let chats: Vec<DmId> = open_ids.iter().copied().filter(|&i| matches(&s.dm_name(i))).collect();
         if !chats.is_empty() {
-            section(ui, "Chats");
+            section(ui, t!("Chats"));
         }
         for id in chats {
             let d = &s.dms[id];
             let (uid, name, unread) = (d.uid.clone(), s.dm_name(id), d.log.unread);
             let r = match &d.group {
                 Some(g) => {
-                    let sub = format!("👥 {} people", g.members.len());
+                    let sub = tf!("👥 {} people", g.members.len());
                     messages_row(ui, sel == Some(id), (&name, &uid), None, &name, (&sub, t.dim), unread)
                 }
                 None => {
                     let online = s.dm_online(id).is_some();
-                    let sub = if online { ("Online", GREEN) } else { ("Offline", t.dim) };
+                    let sub = if online { (t!("Online"), GREEN) } else { (t!("Offline"), t.dim) };
                     messages_row(ui, sel == Some(id), (&name, &uid), online.then_some(GREEN), &name, sub, unread)
                 }
             };
@@ -3106,7 +3131,7 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
                 s.dm_win.compose = None;
             }
             r.context_menu(|ui| {
-                if ui.button("✖  Close this chat").on_hover_text("It stays saved on this PC").clicked() {
+                if ui.button(t!("✖  Close this chat")).on_hover_text(t!("It stays saved on this PC")).clicked() {
                     if let Some(d) = s.dms.get_mut(id) {
                         d.open = false;
                     }
@@ -3115,20 +3140,20 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
             });
         }
         ui.add_space(4.0);
-        if groups_ok && ui.add(egui::Button::new("➕ New group chat").min_size(egui::vec2(ui.available_width(), 26.0))).clicked() {
+        if groups_ok && ui.add(egui::Button::new(t!("➕ New group chat")).min_size(egui::vec2(ui.available_width(), 26.0))).clicked() {
             s.dm_win.compose = Some(GroupCompose::default());
         }
         // People.
         let online: Vec<_> = online.into_iter().filter(|p| matches(&p.1)).collect();
-        section(ui, &format!("Online — {}", online.len()));
+        section(ui, &tf!("Online — {}", online.len()));
         for (uid, name, cid) in online {
             let (dot, status) = match (s.clients.get(&cid).and_then(|c| c.away.clone()), s.presences.get(&cid)) {
                 (Some(m), _) => (YELLOW, away_text(&m)),
-                (None, Some(Presence::Busy)) => (RED, "Do not disturb".to_string()),
-                (None, Some(Presence::Invisible)) => (Color32::GRAY, "Invisible".to_string()),
+                (None, Some(Presence::Busy)) => (RED, t!("Do not disturb").to_string()),
+                (None, Some(Presence::Invisible)) => (Color32::GRAY, t!("Invisible").to_string()),
                 _ => (GREEN, s.clients.get(&cid).and_then(|c| s.channels.get(&c.channel)).map(|ch| format!("in {}", ch.name)).unwrap_or_else(|| "on the server".into())),
             };
-            let r = messages_row(ui, false, (&name, &uid), Some(dot), &name, (&status, t.dim), 0).on_hover_text("Click to chat, right-click to call and more");
+            let r = messages_row(ui, false, (&name, &uid), Some(dot), &name, (&status, t.dim), 0).on_hover_text(t!("Click to chat, right-click to call and more"));
             person_menu(s, &r, &uid, &name, groups_ok, true);
             if r.clicked() {
                 let id = s.dm_open(&uid, &name);
@@ -3138,12 +3163,12 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
         }
         let offline: Vec<_> = offline.into_iter().filter(|p| matches(&p.1)).take(300).collect();
         if !offline.is_empty() {
-            section(ui, &format!("Offline — {}", offline.len()));
+            section(ui, &tf!("Offline — {}", offline.len()));
         }
         let now = now_unix();
         for (uid, name, seen) in offline {
-            let sub = if seen == 0 { "Offline".to_string() } else { format!("Seen {} ago", fmt_duration(now.saturating_sub(seen))) };
-            let r = messages_row(ui, false, (&name, &uid), None, &name, (&sub, t.dim), 0).on_hover_text("Messages are delivered when they come online");
+            let sub = if seen == 0 { t!("Offline").to_string() } else { tf!("Seen {} ago", fmt_duration(now.saturating_sub(seen))) };
+            let r = messages_row(ui, false, (&name, &uid), None, &name, (&sub, t.dim), 0).on_hover_text(t!("Messages are delivered when they come online"));
             person_menu(s, &r, &uid, &name, groups_ok, false);
             if r.clicked() {
                 let id = s.dm_open(&uid, &name);
@@ -3158,20 +3183,20 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
 fn person_menu(s: &mut Session, r: &egui::Response, uid: &str, name: &str, groups_ok: bool, online: bool) {
     r.context_menu(|ui| {
         ui.label(RichText::new(name).strong());
-        if ui.button("💬  Send message").clicked() {
+        if ui.button(t!("💬  Send message")).clicked() {
             let id = s.dm_open(uid, name);
             s.dm_win.sel = Some(id);
             s.dm_win.compose = None;
             ui.close();
         }
-        if online && ui.button("📞  Call").on_hover_text("Voice, camera optional").clicked() {
+        if online && ui.button(t!("📞  Call")).on_hover_text(t!("Voice, camera optional")).clicked() {
             let id = s.dm_open(uid, name);
             s.dm_win.sel = Some(id);
             s.dm_win.compose = None;
             s.dm_win.call = Some(id);
             ui.close();
         }
-        if !online && s.supports("1.23.0") && s.my_server_perms() & perm::GROUP_MANAGE != 0 && ui.button(RichText::new("🗑  Remove from server…").color(RED)).clicked() {
+        if !online && s.supports("1.23.0") && s.my_server_perms() & perm::GROUP_MANAGE != 0 && ui.button(RichText::new(t!("🗑  Remove from server…")).color(RED)).clicked() {
             s.dm_win.forget = Some((uid.to_string(), name.to_string()));
             ui.close();
         }
@@ -3188,7 +3213,7 @@ fn person_menu(s: &mut Session, r: &egui::Response, uid: &str, name: &str, group
             .map(|g| (g.id, g.name.clone()))
             .collect();
         if !invitable.is_empty() {
-            ui.menu_button("👥  Invite to group chat", |ui| {
+            ui.menu_button(t!("👥  Invite to group chat"), |ui| {
                 for (gid, gname) in invitable {
                     if ui.button(&gname).clicked() {
                         s.conn.send(C2S::InviteToGroupChat { id: gid, uids: vec![uid.to_string()] });
@@ -3197,7 +3222,7 @@ fn person_menu(s: &mut Session, r: &egui::Response, uid: &str, name: &str, group
                 }
             });
         }
-        if ui.button("➕  New group chat with them").clicked() {
+        if ui.button(t!("➕  New group chat with them")).clicked() {
             s.dm_win.compose = Some(GroupCompose { picked: vec![(uid.to_string(), name.to_string())], ..Default::default() });
             ui.close();
         }
@@ -3213,18 +3238,18 @@ fn group_compose(s: &mut Session, ui: &mut Ui) {
     let mut keep = true;
     Frame::new().inner_margin(Margin::same(16)).show(ui, |ui| {
         let title = match c.invite_to.and_then(|g| s.group_index(g)) {
-            Some(i) => format!("Add people to {}", s.dms[i].name),
-            None => "New group chat".to_string(),
+            Some(i) => tf!("Add people to {}", s.dms[i].name),
+            None => t!("New group chat").to_string(),
         };
         ui.label(RichText::new(title).strong().size(17.0));
         ui.add_space(6.0);
         if c.invite_to.is_none() {
             ui.horizontal(|ui| {
-                ui.label("Name:");
-                ui.add(egui::TextEdit::singleline(&mut c.name).hint_text("Group chat").char_limit(50).desired_width(260.0));
+                ui.label(t!("Name:"));
+                ui.add(egui::TextEdit::singleline(&mut c.name).hint_text(t!("Group chat")).char_limit(50).desired_width(260.0));
             });
         }
-        ui.label(RichText::new(format!("Pick the people ({} picked, at most {}):", c.picked.len(), MAX_GROUP_CHAT_MEMBERS - 1)).color(t.dim));
+        ui.label(RichText::new(tf!("Pick the people ({} picked, at most {}):", c.picked.len(), MAX_GROUP_CHAT_MEMBERS - 1)).color(t.dim));
         let q = s.dm_win.search.trim().to_lowercase();
         let rows: Vec<(String, String, bool)> = online
             .iter()
@@ -3234,7 +3259,7 @@ fn group_compose(s: &mut Session, ui: &mut Ui) {
             .collect();
         egui::ScrollArea::vertical().max_height((ui.available_height() - 60.0).max(120.0)).auto_shrink([false, true]).show(ui, |ui| {
             if rows.is_empty() {
-                ui.label(RichText::new("Nobody else to add (try the search on the left).").color(t.dim));
+                ui.label(RichText::new(t!("Nobody else to add (try the search on the left).")).color(t.dim));
             }
             for (uid, name, on) in rows {
                 let mut ticked = c.picked.iter().any(|(u, _)| *u == uid);
@@ -3251,7 +3276,7 @@ fn group_compose(s: &mut Session, ui: &mut Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let ok = !c.picked.is_empty() && c.picked.len() < MAX_GROUP_CHAT_MEMBERS;
-            let label = if c.invite_to.is_some() { "➕ Add" } else { "👥 Start group chat" };
+            let label = if c.invite_to.is_some() { t!("➕ Add") } else { t!("👥 Start group chat") };
             if ui.add_enabled(ok, egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(accent())).clicked() {
                 let uids: Vec<String> = c.picked.iter().map(|(u, _)| u.clone()).collect();
                 match c.invite_to {
@@ -3271,7 +3296,7 @@ fn group_compose(s: &mut Session, ui: &mut Ui) {
                 }
                 keep = false;
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button(t!("Cancel")).clicked() {
                 keep = false;
             }
         });
@@ -3307,20 +3332,20 @@ fn conversation_view(s: &mut Session, ui: &mut Ui, sel: DmId, wa: &mut Vec<Actio
                     ui.label(RichText::new(format!("{} people", g.members.len())).color(t.dim)).on_hover_text(names.join("\n"));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if !left {
-                            if icon_button(ui, "🚪", "Leave this group chat", None).clicked() {
+                            if icon_button(ui, "🚪", t!("Leave this group chat"), None).clicked() {
                                 s.conn.send(C2S::LeaveGroupChat(g.id));
                             }
-                            if icon_button(ui, "✏", "Rename this group chat", None).clicked() {
+                            if icon_button(ui, "✏", t!("Rename this group chat"), None).clicked() {
                                 s.dm_win.rename = Some(g.name.clone());
                             }
-                            if icon_button(ui, "➕", "Add people", None).clicked() {
+                            if icon_button(ui, "➕", t!("Add people"), None).clicked() {
                                 s.dm_win.compose = Some(GroupCompose { invite_to: Some(g.id), ..Default::default() });
                             }
                         }
-                        if icon_button(ui, "🗑", "Delete this chat's history from this PC", None).clicked() {
+                        if icon_button(ui, "🗑", t!("Delete this chat's history from this PC"), None).clicked() {
                             wa.push(Action::Dialog(dialogs::Open::ClearChat(TextTarget::Group(g.id))));
                         }
-                        if !left && icon_button(ui, "📞", "Start a call with this group (voice and video)", None).clicked() {
+                        if !left && icon_button(ui, "📞", t!("Start a call with this group (voice and video)"), None).clicked() {
                             wa.push(Action::StartCall(sel));
                         }
                     });
@@ -3328,12 +3353,12 @@ fn conversation_view(s: &mut Session, ui: &mut Ui, sel: DmId, wa: &mut Vec<Actio
                 None => {
                     ui.label(RichText::new(format!("@  {}", s.dm_name(sel))).strong().size(16.0));
                     ui.separator();
-                    ui.label(RichText::new(if online { "Direct message" } else { "Offline · gets your messages later" }).color(t.dim));
+                    ui.label(RichText::new(if online { t!("Direct message") } else { t!("Offline · gets your messages later") }).color(t.dim));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icon_button(ui, "🗑", "Delete this conversation from this PC", None).clicked() {
+                        if icon_button(ui, "🗑", t!("Delete this conversation from this PC"), None).clicked() {
                             wa.push(Action::Dialog(dialogs::Open::ClearChat(TextTarget::Private(0))));
                         }
-                        if online && icon_button(ui, "📞", "Start a call (voice and video)", None).clicked() {
+                        if online && icon_button(ui, "📞", t!("Start a call (voice and video)"), None).clicked() {
                             wa.push(Action::StartCall(sel));
                         }
                     });
@@ -3352,7 +3377,7 @@ fn conversation_view(s: &mut Session, ui: &mut Ui, sel: DmId, wa: &mut Vec<Actio
         }
     });
     if left {
-        ui.label(RichText::new("You left this group chat. Its history stays on this PC until you delete it.").color(t.dim));
+        ui.label(RichText::new(t!("You left this group chat. Its history stays on this PC until you delete it.")).color(t.dim));
     }
     // Images dropped on the window go to this conversation.
     let target = s.dm_target(sel);
@@ -3421,7 +3446,7 @@ fn insert_emoji(input: &mut String, ch: &str) {
 /// "(edited)" after a message its author changed, with when on hover.
 fn edited_mark(ui: &mut Ui, edited: Option<u64>) {
     if let Some(at) = edited {
-        ui.label(RichText::new("(edited)").small().color(theme().dim)).on_hover_text(format!("Edited {}", fmt_day_time(at)));
+        ui.label(RichText::new("(edited)").small().color(theme().dim)).on_hover_text(tf!("Edited {}", fmt_day_time(at)));
     }
 }
 
@@ -3441,9 +3466,9 @@ fn edit_box(ui: &mut Ui, editing: &mut Option<(TextTarget, MessageId, String)>, 
     let mut save = enter;
     let mut cancel = esc;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Enter to save · Esc to cancel · Shift+Enter for a new line").small().color(theme().dim));
-        save |= ui.small_button("Save").clicked();
-        cancel |= ui.small_button("Cancel").clicked();
+        ui.label(RichText::new(t!("Enter to save · Esc to cancel · Shift+Enter for a new line")).small().color(theme().dim));
+        save |= ui.small_button(t!("Save")).clicked();
+        cancel |= ui.small_button(t!("Cancel")).clicked();
     });
     if save {
         let new = text.trim_end().to_string();
@@ -3477,11 +3502,11 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
         }
     };
     click.context_menu(|ui| {
-        if can_edit && ui.button("✏  Edit Message").clicked() {
+        if can_edit && ui.button(t!("✏  Edit Message")).clicked() {
             a.push(Action::StartEdit(target, m.id, m.text.clone()));
             ui.close();
         }
-        if ui.button("📋  Copy Text").clicked() {
+        if ui.button(t!("📋  Copy Text")).clicked() {
             a.push(Action::CopyText(shown.clone()));
             ui.close();
         }
@@ -3491,7 +3516,7 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
                 ui.close();
             }
         }
-        if can_del && ui.button(RichText::new("🗑  Delete Message").color(RED)).clicked() {
+        if can_del && ui.button(RichText::new(t!("🗑  Delete Message")).color(RED)).clicked() {
             delete(a, false);
             ui.close();
         }
@@ -3513,10 +3538,10 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
             ui.painter().text(r.center(), Align2::CENTER_CENTER, icon, FontId::proportional(14.0), color);
             resp.clicked()
         };
-        if can_edit && button(ui, "✏", "Edit message (or press Up in an empty message box)", t.dim) {
+        if can_edit && button(ui, "✏", t!("Edit message (or press Up in an empty message box)"), t.dim) {
             a.push(Action::StartEdit(target, m.id, m.text.clone()));
         }
-        if button(ui, "📋", "Copy text", t.dim) {
+        if button(ui, "📋", t!("Copy text"), t.dim) {
             a.push(Action::CopyText(shown.clone()));
         }
         if let Some(pinned) = pin {
@@ -3524,7 +3549,7 @@ fn message_actions(ui: &mut Ui, row: &egui::Response, bg: egui::layers::ShapeIdx
                 a.push(Action::Send(C2S::PinMessage { target, id: m.id, pin: !pinned }));
             }
         }
-        if can_del && button(ui, "🗑", "Delete message (hold Shift to skip confirmation)", RED) {
+        if can_del && button(ui, "🗑", t!("Delete message (hold Shift to skip confirmation)"), RED) {
             let shift = ui.input(|i| i.modifiers.shift);
             delete(a, shift);
         }
@@ -3554,7 +3579,7 @@ fn pinned_bar(ui: &mut Ui, pins: &[PinnedMessage], open: &mut bool, can_pin: boo
         let header = ui
             .horizontal(|ui| {
                 ui.label(RichText::new("📌").size(15.0));
-                ui.label(RichText::new(format!("Pinned ({})", pins.len())).strong());
+                ui.label(RichText::new(tf!("Pinned ({})", pins.len())).strong());
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(RichText::new(if *open { "▲" } else { "▼" }).color(t.dim));
                     if !*open {
@@ -3566,7 +3591,7 @@ fn pinned_bar(ui: &mut Ui, pins: &[PinnedMessage], open: &mut bool, can_pin: boo
             .response
             .interact(Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(if *open { "Hide pinned messages" } else { "Show all pinned messages" });
+            .on_hover_text(if *open { t!("Hide pinned messages") } else { t!("Show all pinned messages") });
         if header.clicked() {
             *open = !*open;
         }
@@ -3580,7 +3605,7 @@ fn pinned_bar(ui: &mut Ui, pins: &[PinnedMessage], open: &mut bool, can_pin: boo
                         ui.label(RichText::new(fmt_day_time(m.ts)).small().color(t.dim));
                         if can_pin {
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.small_button("Unpin").on_hover_text("Remove from the pinned messages").clicked() {
+                                if ui.small_button(t!("Unpin")).on_hover_text(t!("Remove from the pinned messages")).clicked() {
                                     a.push(Action::Send(C2S::PinMessage { target, id: m.id, pin: false }));
                                 }
                             });
@@ -3592,7 +3617,7 @@ fn pinned_bar(ui: &mut Ui, pins: &[PinnedMessage], open: &mut bool, can_pin: boo
                         }
                         None => message_text(ui, &m.text, (m.id, 0x9105)),
                     }
-                    ui.label(RichText::new(format!("Pinned by {} · {}", p.pinned_by, fmt_day_time(p.pinned_at))).small().color(t.dim));
+                    ui.label(RichText::new(tf!("Pinned by {} · {}", p.pinned_by, fmt_day_time(p.pinned_at))).small().color(t.dim));
                     ui.add_space(6.0);
                 }
             });
@@ -3610,6 +3635,23 @@ pub fn message_text(ui: &mut Ui, text: &str, salt: (u64, u64)) {
     } else {
         ui.add(egui::Label::new(RichText::new(text).font(chat_font(body_size(ui)))).selectable(crate::markdown::SELECTABLE).wrap());
     }
+}
+
+/// "View as": a bar while I preview the server as other groups, with ✖ to stop.
+fn view_as_banner(s: &Session, ui: &mut Ui) {
+    let Some(v) = &s.view_as else { return };
+    let names: Vec<String> = v.iter().filter_map(|g| s.groups.get(g).map(|x| x.name.clone())).collect();
+    egui::Panel::top("view_as_banner").frame(Frame::new().fill(YELLOW.linear_multiply(0.85)).inner_margin(Margin::symmetric(12, 6))).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(tf!("👁 Viewing as {}", names.join(", "))).strong().color(Color32::BLACK));
+            ui.label(RichText::new(t!("You see the server and can do only what they can (until you stop or disconnect).")).small().color(Color32::BLACK));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new(t!("✖ Stop")).color(Color32::BLACK)).fill(Color32::from_white_alpha(160))).on_hover_text(t!("Back to your own permissions")).clicked() {
+                    s.conn.send(C2S::ViewAs(None));
+                }
+            });
+        });
+    });
 }
 
 /// Discord-style card for a YouTube, TikTok or X link: author, title and thumbnail.
@@ -3639,7 +3681,7 @@ fn video_card(ui: &mut Ui, previews: &crate::links::Previews, v: &crate::links::
         let link = ui
             .add(egui::Label::new(RichText::new(&title).strong().color(Color32::from_rgb(0x4C, 0xA8, 0xF0))).sense(Sense::click()).wrap())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(format!("Open on {}", site.name()));
+            .on_hover_text(tf!("Open on {}", site.name()));
         if link.clicked() {
             crate::markdown::open_link(&v.url);
         }
@@ -3666,7 +3708,7 @@ fn video_card(ui: &mut Ui, previews: &crate::links::Previews, v: &crate::links::
         ui.painter().circle_filled(c, 26.0, if hot { yt_red } else { Color32::from_black_alpha(190) });
         let tri = vec![c + egui::vec2(-8.0, -12.0), c + egui::vec2(-8.0, 12.0), c + egui::vec2(13.0, 0.0)];
         ui.painter().add(egui::Shape::convex_polygon(tri, Color32::WHITE, Stroke::NONE));
-        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Play in Voxa").clicked() {
+        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t!("Play in Voxa")).clicked() {
             // TikTok short links: play with the real id the preview found, or open the link.
             let mut v = v.clone();
             if let Some(id) = play_id {
@@ -3691,7 +3733,7 @@ fn emoji_picker(ui: &mut Ui, anchor: egui::Rect, picker: &mut EmojiPicker, input
         Frame::new().fill(t.card).corner_radius(10).stroke(Stroke::new(1.0, t.hover)).inner_margin(Margin::same(10)).show(ui, |ui| {
             ui.set_min_size(size - egui::vec2(20.0, 20.0));
             ui.set_max_width(size.x - 20.0);
-            let search = ui.add(egui::TextEdit::singleline(&mut picker.search).hint_text("🔍 Search emoji (e.g. fire, heart, gg)").desired_width(f32::INFINITY));
+            let search = ui.add(egui::TextEdit::singleline(&mut picker.search).hint_text(t!("🔍 Search emoji (e.g. fire, heart, gg)")).desired_width(f32::INFINITY));
             if toggled {
                 search.request_focus();
             }
@@ -3725,7 +3767,7 @@ fn emoji_picker(ui: &mut Ui, anchor: egui::Rect, picker: &mut EmojiPicker, input
             };
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 if items.is_empty() {
-                    ui.label(RichText::new("No emoji found").color(t.dim));
+                    ui.label(RichText::new(t!("No emoji found")).color(t.dim));
                 }
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(2.0, 2.0);
@@ -3799,6 +3841,7 @@ fn message_body(
     });
 }
 fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings: &Settings, picker: &mut EmojiPicker, previews: &crate::links::Previews, ui: &mut Ui) {
+    view_as_banner(s, ui);
     let previews = settings.link_previews.then_some(previews);
     let t = theme();
     // Without "See server events" the Server tab shows the welcome message.
@@ -3814,7 +3857,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
     let can_add_gifs = gif_library && s.my_server_perms() & perm::GIF_MANAGE != 0;
     if let Some((name, data)) = crate::chat_images::viewer(ui.ctx(), &mut s.images, can_add_gifs) {
         s.gif.upload(&s.conn, vec![(name, data, Vec::new())]);
-        s.log(EventKind::Info, "Adding the GIF to the server's library…".to_string());
+        s.log(EventKind::Info, t!("Adding the GIF to the server's library…").to_string());
     }
     // Images go through the server: not possible for someone who is offline.
     let can_images = s.supports("1.5.0")
@@ -3849,10 +3892,10 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
     let pins: Vec<PinnedMessage> = s.pins.get(&target).cloned().unwrap_or_default();
     let pinned_ids: std::collections::HashSet<MessageId> = pins.iter().map(|p| p.message.id).collect();
     let hint = match s.tab {
-        ChatKey::Server => "Message the server".to_string(),
-        ChatKey::Channel => format!("Message #{}", s.channels.get(&my_channel).map(|c| c.name.clone()).unwrap_or_default()),
-        ChatKey::Dm(id) if s.dms.get(id).is_some_and(|d| d.group.is_some()) => format!("Message {}", s.dm_name(id)),
-        ChatKey::Dm(id) => format!("Message @{}", s.dm_name(id)),
+        ChatKey::Server => t!("Message the server").to_string(),
+        ChatKey::Channel => tf!("Message #{}", s.channels.get(&my_channel).map(|c| c.name.clone()).unwrap_or_default()),
+        ChatKey::Dm(id) if s.dms.get(id).is_some_and(|d| d.group.is_some()) => tf!("Message {}", s.dm_name(id)),
+        ChatKey::Dm(id) => tf!("Message @{}", s.dm_name(id)),
     };
     // The Server tab shows what happens on the server (who connects and leaves, where you
     // are): no messages there (servers 1.19.0+ refuse them too).
@@ -3860,7 +3903,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
     // Input bar (bottom).
     egui::Panel::bottom("chatinput").frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin { left: 14, right: 14, top: 4, bottom: 14 })).show(ui, |ui| {
         if read_only {
-            ui.label(RichText::new("ℹ This tab shows what happens on the server. Chat in a channel, or with direct and group messages (💬 Messages).").small().color(t.dim));
+            ui.label(RichText::new(t!("ℹ This tab shows what happens on the server. Chat in a channel, or with direct and group messages (💬 Messages).")).small().color(t.dim));
             return;
         }
         // `:shortcode` autocomplete suggestions (Tab or click to insert).
@@ -3869,12 +3912,12 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
         if let Some(start) = token_start.filter(|_| !suggestions.is_empty()) {
             Frame::new().fill(t.card).corner_radius(8).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(RichText::new("EMOJI MATCHING ".to_string() + &input[start..].to_uppercase()).small().strong().color(t.dim));
+                ui.label(RichText::new(t!("EMOJI MATCHING ").to_string() + &input[start..].to_uppercase()).small().strong().color(t.dim));
                 ui.horizontal_wrapped(|ui| {
                     for (i, e) in suggestions.iter().enumerate() {
                         let text = RichText::new(format!("{}  :{}:", e.ch, e.code)).font(chat_font(body_size(ui)));
                         let b = egui::Button::new(text).fill(if i == 0 { accent().linear_multiply(0.35) } else { Color32::TRANSPARENT });
-                        if ui.add(b).on_hover_text(if i == 0 { "Tab to insert" } else { "Click to insert" }).clicked() {
+                        if ui.add(b).on_hover_text(if i == 0 { t!("Tab to insert") } else { t!("Click to insert") }).clicked() {
                             accept = Some(e.ch);
                         }
                     }
@@ -3885,10 +3928,10 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
         crate::chat_images::pending_sends(ui, &s.images, t.dim);
         Frame::new().fill(t.card).corner_radius(10).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
             ui.horizontal(|ui| {
-                if matches!(target, TextTarget::Channel(_)) && icon_button(ui, "➕", "Upload a file to the channel", None).clicked() {
+                if matches!(target, TextTarget::Channel(_)) && icon_button(ui, "➕", t!("Upload a file to the channel"), None).clicked() {
                     a.push(Action::Attach);
                 }
-                if can_images && icon_button(ui, "🖼", "Send an image (you can also paste one with Ctrl+V or drag it in)", None).clicked() {
+                if can_images && icon_button(ui, "🖼", t!("Send an image (you can also paste one with Ctrl+V or drag it in)"), None).clicked() {
                     a.push(Action::PickImages(target));
                 }
                 // Multi-line input: Enter sends, Shift+Enter starts a new line, Tab accepts
@@ -3910,7 +3953,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                 let te = egui::TextEdit::multiline(input)
                     .id(input_id)
                     .desired_rows(1)
-                    .hint_text(format!("{hint}  -  Shift+Enter for a new line"))
+                    .hint_text(tf!("{hint}  -  Shift+Enter for a new line"; hint = hint))
                     .font(chat_font(body_size(ui)))
                     .frame(egui::Frame::NONE)
                     .lock_focus(true)
@@ -3957,7 +4000,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                     }
                     ui.painter().rect_stroke(grect.shrink2(Vec2::new(4.0, 7.0)), CornerRadius::same(3), Stroke::new(1.5, t.dim), egui::StrokeKind::Inside);
                     ui.painter().text(grect.center(), Align2::CENTER_CENTER, "GIF", FontId::proportional(10.5), if s.gif.open || gb.hovered() { ui.visuals().strong_text_color() } else { t.dim });
-                    if gb.on_hover_text("GIFs").clicked() {
+                    if gb.on_hover_text(t!("GIFs")).clicked() {
                         s.gif.open = !s.gif.open;
                         if !s.gif.open {
                             s.gif.closed();
@@ -3973,12 +4016,12 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                     ui.painter().rect_filled(rect, CornerRadius::same(6), t.hover);
                 }
                 ui.painter().text(rect.center(), Align2::CENTER_CENTER, if picker.open || eb.hovered() { "😄" } else { "🙂" }, chat_font(18.0), Color32::WHITE);
-                let toggled = eb.on_hover_text("Emoji").clicked();
+                let toggled = eb.on_hover_text(t!("Emoji")).clicked();
                 if toggled {
                     picker.open = !picker.open;
                     s.gif.closed();
                 }
-                let send = icon_button(ui, "➤", "Send", Some(accent())).clicked();
+                let send = icon_button(ui, "➤", t!("Send"), Some(accent())).clicked();
                 // A message that is only a GIF link posts the GIF itself (this device downloads
                 // it; nobody else's contacts the site).
                 let gif_url = if can_images { crate::gifs::gif_link(input) } else { None };
@@ -4023,7 +4066,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
         pinned_bar(ui, &pins, pins_open, can_pin, target, a);
         egui::ScrollArea::vertical().id_salt(format!("chat{:?}", s.tab)).auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
             let Some(log) = log else {
-                ui.label(RichText::new("No messages yet.").color(t.dim));
+                ui.label(RichText::new(t!("No messages yet.")).color(t.dim));
                 return;
             };
             log.unread = 0;
@@ -4031,19 +4074,19 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                 if log.loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(RichText::new("Loading history...").color(t.dim));
+                        ui.label(RichText::new(t!("Loading history...")).color(t.dim));
                     });
                 } else if !log.complete {
-                    if ui.add(egui::Button::new(RichText::new("Load older messages").small()).frame(false)).clicked() {
+                    if ui.add(egui::Button::new(RichText::new(t!("Load older messages")).small()).frame(false)).clicked() {
                         a.push(Action::LoadOlder(target));
                     }
                 } else if log.lines.iter().any(|l| matches!(l, ChatLine::Msg(_))) {
-                    ui.label(RichText::new("This is the beginning of the conversation.").small().color(t.dim));
+                    ui.label(RichText::new(t!("This is the beginning of the conversation.")).small().color(t.dim));
                 }
             }
             if log.lines.is_empty() {
                 ui.add_space(20.0);
-                ui.label(RichText::new("No messages yet. Say hello! 👋").color(t.dim));
+                ui.label(RichText::new(t!("No messages yet. Say hello! 👋")).color(t.dim));
             }
             let mut prev: Option<(&str, u64)> = None;
             for l in &log.lines {
@@ -4126,11 +4169,11 @@ fn call_card(ui: &mut Ui, ch: ChannelId, pw: String, a: &mut Vec<Action>) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("📞").size(24.0));
             ui.vertical(|ui| {
-                ui.label(RichText::new("Call").strong());
-                ui.label(RichText::new("Voice and video with this chat").small().color(t.dim));
+                ui.label(RichText::new(t!("Call")).strong());
+                ui.label(RichText::new(t!("Voice and video with this chat")).small().color(t.dim));
             });
             ui.add_space(12.0);
-            if ui.add(egui::Button::new(RichText::new("Join call").color(Color32::WHITE)).fill(GREEN)).clicked() {
+            if ui.add(egui::Button::new(RichText::new(t!("Join call")).color(Color32::WHITE)).fill(GREEN)).clicked() {
                 a.push(Action::JoinCall(ch, pw));
             }
         });
@@ -4145,11 +4188,11 @@ fn start_call(app: &mut VoxaApp, id: DmId) {
     let Some(s) = &mut app.sess else { return };
     let target = s.dm_target(id);
     if target == TextTarget::Private(0) {
-        s.log(EventKind::Error, "They are offline: calls need them online");
+        s.log(EventKind::Error, t!("They are offline: calls need them online"));
         return;
     }
     if !s.me().is_some_and(|m| s.server_perms_of(m) & perm::CHANNEL_CREATE_TEMPORARY != 0) {
-        s.log(EventKind::Error, "Calls need the permission to create temporary channels on this server");
+        s.log(EventKind::Error, t!("Calls need the permission to create temporary channels on this server"));
         return;
     }
     let mut r = rand::thread_rng();
@@ -4171,7 +4214,7 @@ fn start_call(app: &mut VoxaApp, id: DmId) {
         password: PasswordChange::Set(pw.clone()),
     }));
     s.pending_call = Some((id, name, pw));
-    s.log(EventKind::Info, "Starting a call...");
+    s.log(EventKind::Info, t!("Starting a call..."));
 }
 
 // ---------------------------------------------------------------- video
@@ -4182,7 +4225,7 @@ fn toggle_camera(app: &mut VoxaApp) {
     let Some(s) = &mut app.sess else { return };
     if s.camera.take().is_some() {
         s.conn.send(C2S::StopCamera);
-        s.log(EventKind::Info, "You turned your camera off");
+        s.log(EventKind::Info, t!("You turned your camera off"));
         return;
     }
     let problem = if !s.supports("1.21.0") {
@@ -4206,7 +4249,7 @@ fn toggle_camera(app: &mut VoxaApp) {
     let preview = crate::stream::PreviewSink { frames: s.camera_viewer.frames.clone(), me: s.me, ctx };
     s.camera = Some(crate::stream::Streamer::start_camera(settings, s.conn.bulk_tx.clone(), preview));
     s.camera_focus = None;
-    s.log(EventKind::Good, "Your camera is on: everyone in the channel sees it");
+    s.log(EventKind::Good, t!("Your camera is on: everyone in the channel sees it"));
 }
 
 fn update_camera_texture(app: &mut VoxaApp, ctx: &egui::Context, id: ClientId) -> Option<(egui::TextureId, egui::Vec2)> {
@@ -4241,7 +4284,7 @@ fn video_grid(app: &mut VoxaApp, ui: &mut Ui) {
     if let Some(e) = s.camera.as_ref().and_then(|c| c.error.lock().clone()) {
         s.camera = None;
         s.conn.send(C2S::StopCamera);
-        s.log(EventKind::Error, format!("Camera: {e}"));
+        s.log(EventKind::Error, tf!("Camera: {e}"; e = e));
     }
     let ch = s.my_channel();
     if ch == NO_CHANNEL {
@@ -4351,14 +4394,14 @@ fn video_grid(app: &mut VoxaApp, ui: &mut Ui) {
                 if resp.clicked() {
                     clicked = Some(*id);
                 }
-                resp.on_hover_text(if focus.is_some() { "Click to show everyone" } else { "Click to show large" });
+                resp.on_hover_text(if focus.is_some() { t!("Click to show everyone") } else { t!("Click to show large") });
             }
             ui.allocate_rect(area, Sense::hover());
             // Voice (UDP, ChaCha20-Poly1305 with a fresh key per connection) and video (the
             // Noise-encrypted connection) are both encrypted on the way.
             let lock = egui::Rect::from_min_size(area.left_top() + egui::vec2(4.0, 4.0), egui::vec2(110.0, 18.0));
-            ui.put(lock, egui::Label::new(RichText::new("🔒 Encrypted").small().color(Color32::from_gray(170))))
-                .on_hover_text("Voice and video are encrypted between every member and the server (like all Voxa traffic)");
+            ui.put(lock, egui::Label::new(RichText::new(t!("🔒 Encrypted")).small().color(Color32::from_gray(170))))
+                .on_hover_text(t!("Voice and video are encrypted between every member and the server (like all Voxa traffic)"));
             if hidden > 0 && focus.is_none() {
                 let txt = format!("+{hidden} more in the call");
                 let r = egui::Rect::from_min_size(area.right_bottom() + egui::vec2(-150.0, -26.0), egui::vec2(146.0, 22.0));
@@ -4414,8 +4457,8 @@ fn player_view(app: &mut VoxaApp, ui: &mut Ui) {
         });
         ui.label(RichText::new(crate::share_picker::ellipsize(&title, 70)).color(Color32::WHITE)).on_hover_text(&title);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            close = icon_button(ui, "✖", "Close the video", Some(Color32::WHITE)).clicked();
-            toggle_full = icon_button(ui, if full { "🗗" } else { "⛶" }, if full { "Exit full view" } else { "Full view" }, Some(Color32::WHITE)).clicked();
+            close = icon_button(ui, "✖", t!("Close the video"), Some(Color32::WHITE)).clicked();
+            toggle_full = icon_button(ui, if full { "🗗" } else { "⛶" }, if full { t!("Exit full view") } else { t!("Full view") }, Some(Color32::WHITE)).clicked();
             if icon_button(ui, "🌐", &format!("Open on {}", v.site.name()), Some(Color32::WHITE)).clicked() {
                 crate::markdown::open_link(&v.url);
             }
@@ -4424,7 +4467,7 @@ fn player_view(app: &mut VoxaApp, ui: &mut Ui) {
     let size = ui.available_size();
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     if let Some(e) = app.player.error.clone() {
-        ui.put(rect.shrink(20.0), egui::Label::new(RichText::new(format!("{e}\n\nUse 🌐 to watch it on {} instead.", v.site.name())).color(Color32::WHITE)));
+        ui.put(rect.shrink(20.0), egui::Label::new(RichText::new(tf!("{e}\n\nUse 🌐 to watch it on {} instead.", v.site.name(); e = e)).color(Color32::WHITE)));
     } else {
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, "Loading video...", FontId::proportional(14.0), Color32::GRAY);
         app.player.rect = Some(rect);
@@ -4447,33 +4490,33 @@ fn set_screen_full(app: &mut VoxaApp, ctx: &egui::Context, on: bool) {
 fn stream_view(app: &mut VoxaApp, ui: &mut Ui, id: ClientId, fullscreen: bool) {
     let ctx = ui.ctx().clone();
     let mine = app.sess.as_ref().map(|s| s.me == id).unwrap_or(false);
-    let name = if mine { "Your stream".to_string() } else { app.sess.as_ref().map(|s| s.client_name(id)).unwrap_or_default() };
+    let name = if mine { t!("Your stream").to_string() } else { app.sess.as_ref().map(|s| s.client_name(id)).unwrap_or_default() };
     let title = app.sess.as_ref().and_then(|s| s.clients.get(&id)).and_then(|c| c.streaming.as_ref()).map(|st| st.title.clone()).unwrap_or_default();
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         Frame::new().fill(RED).corner_radius(4).inner_margin(Margin::symmetric(5, 1)).show(ui, |ui| {
-            ui.label(RichText::new("LIVE").small().strong().color(Color32::WHITE));
+            ui.label(RichText::new(t!("LIVE")).small().strong().color(Color32::WHITE));
         });
         ui.label(RichText::new(format!("{name} - {title}")).color(Color32::WHITE));
         if mine {
-            ui.label(RichText::new("preview · this is what viewers see").small().color(Color32::from_gray(170)));
+            ui.label(RichText::new(t!("preview · this is what viewers see")).small().color(Color32::from_gray(170)));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, "✖", if mine { "Hide my preview (keeps streaming)" } else { "Stop watching" }, Some(Color32::WHITE)).clicked() {
+            if icon_button(ui, "✖", if mine { t!("Hide my preview (keeps streaming)") } else { t!("Stop watching") }, Some(Color32::WHITE)).clicked() {
                 app.actions.push(Action::Watch(id, false));
             }
             let full_screen = app.screen_fullscreen;
-            if icon_button(ui, "🖵", if full_screen { "Exit full screen (Esc)" } else { "Full screen (whole monitor) - or double-click the picture" }, Some(Color32::WHITE)).clicked() {
+            if icon_button(ui, "🖵", if full_screen { t!("Exit full screen (Esc)") } else { t!("Full screen (whole monitor) - or double-click the picture") }, Some(Color32::WHITE)).clicked() {
                 app.fullscreen_stream = Some(id);
                 set_screen_full(app, &ctx, !full_screen);
             }
             if full_screen {
                 // Full view controls are hidden in full screen.
             } else if fullscreen {
-                if icon_button(ui, "🗗", "Exit full view", Some(Color32::WHITE)).clicked() {
+                if icon_button(ui, "🗗", t!("Exit full view"), Some(Color32::WHITE)).clicked() {
                     app.fullscreen_stream = None;
                 }
-            } else if icon_button(ui, "⛶", "Full view", Some(Color32::WHITE)).clicked() {
+            } else if icon_button(ui, "⛶", t!("Full view"), Some(Color32::WHITE)).clicked() {
                 app.fullscreen_stream = Some(id);
             }
             // Stream sound: mute button and volume (only for other people's streams).
@@ -4482,7 +4525,7 @@ fn stream_view(app: &mut VoxaApp, ui: &mut Ui, id: ClientId, fullscreen: bool) {
                 let silent = vol <= 0.0;
                 ui.spacing_mut().slider_width = 70.0;
                 ui.add(egui::Slider::new(&mut vol, 0.0..=2.0).show_value(false)).on_hover_text(format!("Stream volume: {:.0}%", vol * 100.0));
-                if icon_button(ui, if silent { "🔇" } else { "🔊" }, if silent { "Unmute the stream's sound" } else { "Mute the stream's sound" }, Some(Color32::WHITE)).clicked() {
+                if icon_button(ui, if silent { "🔇" } else { "🔊" }, if silent { t!("Unmute the stream's sound") } else { t!("Mute the stream's sound") }, Some(Color32::WHITE)).clicked() {
                     vol = if silent { 1.0 } else { 0.0 };
                 }
                 app.voice_shared.stream_volumes.lock().insert(id, vol);
@@ -4678,7 +4721,7 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         Action::JoinCall(ch, pw) => {
             let Some(s) = &mut app.sess else { return };
             if !s.channels.contains_key(&ch) {
-                s.log(EventKind::Info, "This call has ended");
+                s.log(EventKind::Info, t!("This call has ended"));
             } else if s.my_channel() != ch {
                 s.conn.send(C2S::SwitchChannel { channel: ch, password: Some(pw) });
             }
@@ -4693,7 +4736,7 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
             if s.streamer.is_some() {
                 s.streamer = None;
                 s.conn.send(C2S::StopStream);
-                s.log(EventKind::Info, "You stopped sharing your screen");
+                s.log(EventKind::Info, t!("You stopped sharing your screen"));
             } else {
                 let s = app.sess.as_ref().unwrap();
                 app.dlg.open(dialogs::Open::Share, &app.settings, s);
@@ -4804,9 +4847,9 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         Action::SendImage(target, src) => {
             let Some(s) = &mut app.sess else { return };
             if !s.supports("1.5.0") {
-                s.log(EventKind::Error, "This server can't store images yet - it needs Voxa Server 1.5.0 or newer.");
+                s.log(EventKind::Error, t!("This server can't store images yet - it needs Voxa Server 1.5.0 or newer."));
             } else if !s.bulk_ready {
-                s.log(EventKind::Error, "The file connection isn't ready yet - try again in a moment.");
+                s.log(EventKind::Error, t!("The file connection isn't ready yet - try again in a moment."));
             } else {
                 s.images.send(s.conn.bulk_tx.clone(), target, src);
             }

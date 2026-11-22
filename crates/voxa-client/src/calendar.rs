@@ -9,6 +9,7 @@
 //! any channel (permissions of the server groups). Its events can name a channel to meet
 //! in, with a Join button.
 
+use crate::i18n::{t, tf};
 use chrono::{Datelike, Local, NaiveDate, TimeZone, Timelike};
 use egui::{Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke, Ui};
 use voxa_proto::*;
@@ -161,7 +162,7 @@ pub fn view(s: &mut Session, ui: &mut Ui, ch: ChannelId) {
             if can_manage {
                 match &mut ui_state.new_calendar {
                     Some(name) => {
-                        let r = ui.add(egui::TextEdit::singleline(name).hint_text("Calendar name").char_limit(40).desired_width(160.0));
+                        let r = ui.add(egui::TextEdit::singleline(name).hint_text(t!("Calendar name")).char_limit(40).desired_width(160.0));
                         let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if (ui.button("✔").clicked() || enter) && !name.trim().is_empty() {
                             send.push(C2S::CreateCalendar { channel: ch, name: name.trim().to_string() });
@@ -171,7 +172,7 @@ pub fn view(s: &mut Session, ui: &mut Ui, ch: ChannelId) {
                         }
                     }
                     None => {
-                        if ui.button("➕ Calendar").on_hover_text(if server { "Add a calendar to the server calendar" } else { "Add a calendar to this channel" }).clicked() {
+                        if ui.button(t!("➕ Calendar")).on_hover_text(if server { t!("Add a calendar to the server calendar") } else { t!("Add a calendar to this channel") }).clicked() {
                             ui_state.new_calendar = Some(String::new());
                         }
                     }
@@ -188,18 +189,18 @@ pub fn view(s: &mut Session, ui: &mut Ui, ch: ChannelId) {
                             }
                         }
                         None => {
-                            if ui.button("✏").on_hover_text("Rename this calendar").clicked() {
+                            if ui.button("✏").on_hover_text(t!("Rename this calendar")).clicked() {
                                 ui_state.rename = calendars.iter().find(|c| c.id == sel).map(|c| c.name.clone());
                             }
                             if ui_state.confirm_delete {
-                                if ui.add(egui::Button::new(RichText::new("Delete it and its events").color(Color32::WHITE)).fill(crate::ui::RED)).clicked() {
+                                if ui.add(egui::Button::new(RichText::new(t!("Delete it and its events")).color(Color32::WHITE)).fill(crate::ui::RED)).clicked() {
                                     send.push(C2S::DeleteCalendar { channel: ch, id: sel });
                                     ui_state.confirm_delete = false;
                                 }
-                                if ui.button("Keep").clicked() {
+                                if ui.button(t!("Keep")).clicked() {
                                     ui_state.confirm_delete = false;
                                 }
-                            } else if ui.button("🗑").on_hover_text("Delete this calendar").clicked() {
+                            } else if ui.button("🗑").on_hover_text(t!("Delete this calendar")).clicked() {
                                 ui_state.confirm_delete = true;
                             }
                         }
@@ -209,10 +210,10 @@ pub fn view(s: &mut Session, ui: &mut Ui, ch: ChannelId) {
         });
         // View, month and new event.
         ui.horizontal(|ui| {
-            if ui.selectable_label(!ui_state.month_view, "Upcoming").clicked() {
+            if ui.selectable_label(!ui_state.month_view, t!("Upcoming")).clicked() {
                 ui_state.month_view = false;
             }
-            if ui.selectable_label(ui_state.month_view, "Month").clicked() {
+            if ui.selectable_label(ui_state.month_view, t!("Month")).clicked() {
                 ui_state.month_view = true;
             }
             if ui_state.month_view {
@@ -227,13 +228,13 @@ pub fn view(s: &mut Session, ui: &mut Ui, ch: ChannelId) {
                 if ui.small_button("▶").clicked() {
                     ui_state.month = Some(if m == 12 { (y + 1, 1) } else { (y, m + 1) });
                 }
-                if ui.small_button("Today").clicked() {
+                if ui.small_button(t!("Today")).clicked() {
                     ui_state.month = None;
                 }
             }
             if can_events {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(egui::Button::new(RichText::new("➕ New event").color(Color32::WHITE)).fill(accent())).clicked() {
+                    if ui.add(egui::Button::new(RichText::new(t!("➕ New event")).color(Color32::WHITE)).fill(accent())).clicked() {
                         let tomorrow = Local::now().date_naive().succ_opt().unwrap_or(Local::now().date_naive());
                         ui_state.form = Some(EventForm::new(sel, tomorrow));
                     }
@@ -281,7 +282,7 @@ fn upcoming(ui: &mut Ui, events: &[&CalendarEvent], st: &mut CalendarUi, uid: &s
     let now = now();
     let list: Vec<&&CalendarEvent> = events.iter().filter(|e| e.start + e.duration_min as u64 * 60 >= now).collect();
     if list.is_empty() {
-        ui.label(RichText::new("Nothing arranged yet.").color(t.dim));
+        ui.label(RichText::new(t!("Nothing arranged yet.")).color(t.dim));
         return;
     }
     let mut day = None;
@@ -301,12 +302,12 @@ fn upcoming(ui: &mut Ui, events: &[&CalendarEvent], st: &mut CalendarUi, uid: &s
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&e.title).strong());
                         if live {
-                            ui.label(RichText::new("● now").small().color(GREEN));
+                            ui.label(RichText::new(t!("● now")).small().color(GREEN));
                         }
                     });
                     let people = match e.max_people {
-                        Some(m) => format!("👥 {}/{m} going", e.going()),
-                        None => format!("👥 {} going", e.going()),
+                        Some(m) => tf!("👥 {}/{m} going", e.going(); m = m),
+                        None => tf!("👥 {} going", e.going()),
                     };
                     ui.label(RichText::new(format!("{} · {people} · by {}", duration_text(e.duration_min), e.created_by)).small().color(t.dim));
                     if let Some((_, place)) = meet.get(&e.id).and_then(|m| places.iter().find(|(id, _)| id == m)) {
@@ -320,7 +321,7 @@ fn upcoming(ui: &mut Ui, events: &[&CalendarEvent], st: &mut CalendarUi, uid: &s
                 }
             });
         });
-        if r.response.interact(Sense::click()).on_hover_text("Open").clicked() {
+        if r.response.interact(Sense::click()).on_hover_text(t!("Open")).clicked() {
             st.open_event = Some(e.id);
         }
         ui.add_space(4.0);
@@ -339,7 +340,7 @@ fn month_grid(ui: &mut Ui, events: &[&CalendarEvent], st: &mut CalendarUi, can_e
     let h = (w * 0.75).clamp(56.0, 110.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        for d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] {
+        for d in [t!("Mon"), t!("Tue"), t!("Wed"), t!("Thu"), t!("Fri"), t!("Sat"), t!("Sun")] {
             ui.add_sized([w, 18.0], egui::Label::new(RichText::new(d).small().color(t.dim)));
         }
     });
@@ -385,7 +386,7 @@ fn month_grid(ui: &mut Ui, events: &[&CalendarEvent], st: &mut CalendarUi, can_e
         });
     }
     if can_events {
-        ui.label(RichText::new("Double-click a day to arrange something on it.").small().color(t.dim));
+        ui.label(RichText::new(t!("Double-click a day to arrange something on it.")).small().color(t.dim));
     }
 }
 
@@ -397,11 +398,11 @@ fn event_window(ctx: &egui::Context, e: &CalendarEvent, st: &mut CalendarUi, uid
     let over = e.start + e.duration_min as u64 * 60 < now();
     egui::Window::new(format!("📅 {}", e.title)).open(&mut open).collapsible(false).resizable(true).default_width(420.0).show_fill(ctx, |ui| {
         ui.label(RichText::new(format!("{} · {}", when(e.start), duration_text(e.duration_min))).strong());
-        ui.label(RichText::new(format!("Arranged by {}", e.created_by)).small().color(t.dim));
+        ui.label(RichText::new(tf!("Arranged by {}", e.created_by)).small().color(t.dim));
         if let Some((place, name)) = &meet {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("📍 Meet in {name}")).strong());
-                if ui.button("➡ Join").on_hover_text("Go to this channel").clicked() {
+                ui.label(RichText::new(tf!("📍 Meet in {name}"; name = name)).strong());
+                if ui.button(t!("➡ Join")).on_hover_text(t!("Go to this channel")).clicked() {
                     st.join = Some(*place);
                 }
             });
@@ -416,12 +417,12 @@ fn event_window(ctx: &egui::Context, e: &CalendarEvent, st: &mut CalendarUi, uid
         let not: Vec<&Rsvp> = e.rsvps.iter().filter(|r| r.answer == RsvpAnswer::NotGoing).collect();
         let names = |v: &[&Rsvp]| if v.is_empty() { "-".to_string() } else { v.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ") };
         let cap = e.max_people.map(|m| format!("/{m}")).unwrap_or_default();
-        ui.label(format!("✔ Going ({}{cap}): {}", going.len(), names(&going)));
-        ui.label(format!("❔ Maybe ({}): {}", maybe.len(), names(&maybe)));
-        ui.label(format!("✖ Can't ({}): {}", not.len(), names(&not)));
+        ui.label(tf!("✔ Going ({}{cap}): {}", going.len(), names(&going); cap = cap));
+        ui.label(tf!("❔ Maybe ({}): {}", maybe.len(), names(&maybe)));
+        ui.label(tf!("✖ Can't ({}): {}", not.len(), names(&not)));
         ui.add_space(8.0);
         if over {
-            ui.label(RichText::new("This event is over.").color(t.dim));
+            ui.label(RichText::new(t!("This event is over.")).color(t.dim));
         } else if can_rsvp {
             let mine = my_answer(e, uid);
             let full = e.max_people.is_some_and(|m| going.len() >= m as usize) && mine != Some(RsvpAnswer::Going);
@@ -436,18 +437,18 @@ fn event_window(ctx: &egui::Context, e: &CalendarEvent, st: &mut CalendarUi, uid
                 }
             });
             if full {
-                ui.label(RichText::new("It is full.").small().color(YELLOW));
+                ui.label(RichText::new(t!("It is full.")).small().color(YELLOW));
             }
         } else {
-            ui.label(RichText::new("You can see this calendar, but not answer invitations.").small().color(t.dim));
+            ui.label(RichText::new(t!("You can see this calendar, but not answer invitations.")).small().color(t.dim));
         }
         if can_events {
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("✏ Edit").clicked() {
+                if ui.button(t!("✏ Edit")).clicked() {
                     st.form = Some(EventForm::from_event(e, meet.as_ref().map(|m| m.0)));
                 }
-                if ui.button("🗑 Delete").clicked() {
+                if ui.button(t!("🗑 Delete")).clicked() {
                     send.push(C2S::DeleteEvent { channel: ch, id: e.id });
                     st.open_event = None;
                 }
@@ -465,14 +466,14 @@ fn form_window(ctx: &egui::Context, st: &mut CalendarUi, calendars: &[CalendarIn
     let mut open = true;
     let mut save = false;
     let mut cancel = false;
-    let title = if f.id == 0 { "New event" } else { "Change event" };
+    let title = if f.id == 0 { t!("New event") } else { t!("Change event") };
     egui::Window::new(title).open(&mut open).collapsible(false).resizable(true).default_width(440.0).show_fill(ctx, |ui| {
         egui::Grid::new("evform").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-            ui.label("What:");
-            ui.add(egui::TextEdit::singleline(&mut f.title).hint_text("e.g. Raid night").char_limit(100).desired_width(260.0));
+            ui.label(t!("What:"));
+            ui.add(egui::TextEdit::singleline(&mut f.title).hint_text(t!("e.g. Raid night")).char_limit(100).desired_width(260.0));
             ui.end_row();
             if calendars.len() > 1 {
-                ui.label("Calendar:");
+                ui.label(t!("Calendar:"));
                 let cur = calendars.iter().find(|c| c.id == f.calendar).map(|c| c.name.clone()).unwrap_or_default();
                 egui::ComboBox::from_id_salt("evcal").selected_text(cur).show_ui(ui, |ui| {
                     for c in calendars {
@@ -481,7 +482,7 @@ fn form_window(ctx: &egui::Context, st: &mut CalendarUi, calendars: &[CalendarIn
                 });
                 ui.end_row();
             }
-            ui.label("Day:");
+            ui.label(t!("Day:"));
             ui.horizontal(|ui| {
                 let (mut y, mut m, mut d) = (f.date.year(), f.date.month(), f.date.day());
                 ui.add(egui::DragValue::new(&mut d).range(1..=31).prefix("day "));
@@ -503,15 +504,15 @@ fn form_window(ctx: &egui::Context, st: &mut CalendarUi, calendars: &[CalendarIn
                 ui.label(RichText::new(f.date.format("%A").to_string()).weak());
             });
             ui.end_row();
-            ui.label("Time:");
+            ui.label(t!("Time:"));
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut f.hour).range(0..=23).custom_formatter(|v, _| format!("{:02}", v as u32)));
                 ui.label(":");
                 ui.add(egui::DragValue::new(&mut f.minute).range(0..=59).speed(0.5).custom_formatter(|v, _| format!("{:02}", v as u32)));
-                ui.label(RichText::new("your local time").weak());
+                ui.label(RichText::new(t!("your local time")).weak());
             });
             ui.end_row();
-            ui.label("How long:");
+            ui.label(t!("How long:"));
             egui::ComboBox::from_id_salt("evdur").selected_text(duration_text(f.duration_min)).show_ui(ui, |ui| {
                 for m in [30u32, 60, 90, 120, 180, 240, 360, 480, 720, 1440] {
                     ui.selectable_value(&mut f.duration_min, m, duration_text(m));
@@ -520,38 +521,38 @@ fn form_window(ctx: &egui::Context, st: &mut CalendarUi, calendars: &[CalendarIn
             ui.end_row();
             // The server calendar: where to meet (a game night in a channel).
             if ch == SERVER_CALENDAR {
-                ui.label("Meet in:");
+                ui.label(t!("Meet in:"));
                 let cur = f.meet.and_then(|m| places.iter().find(|(id, _)| *id == m)).map(|(_, n)| n.clone()).unwrap_or_else(|| "No channel".into());
                 egui::ComboBox::from_id_salt("evmeet").selected_text(cur).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut f.meet, None, "No channel");
+                    ui.selectable_value(&mut f.meet, None, t!("No channel"));
                     for (id, name) in places {
                         ui.selectable_value(&mut f.meet, Some(*id), name);
                     }
                 });
                 ui.end_row();
             }
-            ui.label("People:");
+            ui.label(t!("People:"));
             ui.horizontal(|ui| {
-                ui.checkbox(&mut f.limit, "At most");
+                ui.checkbox(&mut f.limit, t!("At most"));
                 ui.add_enabled(f.limit, egui::DragValue::new(&mut f.max_people).range(1..=1000));
             });
             ui.end_row();
         });
-        ui.label("Details:");
-        ui.add(egui::TextEdit::multiline(&mut f.description).hint_text("Game, server, what to bring...").char_limit(2000).desired_rows(4).desired_width(f32::INFINITY));
+        ui.label(t!("Details:"));
+        ui.add(egui::TextEdit::multiline(&mut f.description).hint_text(t!("Game, server, what to bring...")).char_limit(2000).desired_rows(4).desired_width(f32::INFINITY));
         if let Some(e) = &f.error {
             ui.label(RichText::new(e).color(crate::ui::RED));
         }
         ui.horizontal(|ui| {
-            save = ui.add(egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(accent())).clicked();
-            cancel = ui.button("Cancel").clicked();
+            save = ui.add(egui::Button::new(RichText::new(t!("Save")).color(Color32::WHITE)).fill(accent())).clicked();
+            cancel = ui.button(t!("Cancel")).clicked();
         });
     });
     if save {
         match f.start() {
-            _ if f.title.trim().is_empty() => f.error = Some("Give it a title".into()),
-            None => f.error = Some("That time does not exist on that day (clock change)".into()),
-            Some(start) if f.id == 0 && start + 300 < now() => f.error = Some("That time has passed".into()),
+            _ if f.title.trim().is_empty() => f.error = Some(t!("Give it a title").into()),
+            None => f.error = Some(t!("That time does not exist on that day (clock change)").into()),
+            Some(start) if f.id == 0 && start + 300 < now() => f.error = Some(t!("That time has passed").into()),
             Some(start) => {
                 let event = CalendarEvent {
                         id: f.id,

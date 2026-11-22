@@ -2,6 +2,8 @@
 //! the on-screen keyboard and the device id. Android's own Java API is called through
 //! JNI on the app's NativeActivity.
 
+#[allow(unused_imports)]
+use crate::i18n::k;
 use winit::platform::android::activity::AndroidApp;
 use jni::objects::{JObject, JValue};
 use jni::{JNIEnv, JavaVM};
@@ -248,7 +250,7 @@ enum BarAction {
 
 impl BarAction {
     const ALL: [(&'static str, BarAction); 4] =
-        [("📋 Paste", BarAction::Paste), ("Copy", BarAction::Copy), ("Cut", BarAction::Cut), ("Select all", BarAction::SelectAll)];
+        [(k!("📋 Paste"), BarAction::Paste), (k!("Copy"), BarAction::Copy), (k!("Cut"), BarAction::Cut), (k!("Select all"), BarAction::SelectAll)];
 
     fn event(self) -> Option<egui::Event> {
         Some(match self {
@@ -366,7 +368,7 @@ impl Touch {
                 egui::Frame::new().fill(ui.visuals().window_fill).corner_radius(10).stroke(ui.visuals().window_stroke).inner_margin(egui::Margin::symmetric(6, 4)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         for (i, (label, act)) in BarAction::ALL.into_iter().enumerate() {
-                            let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(15.0), ui.visuals().text_color());
+                            let galley = ui.painter().layout_no_wrap(voxa_proto::i18n::tr(label).to_string(), egui::FontId::proportional(15.0), ui.visuals().text_color());
                             let (rect, _) = ui.allocate_exact_size(galley.size() + egui::vec2(20.0, 18.0), egui::Sense::hover());
                             if pressed == Some(i) {
                                 ui.painter().rect_filled(rect, 6, ui.visuals().widgets.active.bg_fill);

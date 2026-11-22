@@ -71,6 +71,24 @@ server needs a newer version, Voxa tells you and opens the update window.
 * **Frame rate limit:** set it under **Options ▸ Application** (60 fps by default) to
   save GPU on fast monitors.
 
+### Languages (1.38.0)
+* Voxa speaks **41 languages**: English, Chinese (Simplified and Traditional), Hindi,
+  Spanish, French, Arabic, Bengali, Portuguese (Brazil and Portugal), Russian, Urdu,
+  Indonesian, German, Japanese, Turkish, Korean, Vietnamese, Italian, Thai, Persian,
+  Polish, Dutch, Swedish, Norwegian, Danish, Finnish, Czech, Slovak, Hungarian, Romanian,
+  Greek, Ukrainian, Bulgarian, Croatian, Serbian, Slovenian, Lithuanian, Latvian,
+  Estonian and Catalan.
+* It starts in your system's language. Change it in **Options ▸ Application ▸ 🌐
+  Language** (each language is listed in its own name). The same on Android.
+* Translated: everything you see every day (the main window, menus, chat, voice,
+  connecting, Options, accounts, GIFs, the calendar) and the server's usual messages.
+  Some rarely used admin windows are still English.
+* Chinese, Japanese, Korean, Hindi, Bengali, Thai and Arabic letters come from the fonts
+  Windows (or Android) already has.
+* Arabic, Persian and Urdu: the letters are joined and each line reads right to left,
+  but the layout stays as it is (menus on the left). Hindi and Bengali letters that
+  combine into one shape may not always join perfectly.
+* Names, messages and anything people type are never translated.
 ### Voice
 * **Codecs**, chosen per channel:
 
@@ -386,7 +404,14 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   Server ▸ File transfers**.
 
 ### Administration
-* Permissions (server and channel groups), privilege keys, bans, kick, move, poke, talk
+* **View as** (Voxa Server 1.30.0+): see the server as members of other groups see it.
+  Server menu (or your own name) ▸ **👁 View as…**, tick groups such as Guest and press
+  **View as these groups**. The server then really treats you as them: their
+  permissions, the channels they see (hidden channels disappear), their talk and join
+  power, and the default channel group. A yellow bar shows "Viewing as …" with
+  **✖ Stop**; disconnecting ends it too. Nobody else notices.
+  * Only for people who may manage groups, and only groups that give no more than you
+    have (you cannot use it to get more permissions).* Permissions (server and channel groups), privilege keys, bans, kick, move, poke, talk
   power and channel commander.
 * **Bans** (Voxa Server 1.16.0+): ban by **unique ID**, **IP address** and / or
   **hardware**, any combination you tick.

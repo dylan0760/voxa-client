@@ -1,5 +1,7 @@
 //! System tray icon with a context menu (Windows notification area).
 
+#[allow(unused_imports)]
+use crate::i18n::t;
 use std::sync::mpsc::Sender;
 #[cfg(windows)]
 use std::sync::Mutex;
@@ -73,11 +75,11 @@ pub struct Tray {
 impl Tray {
     pub fn new(tooltip: &str, rgba: Vec<u8>, size: u32, app_name: &str) -> Option<Tray> {
         let open = MenuItem::new(format!("Open {app_name}"), true, None);
-        let people = MenuItem::new("People on this server", false, None);
-        let messages = MenuItem::new("Messages", false, None);
-        let mic = CheckMenuItem::new("Mute Microphone", false, false, None);
-        let speakers = CheckMenuItem::new("Mute Speakers", false, false, None);
-        let disconnect = MenuItem::new("Disconnect", false, None);
+        let people = MenuItem::new(t!("People on this server"), false, None);
+        let messages = MenuItem::new(t!("Messages"), false, None);
+        let mic = CheckMenuItem::new(t!("Mute Microphone"), false, false, None);
+        let speakers = CheckMenuItem::new(t!("Mute Speakers"), false, false, None);
+        let disconnect = MenuItem::new(t!("Disconnect"), false, None);
         let quit = MenuItem::new(format!("Quit {app_name}"), true, None);
         let menu = Menu::new();
         menu.append_items(&[

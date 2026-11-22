@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use crate::i18n::{t, tf};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -355,6 +356,8 @@ pub struct Session {
     pub recovery_codes: Option<Vec<String>>,
     /// Which server groups do not see which channels (for people who edit channels).
     pub hidden_channels: HashMap<ChannelId, Vec<GroupId>>,
+    /// "View as" (servers 1.30.0+): the server groups I preview the server as.
+    pub view_as: Option<Vec<GroupId>>,
     /// Bans of the ban list that include hardware.
     pub hw_bans: HashSet<u64>,
     /// You were set away by Voxa (idle), so coming back clears it.
@@ -427,6 +430,15 @@ impl Session {
     }
 
     pub fn server_perms_of(&self, c: &ClientInfo) -> u64 {
+        // Previewing the server as some groups: exactly what they give.
+        if let (true, Some(v)) = (c.id == self.me, &self.view_as) {
+            return v.iter().filter_map(|g| self.groups.get(g)).fold(0, |a, g| a | g.perms);
+        }
+        self.real_server_perms_of(c)
+    }
+
+    /// My server permissions without "View as" (what I may preview).
+    pub fn real_server_perms_of(&self, c: &ClientInfo) -> u64 {
         // Until I sign in to my account (when the server wants it): only Guest's.
         if c.id == self.me && self.account_limited() {
             return self.groups.get(&GUEST_GROUP).map(|g| g.perms).unwrap_or(0);
@@ -647,10 +659,15 @@ impl Session {
 
     pub fn perms(&self) -> u64 {
         let Some(me) = self.me() else { return 0 };
-        if self.account_limited() {
+        if self.account_limited() && self.view_as.is_none() {
             return self.server_perms_of(me);
         }
-        self.server_perms_of(me) | self.groups.get(&me.channel_group).map(|g| g.perms).unwrap_or(0)
+        // Viewing as groups: the server's default channel group, like the server does.
+        let cg = match (&self.view_as, &self.server) {
+            (Some(_), Some(i)) => i.default_channel_group,
+            _ => me.channel_group,
+        };
+        self.server_perms_of(me) | self.groups.get(&cg).map(|g| g.perms).unwrap_or(0)
     }
 
     pub fn has(&self, bit: u64) -> bool {
@@ -726,7 +743,7 @@ impl Session {
         self.clients
             .get(&id)
             .map(|c| c.nickname.clone())
-            .unwrap_or_else(|| format!("Client {id}"))
+            .unwrap_or_else(|| tf!("Client {id}"; id = id))
     }
 
     pub fn log(&mut self, kind: EventKind, text: impl Into<String>) {
@@ -812,7 +829,7 @@ impl Session {
                 let mine = e.rsvps.iter().any(|r| r.uid == self.my_uid && r.answer == RsvpAnswer::Going);
                 if mine && e.start > now && e.start - now <= 600 && !self.reminded.contains(&(c, e.id)) {
                     self.reminded.insert((c, e.id));
-                    out.push(format!("Starting soon ({}): {}", crate::calendar::when(e.start), e.title));
+                    out.push(tf!("Starting soon ({}): {}", crate::calendar::when(e.start), e.title));
                 }
             }
         }
@@ -932,7 +949,8 @@ impl VoxaApp {
         let settings = Settings::load();
         #[cfg(windows)]
         crate::msgwin::remember_main(cc);
-        crate::ui::install_fonts(&cc.egui_ctx);
+        // The language first: the fonts follow it.
+        crate::i18n::apply(&crate::i18n::chosen(settings.language.as_deref()), &cc.egui_ctx);
         crate::ui::apply_style(&cc.egui_ctx, &settings);
         let (tray_tx, tray_rx) = std::sync::mpsc::channel();
         crate::tray::install_handlers(tray_tx.clone(), cc.egui_ctx.clone());
@@ -1069,6 +1087,42 @@ impl VoxaApp {
                 if let Some(d) = &mut self.dlg.options {
                     d.tab = 4;
                     d.app_tab = 1;
+                }
+            }
+            // Options ▸ Application (the language list; for screenshots).
+            "options-app" => {
+                crate::ui::apply(self, crate::ui::Action::Dialog(crate::dialogs::Open::Options));
+                if let Some(d) = &mut self.dlg.options {
+                    d.tab = 4;
+                    d.app_tab = 0;
+                }
+            }
+            // "View as" Guest with its bar, and the View As window (VOXA_PRIVKEY makes me an
+            // admin first; for screenshots).
+            "view-as" => {
+                static STEP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+                use std::sync::atomic::Ordering::Relaxed;
+                self.debug_done = false;
+                let Some(s) = &mut self.sess else { return };
+                if !s.welcomed || s.groups.is_empty() {
+                    return;
+                }
+                match STEP.load(Relaxed) {
+                    0 => {
+                        if let Ok(k) = std::env::var("VOXA_PRIVKEY") {
+                            s.conn.send(C2S::UsePrivilegeKey(k));
+                        }
+                        STEP.store(1, Relaxed);
+                    }
+                    1 if s.my_server_perms() & perm::GROUP_MANAGE != 0 => {
+                        s.conn.send(C2S::ViewAs(Some(vec![GUEST_GROUP])));
+                        STEP.store(2, Relaxed);
+                    }
+                    2 if s.view_as.is_some() => {
+                        crate::ui::apply(self, crate::ui::Action::Dialog(crate::dialogs::Open::ViewAs));
+                        self.debug_done = true;
+                    }
+                    _ => {}
                 }
             }
             "groups" => match &self.sess {
@@ -1747,10 +1801,10 @@ impl VoxaApp {
             let connected = me.is_some();
             let tip = match &self.sess {
                 Some(s) => match &s.server {
-                    Some(i) => format!("Voxa - {}", i.name),
-                    None => "Voxa - connecting...".into(),
+                    Some(i) => tf!("Voxa - {}", i.name),
+                    None => t!("Voxa - connecting...").into(),
                 },
-                None => "Voxa - not connected".into(),
+                None => t!("Voxa - not connected").into(),
             };
             t.sync(connected, me.map(|m| m.input_muted).unwrap_or(false), me.map(|m| m.output_muted).unwrap_or(false), &tip);
         }
@@ -1810,7 +1864,7 @@ impl VoxaApp {
                     let name = s.dm_name(id);
                     s.dms[id].log.lines.push(ChatLine::Event {
                         ts: now_unix(),
-                        text: format!("{name} is offline. This server cannot keep messages for later (it needs Voxa Server 1.13.0)."),
+                        text: tf!("{name} is offline. This server cannot keep messages for later (it needs Voxa Server 1.13.0)."; name = name),
                         kind: EventKind::Warn,
                     });
                 }
@@ -1823,7 +1877,7 @@ impl VoxaApp {
                 let name = s.dm_name(id);
                 s.dms[id].log.lines.clear();
                 crate::dm_store::delete(&s.server_key, &s.dms[id].uid);
-                s.dms[id].log.lines.push(ChatLine::Event { ts: now_unix(), text: format!("Your conversation with {name} was deleted from this PC"), kind: EventKind::Info });
+                s.dms[id].log.lines.push(ChatLine::Event { ts: now_unix(), text: tf!("Your conversation with {name} was deleted from this PC"; name = name), kind: EventKind::Info });
             }
             other => s.conn.send(other),
         }
@@ -1903,6 +1957,7 @@ impl VoxaApp {
             mfa_setup: None,
             recovery_codes: None,
             hidden_channels: HashMap::new(),
+            view_as: None,
             hw_bans: HashSet::new(),
             auto_away: false,
             presences: HashMap::new(),
@@ -1926,7 +1981,7 @@ impl VoxaApp {
             pins_open: false,
             stage: Stage::default(),
         };
-        sess.log(EventKind::Info, format!("Trying to connect to {} ({})...", req.label, req.address));
+        sess.log(EventKind::Info, tf!("Trying to connect to {} ({})...", req.label, req.address));
         self.sess = Some(sess);
         self.last_request = Some(req);
     }
@@ -2045,7 +2100,7 @@ impl VoxaApp {
                     }
                     s.voice = Some(v);
                 }
-                Err(e) => s.log(EventKind::Error, format!("Voice could not be started: {e}")),
+                Err(e) => s.log(EventKind::Error, tf!("Voice could not be started: {e}"; e = e)),
             }
         }
     }
@@ -2063,7 +2118,7 @@ impl VoxaApp {
             if let Some(e) = err {
                 s.streamer = None;
                 s.conn.send(C2S::StopStream);
-                s.log(EventKind::Warn, format!("Screen sharing stopped: {e}"));
+                s.log(EventKind::Warn, tf!("Screen sharing stopped: {e}"; e = e));
             }
         }
     }
@@ -2122,7 +2177,7 @@ impl VoxaApp {
                     self.textures.clear();
                     self.dlg.close_session_dialogs();
                     self.offline_log = ChatLog::default();
-                    let text = if was_welcomed { format!("Disconnected: {reason}") } else { format!("Failed to connect: {reason}") };
+                    let text = if was_welcomed { tf!("Disconnected: {reason}"; reason = reason) } else { tf!("Failed to connect: {reason}"; reason = reason) };
                     // The startup connection: the network or the server may not be up yet
                     // (right after signing in to Windows). Retried quietly, unless the server
                     // turned us away for a reason that waiting won't fix.
@@ -2130,7 +2185,7 @@ impl VoxaApp {
                     let lasting = reason.starts_with(voxa_proto::UPDATE_REQUIRED) || ["banned", "password", "identity", "fingerprint"].iter().any(|w| lower.contains(w));
                     if let Some(sc) = self.startup_connect.as_mut().filter(|sc| !was_welcomed && !lasting && sc.attempts < STARTUP_TRIES) {
                         sc.retry_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
-                        let msg = format!("Could not reach the server ({reason}). Trying again in 10 seconds ({}/{STARTUP_TRIES})...", sc.attempts);
+                        let msg = tf!("Could not reach the server ({reason}). Trying again in 10 seconds ({}/{STARTUP_TRIES})...", sc.attempts; reason = reason, STARTUP_TRIES = STARTUP_TRIES);
                         self.offline_log.lines.push(ChatLine::Event { ts: now_unix(), text: msg, kind: EventKind::Warn });
                         self.ctx.request_repaint_after(std::time::Duration::from_secs(1));
                         return;
@@ -2141,7 +2196,7 @@ impl VoxaApp {
                         // The server needs a newer Voxa: offer the update right away.
                         self.dlg.update = true;
                         self.updater.check();
-                        self.dlg.error = Some(format!("{}\n\nThe update window is open: install the update, then connect again.", reason.trim_start_matches(voxa_proto::UPDATE_REQUIRED)));
+                        self.dlg.error = Some(tf!("{}\n\nThe update window is open: install the update, then connect again.", reason.trim_start_matches(voxa_proto::UPDATE_REQUIRED)));
                     } else if !reason.starts_with("Disconnected") && reason != "Server identity changed" {
                         self.dlg.error = Some(text);
                     }
@@ -2228,7 +2283,7 @@ impl VoxaApp {
                     t.state = TransferState::Done;
                     refresh = Some(t.channel);
                     let name = t.name.clone();
-                    s.log(EventKind::Good, format!("Upload of \"{name}\" finished"));
+                    s.log(EventKind::Good, tf!("Upload of \"{name}\" finished"; name = name));
                 }
                 if let (Some(ch), Some(fb)) = (refresh, &self.dlg.files) {
                     if fb.channel == ch {
@@ -2249,7 +2304,7 @@ impl VoxaApp {
                             t.state = TransferState::Active;
                         }
                         Err(e) => {
-                            t.fail(format!("Cannot save file: {e}"));
+                            t.fail(tf!("Cannot save file: {e}"; e = e));
                             cancel = true;
                         }
                     }
@@ -2264,7 +2319,7 @@ impl VoxaApp {
                     use std::io::Write;
                     if let Some(f) = &mut t.file {
                         if let Err(e) = f.write_all(&data) {
-                            t.fail(format!("Write failed: {e}"));
+                            t.fail(tf!("Write failed: {e}"; e = e));
                             cancel = true;
                         } else {
                             t.done.fetch_add(data.len() as u64, Ordering::Relaxed);
@@ -2282,10 +2337,10 @@ impl VoxaApp {
                     }
                     let got = t.done.load(Ordering::Relaxed);
                     if got != t.size {
-                        t.fail(format!("Incomplete download ({} of {})", crate::ui::fmt_size(got), crate::ui::fmt_size(t.size)));
+                        t.fail(tf!("Incomplete download ({} of {})", crate::ui::fmt_size(got), crate::ui::fmt_size(t.size)));
                     } else {
                         t.state = TransferState::Done;
-                        let msg = format!("Downloaded \"{}\" to {}", t.name, t.local.display());
+                        let msg = tf!("Downloaded \"{}\" to {}", t.name, t.local.display());
                         s.log(EventKind::Good, msg);
                     }
                 }
@@ -2299,7 +2354,7 @@ impl VoxaApp {
             BulkS2C::TransferError { id, message } => {
                 if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.is_running()) {
                     t.fail(message.clone());
-                    let msg = format!("Transfer of \"{}\" failed: {message}", t.name);
+                    let msg = tf!("Transfer of \"{}\" failed: {message}", t.name; message = message);
                     s.log(EventKind::Error, msg);
                 }
             }
@@ -2323,7 +2378,7 @@ impl VoxaApp {
                 s.channels = channels.into_iter().map(|c| (c.id, c)).collect();
                 s.clients = clients.into_iter().map(|c| (c.id, c)).collect();
                 s.groups = groups.into_iter().map(|g| (g.id, g)).collect();
-                s.log(EventKind::Good, format!("Connected to server \"{}\"", server.name));
+                s.log(EventKind::Good, tf!("Connected to server \"{}\"", server.name));
                 if !server.welcome_message.is_empty() {
                     s.log(EventKind::Info, server.welcome_message.clone());
                 }
@@ -2376,7 +2431,7 @@ impl VoxaApp {
                 self.update_voice_flags();
                 return;
             }
-            S2C::Refused(r) => s.log(EventKind::Error, r),
+            S2C::Refused(r) => s.log(EventKind::Error, crate::i18n::server_text(&r)),
             S2C::Error(e) => {
                 // This device's sign-in expired: forget it and ask for the password.
                 if e.contains("sign-in has expired") {
@@ -2386,10 +2441,11 @@ impl VoxaApp {
                         self.dlg.account = Some(Default::default());
                     }
                 }
+                let e = crate::i18n::server_text(&e);
                 s.log(EventKind::Error, e.clone());
                 self.dlg.error = Some(e);
             }
-            S2C::Notice(n) => s.log(EventKind::Info, n),
+            S2C::Notice(n) => s.log(EventKind::Info, crate::i18n::server_text(&n)),
             S2C::AccountPolicy(p) => s.account_policy = Some(p),
             S2C::AccountState(a) => {
                 let key = account_key(&s.req.address, &s.my_uid);
@@ -2430,6 +2486,7 @@ impl VoxaApp {
                 s.recovery_codes = Some(codes);
             }
             S2C::HiddenChannels(list) => s.hidden_channels = list.into_iter().collect(),
+            S2C::ViewingAs(groups) => s.view_as = groups,
             S2C::GifSearch(provider) => s.gif.provider = Some(provider),
             S2C::Gifs { query, items, next } => s.gif.got(query, items, next),
             S2C::ServerGifs { query, items, categories, next, total } => s.gif.got_library(query, items, categories, next, total),
@@ -2451,11 +2508,11 @@ impl VoxaApp {
                 s.tcp_ping = now.saturating_sub(t) as u32;
             }
             S2C::ServerUpdated(info) => {
-                s.log(EventKind::Info, "Server settings were changed");
+                s.log(EventKind::Info, t!("Server settings were changed"));
                 s.server = Some(info);
             }
             S2C::ChannelCreated(c) => {
-                s.log(EventKind::Info, format!("Channel \"{}\" was created", c.name));
+                s.log(EventKind::Info, tf!("Channel \"{}\" was created", c.name));
                 s.channels.insert(c.id, c);
             }
             S2C::ChannelEdited(c) => {
@@ -2463,7 +2520,7 @@ impl VoxaApp {
             }
             S2C::ChannelDeleted(id) => {
                 if let Some(c) = s.channels.remove(&id) {
-                    s.log(EventKind::Info, format!("Channel \"{}\" was deleted", c.name));
+                    s.log(EventKind::Info, tf!("Channel \"{}\" was deleted", c.name));
                 }
                 s.channel_logs.remove(&id);
                 if s.selected == Selection::Channel(id) {
@@ -2488,9 +2545,9 @@ impl VoxaApp {
                     let text = match reason {
                         LeaveReason::Disconnected(m) if m.is_empty() => format!("\"{}\" disconnected", c.nickname),
                         LeaveReason::Disconnected(m) => format!("\"{}\" disconnected ({m})", c.nickname),
-                        LeaveReason::Kicked { by, reason } => format!("\"{}\" was kicked from the server by {by} ({reason})", c.nickname),
-                        LeaveReason::Banned { by, reason } => format!("\"{}\" was banned by {by} ({reason})", c.nickname),
-                        LeaveReason::TimedOut => format!("\"{}\" timed out", c.nickname),
+                        LeaveReason::Kicked { by, reason } => tf!("\"{}\" was kicked from the server by {by} ({reason})", c.nickname; by = by, reason = reason),
+                        LeaveReason::Banned { by, reason } => tf!("\"{}\" was banned by {by} ({reason})", c.nickname; by = by, reason = reason),
+                        LeaveReason::TimedOut => tf!("\"{}\" timed out", c.nickname),
                     };
                     s.log(EventKind::Info, text);
                 }
@@ -2515,9 +2572,9 @@ impl VoxaApp {
                 }
                 if id == s.me {
                     match by {
-                        Some(by) => s.log(EventKind::Warn, format!("You were moved to \"{cname}\" by {by}")),
-                        None if channel == NO_CHANNEL => s.log(EventKind::Info, "You left the channel (still on the server)".to_string()),
-                        None => s.log(EventKind::Info, format!("You switched to channel \"{cname}\"")),
+                        Some(by) => s.log(EventKind::Warn, tf!("You were moved to \"{cname}\" by {by}"; cname = cname, by = by)),
+                        None if channel == NO_CHANNEL => s.log(EventKind::Info, t!("You left the channel (still on the server)").to_string()),
+                        None => s.log(EventKind::Info, tf!("You switched to channel \"{cname}\""; cname = cname)),
                     }
                     // Pictures of the old channel's cameras go (the server turned mine off).
                     let cams: Vec<ClientId> = s.cameras.keys().copied().collect();
@@ -2564,7 +2621,7 @@ impl VoxaApp {
                         self.textures.remove(&id);
                     }
                     if let Some(by) = by {
-                        s.log(EventKind::Info, format!("\"{name}\" was moved to \"{cname}\" by {by}"));
+                        s.log(EventKind::Info, tf!("\"{name}\" was moved to \"{cname}\" by {by}"; name = name, cname = cname, by = by));
                     }
                 }
             }
@@ -2572,13 +2629,13 @@ impl VoxaApp {
                 if let Some(old) = s.clients.get(&c.id).cloned() {
                     if old.talk_request.is_none() && c.talk_request.is_some() && c.channel == s.my_channel() {
                         let msg = c.talk_request.clone().unwrap_or_default();
-                        s.log(EventKind::Warn, format!("\"{}\" requests talk power: {msg}", c.nickname));
+                        s.log(EventKind::Warn, tf!("\"{}\" requests talk power: {msg}", c.nickname; msg = msg));
                     }
                     if old.nickname != c.nickname {
-                        s.log(EventKind::Info, format!("\"{}\" is now known as \"{}\"", old.nickname, c.nickname));
+                        s.log(EventKind::Info, tf!("\"{}\" is now known as \"{}\"", old.nickname, c.nickname));
                     }
                     if old.streaming.is_none() && c.streaming.is_some() && c.id != s.me {
-                        s.log(EventKind::Info, format!("\"{}\" started sharing their screen", c.nickname));
+                        s.log(EventKind::Info, tf!("\"{}\" started sharing their screen", c.nickname));
                     }
                     if old.streaming.is_some() && c.streaming.is_none() && s.watching.remove(&c.id) {
                         s.viewer.clear(c.id);
@@ -2654,7 +2711,7 @@ impl VoxaApp {
                     s.dm_push(id, msg);
                     s.dms[id].log.unread += 1;
                 }
-                s.log(EventKind::Good, format!("{n} direct message(s) arrived while you were away"));
+                s.log(EventKind::Good, tf!("{n} direct message(s) arrived while you were away"; n = n));
                 shared.play_tones(&[(880.0, 60), (1175.0, 80)]);
                 // Pop up who wrote, so nobody misses them.
                 self.dlg.offline = Some(summary);
@@ -2738,7 +2795,7 @@ impl VoxaApp {
                 // one you closed.
                 let id = s.group_conv(info, !known);
                 if !known {
-                    let text = if mine { format!("You started this group chat with {}", names.join(", ")) } else { format!("You were added to this group chat ({})", names.join(", ")) };
+                    let text = if mine { tf!("You started this group chat with {}", names.join(", ")) } else { tf!("You were added to this group chat ({})", names.join(", ")) };
                     s.dms[id].log.lines.push(ChatLine::Event { ts: now_unix(), text, kind: EventKind::Info });
                     // The one you just made opens right away.
                     if mine && std::mem::take(&mut s.dm_win.pending_group) {
@@ -2792,7 +2849,7 @@ impl VoxaApp {
                     }
                     // The server turned mine off (I left the channel).
                     if client == s.me && s.camera.take().is_some() {
-                        s.log(EventKind::Info, "Your camera was turned off".to_string());
+                        s.log(EventKind::Info, t!("Your camera was turned off").to_string());
                     }
                 }
             },
@@ -2817,7 +2874,7 @@ impl VoxaApp {
             }
             S2C::OfflineQueued { to_uid, ts } => {
                 if let Some(d) = s.dms.iter_mut().find(|d| d.uid == to_uid) {
-                    let text = format!("{} is offline: your message will be delivered when they come online", d.name);
+                    let text = tf!("{} is offline: your message will be delivered when they come online", d.name);
                     d.log.lines.push(ChatLine::Event { ts, text, kind: EventKind::Info });
                 }
             }
@@ -2847,7 +2904,7 @@ impl VoxaApp {
             S2C::Poked { from, from_name, message } => {
                 let _ = from;
                 shared.play_tones(&[(988.0, 90), (0.0, 40), (988.0, 90), (0.0, 40), (1319.0, 160)]);
-                s.log(EventKind::Warn, format!("\"{from_name}\" poked you: {message}"));
+                s.log(EventKind::Warn, tf!("\"{from_name}\" poked you: {message}"; from_name = from_name, message = message));
                 // Do not disturb: the poke is only logged.
                 if self.settings.presence != Presence::Busy {
                     self.dlg.pokes.push((from_name, message));
@@ -2915,7 +2972,7 @@ impl VoxaApp {
                 if let Some(log) = log {
                     log.lines.retain(|l| !matches!(l, ChatLine::Msg(_)));
                     log.complete = true;
-                    log.lines.push(ChatLine::Event { ts: now_unix(), text: format!("{by} cleared the chat history"), kind: EventKind::Warn });
+                    log.lines.push(ChatLine::Event { ts: now_unix(), text: tf!("{by} cleared the chat history"; by = by), kind: EventKind::Warn });
                 }
             }
             S2C::FileLimits(l) => {
@@ -2930,13 +2987,13 @@ impl VoxaApp {
                     let depth = path.split('/').filter(|p| !p.is_empty()).count();
                     for e in &entries {
                         let Some(name) = safe_local_name(&e.name) else {
-                            s.log(EventKind::Warn, format!("Skipped a file with an unsafe name: \"{}\"", e.name.escape_debug()));
+                            s.log(EventKind::Warn, tf!("Skipped a file with an unsafe name: \"{}\"", e.name.escape_debug()));
                             continue;
                         };
                         let remote = format!("{path}/{name}");
                         if e.is_dir {
                             if depth >= MAX_DOWNLOAD_DEPTH {
-                                s.log(EventKind::Warn, format!("Skipped \"{remote}\": folders are nested too deeply"));
+                                s.log(EventKind::Warn, tf!("Skipped \"{remote}\": folders are nested too deeply"; remote = remote));
                                 continue;
                             }
                             let sub = local.join(name);
@@ -3002,7 +3059,7 @@ impl VoxaApp {
                 }
             }
         }
-        s.log(EventKind::Info, format!("Uploading folder \"{name}\": {files} file(s) in {} folder(s)", folders + 1));
+        s.log(EventKind::Info, tf!("Uploading folder \"{name}\": {files} file(s) in {} folder(s)", folders + 1; name = name, files = files));
     }
 
     /// Downloads several files / folders into a local destination folder. Folders are
@@ -3012,7 +3069,7 @@ impl VoxaApp {
         for (remote, is_dir) in items {
             let name = remote.rsplit('/').next().unwrap_or(&remote).to_string();
             let Some(name) = safe_local_name(&name) else {
-                s.log(EventKind::Warn, format!("Skipped a file with an unsafe name: \"{}\"", name.escape_debug()));
+                s.log(EventKind::Warn, tf!("Skipped a file with an unsafe name: \"{}\"", name.escape_debug()));
                 continue;
             };
             let local = dest.join(name);
@@ -3042,7 +3099,7 @@ impl VoxaApp {
         let Some(s) = &mut self.sess else { return };
         if let Some(t) = s.transfers.get_mut(&id) {
             if matches!(t.state, TransferState::Queued) {
-                t.state = TransferState::Failed("Cancelled".into());
+                t.state = TransferState::Failed(t!("Cancelled").into());
             } else if t.is_running() {
                 t.fail("Cancelled");
                 if !t.upload {
@@ -3077,13 +3134,13 @@ impl VoxaApp {
                 let size = match std::fs::metadata(&t.local) {
                     Ok(m) => m.len(),
                     Err(e) => {
-                        t.state = TransferState::Failed(format!("Cannot read file: {e}"));
+                        t.state = TransferState::Failed(tf!("Cannot read file: {e}"; e = e));
                         continue;
                     }
                 };
                 t.size = size;
                 if limit > 0 && size > limit * 1024 * 1024 {
-                    t.state = TransferState::Failed(format!("File is larger than the server limit ({})", crate::ui::fmt_size(limit * 1024 * 1024)));
+                    t.state = TransferState::Failed(tf!("File is larger than the server limit ({})", crate::ui::fmt_size(limit * 1024 * 1024)));
                     continue;
                 }
                 t.state = TransferState::Waiting;
@@ -3114,7 +3171,7 @@ impl VoxaApp {
         for id in stalled {
             s.conn.bulk_control(BulkC2S::Cancel { id });
             let name = s.transfers.get(&id).map(|t| t.name.clone()).unwrap_or_default();
-            s.log(EventKind::Warn, format!("Transfer of \"{name}\" stalled and was stopped"));
+            s.log(EventKind::Warn, tf!("Transfer of \"{name}\" stalled and was stopped"; name = name));
         }
     }
 }
@@ -3163,7 +3220,7 @@ impl eframe::App for VoxaApp {
         if let Some(s) = &mut self.sess {
             s.server_events();
             for r in s.calendar_tick() {
-                s.channel_logs.entry(s.my_channel()).or_default().lines.push(ChatLine::Event { ts: now_unix(), text: format!("Reminder - {r}"), kind: EventKind::Warn });
+                s.channel_logs.entry(s.my_channel()).or_default().lines.push(ChatLine::Event { ts: now_unix(), text: tf!("Reminder - {r}"; r = r), kind: EventKind::Warn });
                 self.voice_shared.play_tones(MESSAGE_TONES);
             }
         }
