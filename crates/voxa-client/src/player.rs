@@ -1,11 +1,11 @@
-//! In-client video player for YouTube links, on the WebView2 runtime that ships with
+//! In-client video player for YouTube, TikTok and X links, on the WebView2 runtime that ships with
 //! Windows. It is a native child window placed every frame over the area the UI
 //! reserved for it (`rect`), and hidden while a Voxa window / menu covers that area.
 
 #[cfg(windows)]
 use std::borrow::Cow;
 
-use crate::links::Video;
+use crate::links::{Site, Video};
 
 pub struct Player {
     pub video: Option<(Video, String)>,
@@ -41,19 +41,32 @@ impl Default for Player {
 
 #[cfg(windows)]
 /// Page shown in the webview. YouTube only plays embeds that come from a real web
-/// page (with a referrer), so the embed is wrapped in this local page.
-fn page(id: &str, start: u32) -> String {
+/// page (with a referrer), so the embed is wrapped in this local page. TikTok and X use
+/// their own embed players (the same ones their websites hand out for embedding).
+fn page(site: Site, id: &str, start: u32) -> String {
+    let src = match site {
+        Site::YouTube => format!("https://www.youtube-nocookie.com/embed/{id}?autoplay=1&start={start}&rel=0&playsinline=1"),
+        Site::TikTok => format!("https://www.tiktok.com/player/v1/{id}?autoplay=1&loop=1&rel=0&description=1&music_info=1"),
+        Site::X => format!("https://platform.twitter.com/embed/Tweet.html?id={id}&theme=dark&dnt=true"),
+    };
+    let bg = if site == Site::X { "#15202b" } else { "#000" };
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><title>Voxa player</title>
-<style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}iframe{{border:0;width:100%;height:100%;display:block}}</style></head>
-<body><iframe src="https://www.youtube-nocookie.com/embed/{id}?autoplay=1&start={start}&rel=0&playsinline=1"
-allow="autoplay; encrypted-media; picture-in-picture; fullscreen; clipboard-write" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></body></html>"#
+<style>html,body{{margin:0;height:100%;background:{bg};overflow:{ov}}}iframe{{border:0;width:100%;height:100%;display:block}}</style></head>
+<body><iframe src="{src}"
+allow="autoplay; encrypted-media; picture-in-picture; fullscreen; clipboard-write" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></body></html>"#,
+        ov = if site == Site::X { "auto" } else { "hidden" }
     )
 }
 
 #[cfg(windows)]
 fn page_url(v: &Video) -> String {
-    format!("https://voxa.localhost/yt/{}?start={}", v.id, v.start)
+    let kind = match v.site {
+        Site::YouTube => "yt",
+        Site::TikTok => "tt",
+        Site::X => "x",
+    };
+    format!("https://voxa.localhost/{kind}/{}?start={}", v.id, v.start)
 }
 
 impl Player {
@@ -78,7 +91,11 @@ impl Player {
     pub fn sync(&mut self, _ctx: &egui::Context, _frame: &eframe::Frame) {
         self.rect = None;
         if let Some((v, _)) = self.video.take() {
-            crate::markdown::open_link(&format!("https://www.youtube.com/watch?v={}&t={}s", v.id, v.start));
+            match v.site {
+                Site::YouTube => crate::markdown::open_link(&format!("https://www.youtube.com/watch?v={}&t={}s", v.id, v.start)),
+                // The TikTok / X app (or the browser) opens the post.
+                _ => crate::markdown::open_link(&v.url),
+            }
         }
     }
 
@@ -135,10 +152,16 @@ impl Player {
             .with_custom_protocol("voxa".into(), |_id, req| {
                 let path = req.uri().path().to_string();
                 let query = req.uri().query().unwrap_or_default().to_string();
-                let id = path.strip_prefix("/yt/").unwrap_or_default();
                 let start: u32 = query.strip_prefix("start=").and_then(|s| s.parse().ok()).unwrap_or(0);
-                let ok = id.len() == 11 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_');
-                let body = if ok { page(id, start) } else { "Not found".to_string() };
+                let numeric = |id: &str| !id.is_empty() && id.len() <= 20 && id.bytes().all(|c| c.is_ascii_digit());
+                let page_for = match path.split_once('/').map(|(_, r)| r).and_then(|r| r.split_once('/')) {
+                    Some(("yt", id)) if id.len() == 11 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') => Some(page(Site::YouTube, id, start)),
+                    Some(("tt", id)) if numeric(id) => Some(page(Site::TikTok, id, 0)),
+                    Some(("x", id)) if numeric(id) => Some(page(Site::X, id, 0)),
+                    _ => None,
+                };
+                let ok = page_for.is_some();
+                let body = page_for.unwrap_or_else(|| "Not found".to_string());
                 wry::http::Response::builder()
                     .status(if ok { 200 } else { 404 })
                     .header("Content-Type", "text/html; charset=utf-8")

@@ -1229,8 +1229,8 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     form_row(ui, "Chat:", |ui| {
                         ui.vertical(|ui| {
                             ui.checkbox(&mut d.timestamps, "Show timestamps");
-                            ui.checkbox(&mut d.link_previews, "Show previews of YouTube links and play them in Voxa")
-                                .on_hover_text("Loading a preview contacts YouTube from your computer, like opening the link would.");
+                            ui.checkbox(&mut d.link_previews, "Show previews of YouTube, TikTok and X links and play them in Voxa")
+                                .on_hover_text("Loading a preview contacts YouTube, TikTok or X from your device, like opening the link would.");
                             ui.checkbox(&mut d.dm_window, "Open direct messages in their own window")
                                 .on_hover_text("Like Steam: conversations open in a Messages window you can move to another screen. A new message opens it (without taking the keyboard from your game) and flashes it in the taskbar. Off: direct messages are tabs in the chat.");
                             ui.checkbox(&mut d.join_channel, "Join a channel when connecting")

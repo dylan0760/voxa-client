@@ -382,6 +382,8 @@ pub struct Session {
     pub pending_downloads: HashMap<(ChannelId, String), std::path::PathBuf>,
     /// Images posted in this server's chats (servers 1.5.0+).
     pub images: crate::chat_images::ChatImages,
+    /// GIF search on this server and the GIF picker (1.35.0+).
+    pub gif: crate::gifs::GifState,
     /// Pinned messages per chat (servers 1.8.0+), most recently pinned first.
     pub pins: HashMap<TextTarget, Vec<PinnedMessage>>,
     /// The pinned messages list above the chat is expanded.
@@ -1082,6 +1084,47 @@ impl VoxaApp {
             },
             // The server calendar with a few game nights, one meeting in a channel (for
             // screenshots; VOXA_PRIVKEY makes me an admin first).
+            // GIFs: an animated GIF posted and kept as a favourite, TikTok and X links, and
+            // the GIF picker open on Favourites (for screenshots).
+            "gifs" => {
+                static STEP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+                use std::sync::atomic::Ordering::Relaxed;
+                self.debug_done = false;
+                let Some(s) = &mut self.sess else { return };
+                if !s.welcomed || !s.bulk_ready {
+                    return;
+                }
+                match STEP.load(Relaxed) {
+                    0 => {
+                        let mut buf = Vec::new();
+                        {
+                            let mut enc = image::codecs::gif::GifEncoder::new(&mut buf);
+                            enc.set_repeat(image::codecs::gif::Repeat::Infinite).ok();
+                            for i in 0..12u32 {
+                                let img = image::RgbaImage::from_fn(160, 90, |x, y| {
+                                    let on = (x / 20 + y / 20 + i) % 2 == 0;
+                                    if on { image::Rgba([0xFE, 0x2C, 0x55, 255]) } else { image::Rgba([0x1D, 0x9B, 0xF0, 255]) }
+                                });
+                                let _ = enc.encode_frame(image::Frame::from_parts(img, 0, 0, image::Delay::from_numer_denom_ms(120, 1)));
+                            }
+                        }
+                        crate::gifs::add_favourite(&buf);
+                        let p = crate::config::config_dir().join("demo.gif");
+                        let _ = std::fs::write(&p, &buf);
+                        let target = TextTarget::Channel(s.my_channel());
+                        s.conn.send(C2S::SendText { target, text: "https://www.tiktok.com/@scout2015/video/6718335390845095173".into() });
+                        s.conn.send(C2S::SendText { target, text: "https://x.com/jack/status/20".into() });
+                        s.images.send(s.conn.bulk_tx.clone(), target, crate::chat_images::ImageSource::File(p));
+                        STEP.store(1, Relaxed);
+                    }
+                    1 => {
+                        s.gif.open = true;
+                        s.gif.tab = crate::gifs::Tab::Favourites;
+                        self.debug_done = true;
+                    }
+                    _ => {}
+                }
+            }
             // The account page with accounts optional (VOXA_PRIVKEY makes me an admin first).
             "account" => {
                 static STEP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -1865,6 +1908,7 @@ impl VoxaApp {
             extra_perms: 0,
             pending_downloads: HashMap::new(),
             images: Default::default(),
+            gif: Default::default(),
             pins: HashMap::new(),
             pins_open: false,
             stage: Stage::default(),
@@ -2235,6 +2279,7 @@ impl VoxaApp {
             }
             BulkS2C::ChatImageSent { id } => s.images.send_done(id),
             BulkS2C::Image { image, data } => s.images.received(&self.ctx, image, data),
+            BulkS2C::GifPreview { id, data } => s.gif.preview_received(&self.ctx, id, data),
             BulkS2C::ImageError { image, message } => s.images.failed(image, message),
             BulkS2C::TransferError { id, message } if s.images.owns_send(id) => s.images.send_failed(id, message),
             BulkS2C::TransferError { id, message } => {
@@ -2371,6 +2416,8 @@ impl VoxaApp {
                 s.recovery_codes = Some(codes);
             }
             S2C::HiddenChannels(list) => s.hidden_channels = list.into_iter().collect(),
+            S2C::GifSearch(provider) => s.gif.provider = Some(provider),
+            S2C::Gifs { query, items, next } => s.gif.got(query, items, next),
             // Channels that came into or went out of view (not made or deleted): no log line.
             S2C::ChannelsVisible { shown, hidden } => {
                 for id in hidden {

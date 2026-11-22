@@ -21,6 +21,7 @@ mod dialogs;
 mod dm_store;
 mod emoji;
 mod files;
+mod gifs;
 mod gamepad;
 mod hardware;
 mod highlight;

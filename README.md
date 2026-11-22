@@ -169,11 +169,33 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   * Images are stored encrypted with the chat history.
   * Click one to view it full size and save it.
   * Up to 10 MB each; bigger photos are scaled down automatically.
-* **YouTube links** get a preview card with the title, channel and thumbnail. Press ▶ to
-  play the video inside Voxa, on the stage above the chat.
+* **GIFs** (1.35.0): animated GIFs play in the chat (and in the full-size view), on
+  every server.
+  * **The GIF button** next to 🙂 opens a picker, like WhatsApp's:
+    * **🔍 Search** (Voxa Server 1.27.0+ with GIF search set up by its admin): trending
+      GIFs, or type to search. Click one to post it. The server does the searching and
+      posts the GIF, so your searches and address never reach the GIF service.
+    * **⭐ Favourites:** click any GIF in the chat ▸ **⭐ Add to GIF favourites**, or
+      right-click one in the picker. Kept on this device, for every server.
+    * **🕘 Recent:** the GIFs you sent lately.
+  * **Pasting GIFs:** **Ctrl+V** a GIF file copied in Explorer, or a GIF copied from a
+    web page ("Copy image"). Voxa sends the moving GIF, not the still picture the
+    clipboard also holds.
+  * **GIF links:** a message that is only a GIF link (a `.gif` address, or a GIPHY,
+    Tenor or KLIPY page) posts the GIF itself. Your device downloads it and posts it like
+    a picture, so it keeps working if the site removes it, and nobody else's device
+    contacts the site.
+  * At most 10 MB per GIF. Long GIFs show their first 400 frames.
+* **Video links: YouTube, TikTok and X / Twitter** (1.35.0 for TikTok and X) get a
+  preview card. Press ▶ to play the video inside Voxa, on the stage above the chat.
+  * TikTok and X posts play in those sites' own embed players (TikTok's preview no
+    longer includes a picture, so its card is a short bar with the @name). Short links
+    (vm.tiktok.com) work too.
+  * On Android, ▶ opens the TikTok, X or YouTube app (or the browser).
   * The player uses the Microsoft Edge WebView2 runtime that comes with Windows 10/11,
     via Microsoft's small redistributable `WebView2Loader.dll`.
-  * Turn previews off under **Options ▸ Application ▸ Chat**.
+  * Previews contact YouTube, TikTok or X from your device, like opening the link would.
+    Turn them off under **Options ▸ Application ▸ Chat**.
 * **Pinned messages** (Voxa Server 1.8.0+): pin messages with 📌 (hover or right-click).
   A **📌 Pinned** bar at the top of the chat lists them. Needs the **Pin messages**
   permission.

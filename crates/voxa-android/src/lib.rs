@@ -37,6 +37,8 @@ mod dialogs;
 mod dm_store;
 #[path = "../../voxa-client/src/emoji.rs"]
 mod emoji;
+#[path = "../../voxa-client/src/gifs.rs"]
+mod gifs;
 #[path = "../../voxa-client/src/files.rs"]
 mod files;
 #[path = "../../voxa-client/src/gamepad.rs"]

@@ -27,10 +27,37 @@ pub fn is_image_path(p: &Path) -> bool {
     p.extension().map(|e| IMAGE_EXTENSIONS.contains(&e.to_string_lossy().to_lowercase().as_str())).unwrap_or(false)
 }
 
+/// The frames of an animated GIF (scaled down), each with how long it shows.
+pub struct Anim {
+    pub frames: Vec<(egui::TextureHandle, u32)>,
+    pub total_ms: u32,
+}
+
+impl Anim {
+    /// The frame to show now. Asks for a repaint when the next one is due, but only for
+    /// an animation on screen (`visible`), so GIFs scrolled away cost nothing.
+    pub fn frame(&self, ctx: &egui::Context, visible: bool) -> egui::TextureId {
+        let total = self.total_ms.max(1) as u64;
+        let now = (ctx.input(|i| i.time) * 1000.0) as u64 % total;
+        let mut acc = 0u64;
+        for (tex, ms) in &self.frames {
+            acc += *ms as u64;
+            if now < acc {
+                if visible {
+                    ctx.request_repaint_after(std::time::Duration::from_millis((acc - now).max(15)));
+                }
+                return tex.id();
+            }
+        }
+        self.frames[0].0.id()
+    }
+}
+
 pub enum ImgState {
     Loading,
-    /// size is the real pixel size (the texture may be scaled down).
-    Ready { tex: egui::TextureHandle, bytes: Arc<Vec<u8>>, size: [u32; 2] },
+    /// size is the real pixel size (the texture may be scaled down). `anim`: the frames
+    /// of an animated GIF (`tex` is its first frame).
+    Ready { tex: egui::TextureHandle, bytes: Arc<Vec<u8>>, size: [u32; 2], anim: Option<Arc<Anim>> },
     Failed(String),
 }
 
@@ -42,6 +69,8 @@ pub struct ImageSend {
 pub enum ImageSource {
     File(PathBuf),
     Pasted(Arc<egui::ColorImage>),
+    /// A GIF link (or a GIF copied from a web page): downloaded by this device first.
+    Link(String),
 }
 
 pub struct ChatImages {
@@ -67,11 +96,16 @@ impl ChatImages {
         let name = match &src {
             ImageSource::File(p) => p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "image".into()),
             ImageSource::Pasted(_) => format!("pasted-{}.png", chrono::Local::now().format("%Y%m%d-%H%M%S")),
+            ImageSource::Link(_) => "GIF".into(),
         };
         self.sends.lock().insert(id, ImageSend { name: name.clone(), error: None });
         let sends = self.sends.clone();
         std::thread::spawn(move || {
             let res = prepare(src, &name).and_then(|(data, w, h, name)| {
+                // GIFs you send are kept under 🕘 Recent in the GIF picker.
+                if image_kind(&data) == Some("gif") {
+                    crate::gifs::add_recent(&data);
+                }
                 bulk.blocking_send(BulkC2S::ChatImage { id, target, name, width: w, height: h, data })
                     .map_err(|_| "Not connected".to_string())
             });
@@ -123,7 +157,12 @@ impl ChatImages {
             let state = match decode(&data) {
                 Ok((ci, size)) => {
                     let tex = ctx.load_texture(format!("chatimg{image}"), ci, egui::TextureOptions::LINEAR);
-                    ImgState::Ready { tex, bytes: Arc::new(data), size }
+                    let anim = decode_anim(&data).map(|frames| {
+                        let total_ms = frames.iter().map(|f| f.1).sum();
+                        let frames = frames.into_iter().enumerate().map(|(i, (ci, ms))| (ctx.load_texture(format!("chatimg{image}f{i}"), ci, egui::TextureOptions::LINEAR), ms)).collect();
+                        Arc::new(Anim { frames, total_ms })
+                    });
+                    ImgState::Ready { tex, bytes: Arc::new(data), size, anim }
                 }
                 Err(e) => ImgState::Failed(e),
             };
@@ -147,6 +186,11 @@ fn prepare(src: ImageSource, name: &str) -> Result<(Vec<u8>, u32, u32, String), 
     let mut name = name.to_string();
     let data = match src {
         ImageSource::File(p) => std::fs::read(&p).map_err(|e| format!("Cannot read {}: {e}", p.display()))?,
+        ImageSource::Link(url) => {
+            let (data, n) = crate::gifs::fetch_link(&url)?;
+            name = n;
+            data
+        }
         ImageSource::Pasted(ci) => {
             let [w, h] = ci.size;
             let rgba: Vec<u8> = ci.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
@@ -204,6 +248,47 @@ fn decode(data: &[u8]) -> Result<(egui::ColorImage, [u32; 2]), String> {
     Ok((egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()), size))
 }
 
+/// Animated GIFs: frames are shown at most this big, at most this many, in at most this
+/// much memory (the rest of a longer GIF is dropped).
+const ANIM_SIDE: u32 = 400;
+const ANIM_MAX_FRAMES: usize = 400;
+const ANIM_MAX_BYTES: usize = 96 * 1024 * 1024;
+
+/// The frames of an animated GIF (None for still pictures and GIFs with one frame).
+pub fn decode_anim(data: &[u8]) -> Option<Vec<(egui::ColorImage, u32)>> {
+    use image::AnimationDecoder;
+    if image_kind(data) != Some("gif") {
+        return None;
+    }
+    let (w, h) = dimensions(data)?;
+    if w == 0 || h == 0 || w > MAX_DECODE_SIDE || h > MAX_DECODE_SIDE {
+        return None;
+    }
+    let mut dec = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(data)).ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_SIDE);
+    limits.max_image_height = Some(MAX_DECODE_SIDE);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    image::ImageDecoder::set_limits(&mut dec, limits).ok()?;
+    let (mut out, mut bytes) = (Vec::new(), 0usize);
+    for f in dec.into_frames() {
+        let Ok(f) = f else { break };
+        let (n, d) = f.delay().numer_denom_ms();
+        let ms = if d == 0 { 100 } else { n / d };
+        // Like browsers: 0-10 ms means 100 ms.
+        let ms = if ms <= 10 { 100 } else { ms.min(60_000) };
+        let img = image::DynamicImage::ImageRgba8(f.into_buffer());
+        let img = if img.width().max(img.height()) > ANIM_SIDE { img.resize(ANIM_SIDE, ANIM_SIDE, image::imageops::FilterType::Triangle) } else { img };
+        let rgba = img.to_rgba8();
+        bytes += rgba.len();
+        out.push((egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()), ms));
+        if out.len() >= ANIM_MAX_FRAMES || bytes >= ANIM_MAX_BYTES {
+            break;
+        }
+    }
+    (out.len() > 1).then_some(out)
+}
+
 fn fit(w: f32, h: f32, max: egui::Vec2) -> egui::Vec2 {
     let (w, h) = (w.max(1.0), h.max(1.0));
     let s = (max.x / w).min(max.y / h).min(1.0);
@@ -217,12 +302,17 @@ pub fn chat_image(ui: &mut Ui, imgs: &mut ChatImages, conn: &crate::net::Connect
     let size = fit(r.width as f32, r.height as f32, max);
     let cache = imgs.cache.lock();
     match cache.get(&r.id) {
-        Some(ImgState::Ready { tex, size: [w, h], .. }) => {
+        Some(ImgState::Ready { tex, size: [w, h], anim, .. }) => {
             // The real size wins over the one in the tag (that was only for the placeholder).
             let size = fit(tex.size_vec2().x, tex.size_vec2().y, max);
+            let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+            let id = match anim {
+                Some(a) => a.frame(ui.ctx(), ui.is_rect_visible(rect)),
+                None => tex.id(),
+            };
             let resp = ui
-                .add(egui::Image::new((tex.id(), size)).corner_radius(6).sense(Sense::click()))
-                .on_hover_text(format!("{} · {w}×{h} · click to enlarge", r.name))
+                .put(rect, egui::Image::new((id, size)).corner_radius(6).sense(Sense::click()))
+                .on_hover_text(format!("{} · {w}×{h} · click to enlarge{}", r.name, if anim.is_some() { " · GIF" } else { "" }))
                 .on_hover_cursor(egui::CursorIcon::ZoomIn);
             if resp.clicked() {
                 drop(cache);
@@ -274,6 +364,7 @@ pub fn viewer(ctx: &egui::Context, imgs: &mut ChatImages) {
     let Some(r) = imgs.viewing.clone() else { return };
     let mut open = true;
     let mut save: Option<Arc<Vec<u8>>> = None;
+    let mut favourite: Option<Arc<Vec<u8>>> = None;
     egui::Window::new(format!("🖼 {}", r.name))
         .id(egui::Id::unique("voxa_image_viewer"))
         .open(&mut open)
@@ -282,7 +373,7 @@ pub fn viewer(ctx: &egui::Context, imgs: &mut ChatImages) {
         .default_size(fit(r.width as f32, r.height as f32, egui::vec2(900.0, 640.0)) + egui::vec2(0.0, 40.0))
         .show_fill(ctx, |ui| {
             let cache = imgs.cache.lock();
-            let Some(ImgState::Ready { tex, bytes, size: [w, h] }) = cache.get(&r.id) else {
+            let Some(ImgState::Ready { tex, bytes, size: [w, h], anim }) = cache.get(&r.id) else {
                 ui.spinner();
                 return;
             };
@@ -290,12 +381,19 @@ pub fn viewer(ctx: &egui::Context, imgs: &mut ChatImages) {
                 if ui.button("💾 Save as...").clicked() {
                     save = Some(bytes.clone());
                 }
+                if anim.is_some() && ui.button("⭐ Add to GIF favourites").on_hover_text("Find it under ⭐ in the GIF picker").clicked() {
+                    favourite = Some(bytes.clone());
+                }
                 ui.label(RichText::new(format!("{w}×{h} · {}", crate::ui::fmt_size(bytes.len() as u64))).weak());
             });
             let avail = egui::vec2(ui.available_width(), (ui.available_height() - 4.0).max(80.0));
             let size = fit(tex.size_vec2().x, tex.size_vec2().y, avail);
+            let id = match anim {
+                Some(a) => a.frame(ui.ctx(), true),
+                None => tex.id(),
+            };
             ui.centered_and_justified(|ui| {
-                ui.add(egui::Image::new((tex.id(), size)));
+                ui.add(egui::Image::new((id, size)));
             });
         });
     if let Some(bytes) = save {
@@ -307,6 +405,9 @@ pub fn viewer(ctx: &egui::Context, imgs: &mut ChatImages) {
         if let Some(p) = crate::files::save_as(&name) {
             let _ = std::fs::write(p, bytes.as_slice());
         }
+    }
+    if let Some(bytes) = favourite {
+        crate::gifs::add_favourite(&bytes);
     }
     if !open {
         imgs.viewing = None;

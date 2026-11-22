@@ -3612,19 +3612,26 @@ pub fn message_text(ui: &mut Ui, text: &str, salt: (u64, u64)) {
     }
 }
 
-/// Discord-style card for a YouTube link: channel, title and thumbnail. Clicking the
-/// thumbnail plays the video inside Voxa.
-fn youtube_card(ui: &mut Ui, previews: &crate::links::Previews, v: &crate::links::Video, a: &mut Vec<Action>) {
+/// Discord-style card for a YouTube, TikTok or X link: author, title and thumbnail.
+/// Clicking the thumbnail plays the video inside Voxa (Android: in the site's app).
+fn video_card(ui: &mut Ui, previews: &crate::links::Previews, v: &crate::links::Video, a: &mut Vec<Action>) {
     let t = theme();
-    let yt_red = Color32::from_rgb(0xFF, 0x00, 0x33);
-    let pv = previews.get(ui.ctx(), &v.id);
+    let site = v.site;
+    let yt_red = site.color();
+    let pv = previews.get(ui.ctx(), v);
+    // TikTok and X posts are portrait or text: a smaller, taller box than YouTube's 16:9.
+    let aspect = match site {
+        crate::links::Site::YouTube => 9.0 / 16.0,
+        crate::links::Site::TikTok => 16.0 / 9.0,
+        crate::links::Site::X => 9.0 / 16.0,
+    };
     let w = ui.available_width().min(440.0);
     let r = Frame::new().fill(t.card).corner_radius(6).inner_margin(Margin { left: 14, right: 10, top: 8, bottom: 10 }).show(ui, |ui| {
         ui.set_width(w - 24.0);
-        ui.label(RichText::new("YouTube").small().color(t.dim));
-        let (title, author, thumb) = match &pv {
-            crate::links::Preview::Ready { title, author, thumb } => (title.clone(), author.clone(), thumb.clone()),
-            _ => ("YouTube video".to_string(), String::new(), None),
+        ui.label(RichText::new(site.name()).small().color(t.dim));
+        let (title, author, thumb, play_id) = match &pv {
+            crate::links::Preview::Ready { title, author, thumb, play_id } => (title.clone(), author.clone(), thumb.clone(), play_id.clone()),
+            _ => (format!("{} video", site.name()), String::new(), None, None),
         };
         if !author.is_empty() {
             ui.label(RichText::new(&author).small().color(ui.visuals().text_color()));
@@ -3632,13 +3639,16 @@ fn youtube_card(ui: &mut Ui, previews: &crate::links::Previews, v: &crate::links
         let link = ui
             .add(egui::Label::new(RichText::new(&title).strong().color(Color32::from_rgb(0x4C, 0xA8, 0xF0))).sense(Sense::click()).wrap())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Open on YouTube");
+            .on_hover_text(format!("Open on {}", site.name()));
         if link.clicked() {
             crate::markdown::open_link(&v.url);
         }
         ui.add_space(4.0);
-        let tw = ui.available_width();
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(tw, tw * 9.0 / 16.0), Sense::click());
+        let tw = if aspect > 1.0 { ui.available_width().min(220.0) } else { ui.available_width() };
+        // Without a picture (TikTok and X give none now): a short bar with the play button.
+        let h = if thumb.is_none() && !matches!(pv, crate::links::Preview::Loading) && site != crate::links::Site::YouTube { 72.0 } else { tw * aspect };
+        let tw = if h == 72.0 { ui.available_width() } else { tw };
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(tw, h), Sense::click());
         match &thumb {
             Some(tex) => {
                 egui::Image::new((tex.id(), rect.size())).corner_radius(6).paint_at(ui, rect);
@@ -3657,7 +3667,16 @@ fn youtube_card(ui: &mut Ui, previews: &crate::links::Previews, v: &crate::links
         let tri = vec![c + egui::vec2(-8.0, -12.0), c + egui::vec2(-8.0, 12.0), c + egui::vec2(13.0, 0.0)];
         ui.painter().add(egui::Shape::convex_polygon(tri, Color32::WHITE, Stroke::NONE));
         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Play in Voxa").clicked() {
-            a.push(Action::PlayVideo(v.clone(), title));
+            // TikTok short links: play with the real id the preview found, or open the link.
+            let mut v = v.clone();
+            if let Some(id) = play_id {
+                v.id = id;
+            }
+            if v.id.starts_with("short:") {
+                crate::markdown::open_link(&v.url);
+            } else {
+                a.push(Action::PlayVideo(v, title));
+            }
         }
     });
     let rect = r.response.rect;
@@ -3773,7 +3792,7 @@ fn message_body(
             message_text(ui, text, salt);
             if let Some(p) = previews.filter(|_| text.contains("http")) {
                 for v in crate::links::videos_in(text) {
-                    youtube_card(ui, p, &v, a);
+                    video_card(ui, p, &v, a);
                 }
             }
         }
@@ -3889,13 +3908,29 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                     .font(chat_font(body_size(ui)))
                     .frame(egui::Frame::NONE)
                     .lock_focus(true)
-                    .desired_width(ui.available_width() - 74.0);
+                    .desired_width(ui.available_width() - if can_images { 112.0 } else { 74.0 });
                 let r = egui::ScrollArea::vertical().id_salt("chat_input_scroll").max_height(180.0).auto_shrink([true, true]).show(ui, |ui| ui.add(te)).inner;
-                // Ctrl+V with an image on the clipboard (screenshots, copied pictures).
+                // Ctrl+V with an image on the clipboard (screenshots, copied pictures). Checked
+                // every frame so a press is seen once (copied files give egui no event).
+                let ctrl_v = crate::gifs::ctrl_v_pressed();
                 if can_images && (r.has_focus() || ui.ctx().memory(|m| m.focused().is_none())) {
                     let pasted: Vec<std::sync::Arc<egui::ColorImage>> = ui.input(|i| i.events.iter().filter_map(|e| if let egui::Event::PasteImage(img) = e { Some(img.clone()) } else { None }).collect());
-                    for img in pasted {
-                        a.push(Action::SendImage(target, crate::chat_images::ImageSource::Pasted(img)));
+                    let text_paste = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+                    // GIFs win over the still picture the clipboard also holds: GIF files copied
+                    // in Explorer, or a GIF copied from a web page (its address is in the HTML).
+                    let gifs = if !text_paste && (!pasted.is_empty() || (ctrl_v && r.has_focus())) { crate::gifs::clipboard_gifs() } else { None };
+                    match gifs {
+                        Some(crate::gifs::Pasted::Files(files)) => {
+                            for f in files {
+                                a.push(Action::SendImage(target, crate::chat_images::ImageSource::File(f)));
+                            }
+                        }
+                        Some(crate::gifs::Pasted::Link(url)) => a.push(Action::SendImage(target, crate::chat_images::ImageSource::Link(url))),
+                        None => {
+                            for img in pasted {
+                                a.push(Action::SendImage(target, crate::chat_images::ImageSource::Pasted(img)));
+                            }
+                        }
                     }
                 }
                 if let (Some(ch), Some(start)) = (accept, token_start) {
@@ -3904,6 +3939,27 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                     input.push(' ');
                     a.push(Action::UsedEmoji(ch.to_string()));
                     r.request_focus();
+                }
+                // GIF picker toggle (favourites and recents everywhere; search on servers that
+                // have it).
+                let mut gif_toggled = false;
+                let mut gif_rect = None;
+                if can_images {
+                    let (grect, gb) = ui.allocate_exact_size(Vec2::new(34.0, 30.0), Sense::click());
+                    if gb.hovered() || s.gif.open {
+                        ui.painter().rect_filled(grect, CornerRadius::same(6), t.hover);
+                    }
+                    ui.painter().rect_stroke(grect.shrink2(Vec2::new(4.0, 7.0)), CornerRadius::same(3), Stroke::new(1.5, t.dim), egui::StrokeKind::Inside);
+                    ui.painter().text(grect.center(), Align2::CENTER_CENTER, "GIF", FontId::proportional(10.5), if s.gif.open || gb.hovered() { ui.visuals().strong_text_color() } else { t.dim });
+                    if gb.on_hover_text("GIFs").clicked() {
+                        s.gif.open = !s.gif.open;
+                        if !s.gif.open {
+                            s.gif.closed();
+                        }
+                        picker.open = false;
+                        gif_toggled = true;
+                    }
+                    gif_rect = Some(grect);
                 }
                 // Emoji picker toggle.
                 let (rect, eb) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
@@ -3914,9 +3970,17 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                 let toggled = eb.on_hover_text("Emoji").clicked();
                 if toggled {
                     picker.open = !picker.open;
+                    s.gif.closed();
                 }
                 let send = icon_button(ui, "➤", "Send", Some(accent())).clicked();
-                if (send || enter) && !input.trim().is_empty() {
+                // A message that is only a GIF link posts the GIF itself (this device downloads
+                // it; nobody else's contacts the site).
+                let gif_url = if can_images { crate::gifs::gif_link(input) } else { None };
+                if (send || enter) && gif_url.is_some() {
+                    input.clear();
+                    a.push(Action::SendImage(target, crate::chat_images::ImageSource::Link(gif_url.unwrap_or_default())));
+                    r.request_focus();
+                } else if (send || enter) && !input.trim().is_empty() {
                     // Shortcodes like :fire: become emoji, but never inside code.
                     let text = crate::markdown::map_outside_code(input.trim_end(), crate::emoji::replace_shortcodes);
                     input.clear();
@@ -3926,6 +3990,13 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                 }
                 if picker.open {
                     emoji_picker(ui, rect, picker, input, &settings.recent_emoji, a, toggled);
+                }
+                if let (true, Some(gr)) = (s.gif.open, gif_rect) {
+                    match crate::gifs::picker(ui, gr, &mut s.gif, &s.conn, s.bulk_ready, gif_toggled) {
+                        Some(crate::gifs::Pick::Search(id)) => a.push(Action::Send(C2S::SendGif { target, id })),
+                        Some(crate::gifs::Pick::File(f)) => a.push(Action::SendImage(target, crate::chat_images::ImageSource::File(f))),
+                        None => {}
+                    }
                 }
             });
         });
@@ -4331,14 +4402,14 @@ fn player_view(app: &mut VoxaApp, ui: &mut Ui) {
     let (mut close, mut toggle_full) = (false, false);
     ui.horizontal(|ui| {
         ui.add_space(6.0);
-        Frame::new().fill(Color32::from_rgb(0xFF, 0x00, 0x33)).corner_radius(4).inner_margin(Margin::symmetric(5, 1)).show(ui, |ui| {
-            ui.label(RichText::new("▶ YouTube").small().strong().color(Color32::WHITE));
+        Frame::new().fill(v.site.color()).corner_radius(4).inner_margin(Margin::symmetric(5, 1)).show(ui, |ui| {
+            ui.label(RichText::new(format!("▶ {}", v.site.name())).small().strong().color(Color32::WHITE));
         });
         ui.label(RichText::new(crate::share_picker::ellipsize(&title, 70)).color(Color32::WHITE)).on_hover_text(&title);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             close = icon_button(ui, "✖", "Close the video", Some(Color32::WHITE)).clicked();
             toggle_full = icon_button(ui, if full { "🗗" } else { "⛶" }, if full { "Exit full view" } else { "Full view" }, Some(Color32::WHITE)).clicked();
-            if icon_button(ui, "🌐", "Open on YouTube", Some(Color32::WHITE)).clicked() {
+            if icon_button(ui, "🌐", &format!("Open on {}", v.site.name()), Some(Color32::WHITE)).clicked() {
                 crate::markdown::open_link(&v.url);
             }
         });
@@ -4346,7 +4417,7 @@ fn player_view(app: &mut VoxaApp, ui: &mut Ui) {
     let size = ui.available_size();
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     if let Some(e) = app.player.error.clone() {
-        ui.put(rect.shrink(20.0), egui::Label::new(RichText::new(format!("{e}\n\nUse 🌐 to watch it on YouTube instead.")).color(Color32::WHITE)));
+        ui.put(rect.shrink(20.0), egui::Label::new(RichText::new(format!("{e}\n\nUse 🌐 to watch it on {} instead.", v.site.name())).color(Color32::WHITE)));
     } else {
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, "Loading video...", FontId::proportional(14.0), Color32::GRAY);
         app.player.rect = Some(rect);
