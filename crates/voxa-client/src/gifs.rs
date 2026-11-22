@@ -103,6 +103,8 @@ pub struct GifState {
     /// The name a GIF from a link gets in the server's library (what people search for).
     pub link_name: String,
     link_busy: u32,
+    /// The server keeps search words with its GIFs (servers 1.29.0+).
+    pub tags_ok: bool,
     link_note: Option<(bool, String)>,
 }
 
@@ -115,7 +117,7 @@ enum Dest {
 
 /// Links downloaded in the background, waiting for the picker.
 #[allow(clippy::type_complexity)]
-static LINKED: std::sync::LazyLock<Mutex<Vec<(Dest, String, Result<(Vec<u8>, String), String>)>>> = std::sync::LazyLock::new(Default::default);
+static LINKED: std::sync::LazyLock<Mutex<Vec<(Dest, String, Result<Fetched, String>)>>> = std::sync::LazyLock::new(Default::default);
 
 /// The GIF website people find GIFs on (🌐 in the picker).
 pub const GIF_SITE: &str = "https://giphy.com";
@@ -145,7 +147,7 @@ fn import_box(ui: &mut Ui, g: &mut GifState, dest: Dest) {
         }
     });
     if dest == Dest::Server && !g.link_input.trim().is_empty() {
-        ui.add(egui::TextEdit::singleline(&mut g.link_name).hint_text("Name (what people search for, e.g. happy dance)").desired_width(f32::INFINITY));
+        ui.add(egui::TextEdit::singleline(&mut g.link_name).hint_text("Name (optional: else its title on the page)").desired_width(f32::INFINITY));
     }
     if g.link_busy > 0 {
         ui.horizontal(|ui| {
@@ -174,16 +176,18 @@ impl GifState {
     }
 
     /// Sends GIFs to the server's library (in the background: they can be 10 MB each).
-    pub fn upload(&mut self, conn: &crate::net::Connection, files: Vec<(String, Vec<u8>)>) {
+    pub fn upload(&mut self, conn: &crate::net::Connection, files: Vec<(String, Vec<u8>, Vec<String>)>) {
         let category = self.upload_category.trim().to_string();
-        for (name, data) in files {
+        let tagged = self.tags_ok;
+        for (name, data, tags) in files {
             self.next_upload = self.next_upload.wrapping_add(1);
             let id = self.next_upload;
             self.uploads.insert(id, name.clone());
             let tx = conn.bulk_tx.clone();
             let category = category.clone();
             std::thread::spawn(move || {
-                let _ = tx.blocking_send(BulkC2S::AddServerGif { id, category, name, data });
+                let msg = if tagged && !tags.is_empty() { BulkC2S::AddServerGifTagged { id, category, name, tags, data } } else { BulkC2S::AddServerGif { id, category, name, data } };
+                let _ = tx.blocking_send(msg);
             });
         }
     }
@@ -195,7 +199,7 @@ impl GifState {
             let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
             match std::fs::metadata(&p) {
                 Ok(m) if m.len() <= MAX_CHAT_IMAGE as u64 => match std::fs::read(&p) {
-                    Ok(d) if is_gif(&d) => files.push((name, d)),
+                    Ok(d) if is_gif(&d) => files.push((name, d, Vec::new())),
                     _ => self.failed.push(format!("{name}: not a GIF")),
                 },
                 _ => self.failed.push(format!("{name}: larger than {} MB", MAX_CHAT_IMAGE / (1024 * 1024))),
@@ -459,13 +463,15 @@ pub fn picker(ui: &mut Ui, anchor: egui::Rect, g: &mut GifState, conn: &crate::n
     for (dest, given, r) in std::mem::take(&mut *LINKED.lock()) {
         g.link_busy = g.link_busy.saturating_sub(1);
         g.link_note = Some(match r {
-            Ok((data, name)) if dest == Dest::Server => {
-                let name = if given.is_empty() { name } else { format!("{given}.gif") };
-                g.upload(conn, vec![(name, data)]);
-                (true, "Adding it to the server's GIFs…".into())
+            Ok(f) if dest == Dest::Server => {
+                // Its name: yours, else its title on the page, else the file's.
+                let name = if !given.is_empty() { format!("{given}.gif") } else { f.title.map(|t| format!("{t}.gif")).unwrap_or(f.name) };
+                let n = f.tags.len();
+                g.upload(conn, vec![(name, f.data, f.tags)]);
+                (true, if n > 0 && g.tags_ok { format!("Adding it to the server's GIFs, with {n} tags from its page…") } else { "Adding it to the server's GIFs…".into() })
             }
-            Ok((data, _)) => {
-                add_favourite(&data);
+            Ok(f) => {
+                add_favourite(&f.data);
                 (true, "✔ Added to your favourites".into())
             }
             Err(e) => (false, format!("⚠ {e}")),
@@ -736,7 +742,32 @@ fn download(url: &str, limit: usize) -> Result<Vec<u8>, String> {
 
 /// Downloads the GIF behind a link (the page's GIF for GIPHY / Tenor / KLIPY pages).
 /// Only the sender's device does this; the GIF is then posted like a picture.
-pub fn fetch_link(url: &str) -> Result<(Vec<u8>, String), String> {
+/// A GIF downloaded from a link, with what its page says about it.
+pub struct Fetched {
+    pub data: Vec<u8>,
+    /// File name (from the address).
+    pub name: String,
+    /// The GIF's title on its page (e.g. GIPHY's "Will Smith Mib").
+    pub title: Option<String>,
+    /// Its tags on that page: search words for the server's library.
+    pub tags: Vec<String>,
+}
+
+pub fn fetch_link(url: &str) -> Result<Fetched, String> {
+    let (data, name, page) = fetch_gif(url)?;
+    // What the page says about the GIF: GIPHY's own page (also for its media addresses),
+    // or the keywords of the page the link led to.
+    let (title, tags) = match giphy_id(url) {
+        Some(id) => download(&format!("https://giphy.com/gifs/{id}"), 4 * 1024 * 1024)
+            .map(|b| giphy_info(&String::from_utf8_lossy(&b), &id))
+            .unwrap_or_default(),
+        None => page.as_deref().map(page_info).unwrap_or_default(),
+    };
+    Ok(Fetched { data, name, title, tags })
+}
+
+/// The GIF behind a link: (bytes, file name, the page it was found on).
+fn fetch_gif(url: &str) -> Result<(Vec<u8>, String, Option<String>), String> {
     let url = giphy_direct(url).unwrap_or_else(|| url.to_string());
     let data = download(&url, MAX_CHAT_IMAGE)?;
     let name = |u: &str| {
@@ -750,7 +781,7 @@ pub fn fetch_link(url: &str) -> Result<(Vec<u8>, String), String> {
         if clean.to_lowercase().ends_with(".gif") { clean } else { "GIF.gif".to_string() }
     };
     if is_gif(&data) {
-        return Ok((data, name(&url)));
+        return Ok((data, name(&url), None));
     }
     // A web page: its GIF is in the share preview tags.
     let page = String::from_utf8_lossy(&data[..data.len().min(3 * 1024 * 1024)]).to_string();
@@ -759,7 +790,92 @@ pub fn fetch_link(url: &str) -> Result<(Vec<u8>, String), String> {
     if !is_gif(&data) {
         return Err("That link does not lead to a GIF".into());
     }
-    Ok((data, name(&found)))
+    Ok((data, name(&found), Some(page)))
+}
+
+/// GIPHY's id for a GIF from any of its links: pages (giphy.com/gifs/<words>-<id>,
+/// /stickers/, /embed/) and media addresses (media*.giphy.com/media/.../<id>/giphy.gif,
+/// i.giphy.com/<id>.gif).
+pub fn giphy_id(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let (host, path) = rest.split_once('/')?;
+    let host = host.to_ascii_lowercase();
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    let ok = |id: &str| (!id.is_empty() && id.len() <= 40 && id.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| id.to_string());
+    if host == "giphy.com" || host == "www.giphy.com" {
+        return giphy_direct(url).and_then(|d| d.strip_prefix("https://i.giphy.com/").and_then(|r| r.strip_suffix(".gif")).map(String::from));
+    }
+    if host == "i.giphy.com" {
+        return ok(path.rsplit('/').next().unwrap_or_default().trim_end_matches(".gif").trim_end_matches(".webp"));
+    }
+    if host.ends_with(".giphy.com") && path.starts_with("media/") {
+        let mut parts = path.rsplit('/');
+        let file = parts.next().unwrap_or_default();
+        return if file.contains('.') { parts.next().and_then(ok) } else { ok(file) };
+    }
+    None
+}
+
+/// Plain text from a JSON string body (the common escapes).
+fn unjson(s: &str) -> String {
+    s.replace("\\u0026", "&").replace("\\u0027", "'").replace("\\/", "/").replace("\\\\", "\\")
+}
+
+/// Title and tags of a GIF on its GIPHY page: in the page's data, right after the GIF's
+/// id (the page also lists related GIFs, each with their own).
+fn giphy_info(html: &str, id: &str) -> (Option<String>, Vec<String>) {
+    let s = html.replace("\\\"", "\"");
+    let Some(at) = s.find(&format!("\"id\":\"{id}\"")) else { return (None, Vec::new()) };
+    let mut end = (at + 8000).min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let window = &s[at..end];
+    let title = window.split_once("\"title\":\"").and_then(|(_, r)| r.split_once('"')).map(|(t, _)| unjson(t)).map(|t| clean_title(&t)).filter(|t| !t.is_empty());
+    let tags = window
+        .split_once("\"tags\":[")
+        .and_then(|(_, r)| r.split_once(']'))
+        .map(|(list, _)| list.split("\",\"").map(|t| unjson(t.trim_matches('"'))).filter(|t| !t.trim().is_empty() && !t.to_lowercase().starts_with("giphy")).collect())
+        .unwrap_or_default();
+    (title, clean_tags(tags))
+}
+
+/// "Will Smith Mib GIF" / "Happy Dance GIF by Disney" -> "Will Smith Mib" / "Happy Dance".
+fn clean_title(t: &str) -> String {
+    let t = t.split(" GIF by ").next().unwrap_or(t).split(" Sticker by ").next().unwrap_or(t);
+    let t = t.strip_suffix(" GIF").or_else(|| t.strip_suffix(" Sticker")).unwrap_or(t);
+    t.chars().filter(|c| !c.is_control()).take(60).collect::<String>().trim().to_string()
+}
+
+/// At most MAX_GIF_TAGS words, no repeats, each short.
+fn clean_tags(tags: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tags {
+        let t: String = t.chars().filter(|c| !c.is_control()).take(MAX_GIF_TAG_LEN).collect::<String>().trim().to_string();
+        if !t.is_empty() && !out.iter().any(|o| o.eq_ignore_ascii_case(&t)) {
+            out.push(t);
+        }
+        if out.len() >= MAX_GIF_TAGS {
+            break;
+        }
+    }
+    out
+}
+
+/// Other GIF pages (Tenor, KLIPY...): the page's keywords and title.
+fn page_info(html: &str) -> (Option<String>, Vec<String>) {
+    let meta = |key: &str| {
+        let lower = html.to_ascii_lowercase();
+        let at = lower.find(&format!("name=\"{key}\"")).or_else(|| lower.find(&format!("property=\"{key}\"")))?;
+        let start = lower[..at].rfind('<')?;
+        let end = at + lower[at..].find('>')?;
+        let tag = &html[start..end];
+        let ci = tag.to_ascii_lowercase().find("content=\"")?;
+        tag[ci + 9..].split('"').next().map(|v| v.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", "\""))
+    };
+    let tags = meta("keywords").map(|k| k.split(',').map(String::from).collect()).unwrap_or_default();
+    let title = meta("og:title").map(|t| clean_title(&t)).filter(|t| !t.is_empty());
+    (title, clean_tags(tags))
 }
 
 /// GIPHY pages (giphy.com/gifs/<words>-<id>, /stickers/..., /embed/<id>, with or without
@@ -888,15 +1004,39 @@ mod tests {
     #[test]
     #[ignore]
     fn giphy_live() {
-        let (data, name) = fetch_link("https://giphy.com/gifs/cat-funny-JIX9t2j0ZTN9S").unwrap();
-        assert!(is_gif(&data), "{name}");
+        let f = fetch_link("https://giphy.com/gifs/cat-funny-JIX9t2j0ZTN9S").unwrap();
+        assert!(is_gif(&f.data), "{}", f.name);
         // A GIF's own address on GIPHY's media server (with its long tracking part).
         let direct = "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdXdoN29wM2Y0eGZ1ejR0aHE2b294NjN2aGNkaDMxZHZ3YXRsdndmYiZlcD12MV9naWZzX3RyZW5kaW5nJmN0PWc/R7m04yMaGWVeE/giphy.gif";
         assert_eq!(gif_link(direct).as_deref(), Some(direct));
-        let (data, name) = fetch_link(direct).unwrap();
-        assert!(is_gif(&data), "{name}");
-        assert_eq!(name, "giphy R7m04yMaGWVeE.gif");
-        println!("{name}: {} KB", data.len() / 1024);
+        let f = fetch_link(direct).unwrap();
+        assert!(is_gif(&f.data), "{}", f.name);
+        assert_eq!(f.name, "giphy R7m04yMaGWVeE.gif");
+        assert_eq!(f.title.as_deref(), Some("Will Smith Mib"));
+        assert!(f.tags.iter().any(|t| t == "men in black"), "{:?}", f.tags);
+        assert!(!f.tags.iter().any(|t| t.starts_with("giphy")), "GIPHY's own tags are left out");
+        println!("{}: {} KB, title {:?}, tags {:?}", f.name, f.data.len() / 1024, f.title, f.tags);
+    }
+
+    #[test]
+    fn giphy_ids() {
+        assert_eq!(giphy_id("https://media.giphy.com/media/v1.Y2lk/R7m04yMaGWVeE/giphy.gif").as_deref(), Some("R7m04yMaGWVeE"));
+        assert_eq!(giphy_id("https://media2.giphy.com/media/R7m04yMaGWVeE/200w.gif?cid=1").as_deref(), Some("R7m04yMaGWVeE"));
+        assert_eq!(giphy_id("https://i.giphy.com/R7m04yMaGWVeE.gif").as_deref(), Some("R7m04yMaGWVeE"));
+        assert_eq!(giphy_id("https://giphy.com/gifs/will-smith-R7m04yMaGWVeE").as_deref(), Some("R7m04yMaGWVeE"));
+        assert_eq!(giphy_id("https://example.com/media/x/giphy.gif"), None);
+    }
+
+    #[test]
+    fn giphy_page_data() {
+        // As on GIPHY's pages: escaped JSON, the GIF first, then related GIFs.
+        let html = r#"x \"id\":\"AAA\",\"title\":\"Will Smith Mib GIF\",\"tags\":[\"movies\",\"men in black\",\"Movies\"] y \"id\":\"BBB\",\"title\":\"Other\",\"tags\":[\"other\"]"#;
+        assert_eq!(giphy_info(html, "AAA"), (Some("Will Smith Mib".into()), vec!["movies".to_string(), "men in black".to_string()]));
+        assert_eq!(giphy_info(html, "BBB").1, vec!["other".to_string()]);
+        assert_eq!(giphy_info(html, "CCC"), (None, vec![]));
+        assert_eq!(clean_title("Happy Dance GIF by Disney"), "Happy Dance");
+        let page = r#"<meta name="keywords" content="cat, dance, cat dance,Cat"><meta property="og:title" content="Cat Dance GIF">"#;
+        assert_eq!(page_info(page), (Some("Cat Dance".into()), vec!["cat".to_string(), "dance".to_string(), "cat dance".to_string()]));
     }
 
     #[test]

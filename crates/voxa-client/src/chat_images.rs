@@ -187,9 +187,9 @@ fn prepare(src: ImageSource, name: &str) -> Result<(Vec<u8>, u32, u32, String), 
     let data = match src {
         ImageSource::File(p) => std::fs::read(&p).map_err(|e| format!("Cannot read {}: {e}", p.display()))?,
         ImageSource::Link(url) => {
-            let (data, n) = crate::gifs::fetch_link(&url)?;
-            name = n;
-            data
+            let f = crate::gifs::fetch_link(&url)?;
+            name = f.name;
+            f.data
         }
         ImageSource::Pasted(ci) => {
             let [w, h] = ci.size;

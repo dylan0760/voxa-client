@@ -1124,7 +1124,7 @@ impl VoxaApp {
                     1 if s.my_server_perms() & perm::GIF_MANAGE != 0 => {
                         if let Ok(d) = std::fs::read(crate::config::config_dir().join("demo.gif")) {
                             s.gif.upload_category = "Demo".into();
-                            s.gif.upload(&s.conn, vec![("checker dance.gif".into(), d.clone()), ("checker dance.gif".into(), d)]);
+                            s.gif.upload(&s.conn, vec![("checker dance.gif".into(), d.clone(), vec!["checkers".into(), "demo".into()]), ("checker dance.gif".into(), d, Vec::new())]);
                         }
                         STEP.store(2, Relaxed);
                     }

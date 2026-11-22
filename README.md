@@ -188,6 +188,10 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
       press Add. It works with GIPHY pages (`giphy.com/gifs/…`, `/stickers/…`), GIPHY's
       own GIF addresses (`media.giphy.com/media/…/giphy.gif`), Tenor and KLIPY pages and
       any `.gif` address. Your device downloads the GIF (up to 10 MB).
+    * 1.37.0 (Voxa Server 1.29.0+): a GIF added to the server from a link keeps the
+      **tags** of its page (for GIPHY, also when you paste its `media.giphy.com`
+      address), so people find it by them. With no name typed, it gets its title on the
+      page (e.g. "Will Smith Mib").
     * **⭐ Favourites:** click any GIF in the chat ▸ **⭐ Add to GIF favourites**, or
       right-click one in the picker. Kept on this device, for every server.
     * **🕘 Recent:** the GIFs you sent lately.

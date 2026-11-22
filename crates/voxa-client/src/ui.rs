@@ -3810,9 +3810,10 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
     let my_channel = s.my_channel();
     let target = chat_target(s);
     let gif_library = s.supports("1.28.0");
+    s.gif.tags_ok = s.supports("1.29.0");
     let can_add_gifs = gif_library && s.my_server_perms() & perm::GIF_MANAGE != 0;
     if let Some((name, data)) = crate::chat_images::viewer(ui.ctx(), &mut s.images, can_add_gifs) {
-        s.gif.upload(&s.conn, vec![(name, data)]);
+        s.gif.upload(&s.conn, vec![(name, data, Vec::new())]);
         s.log(EventKind::Info, "Adding the GIF to the server's library…".to_string());
     }
     // Images go through the server: not possible for someone who is offline.
