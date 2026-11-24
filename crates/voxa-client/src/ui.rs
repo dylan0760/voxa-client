@@ -35,6 +35,7 @@ pub enum Action {
     Watch(ClientId, bool),
     ToggleLocalMute(ClientId),
     SetVolume(ClientId, f32),
+    SetDucking { server: String, uid: String, enabled: bool },
     ToggleMic,
     ToggleSpeakers,
     ToggleAway,
@@ -2043,6 +2044,20 @@ fn client_row(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, c: &
     }
 }
 
+pub(crate) fn ducking_hint(percent: u8) -> String {
+    tf!("While others speak, marked users' voice and shared audio play at {}% of their normal volume.", percent)
+}
+
+fn ducking_menu_item(ui: &mut Ui, s: &Session, shared: &crate::audio::VoiceShared, id: ClientId, a: &mut Vec<Action>) {
+    let Some(c) = s.clients.get(&id).filter(|c| c.id != s.me && !c.uid.is_empty() && !s.server_key.is_empty()) else { return };
+    let mut enabled = shared.playback.lock().ducked.contains(&id);
+    let percent = shared.settings.lock().ducking_percent;
+    if ui.checkbox(&mut enabled, t!("Audio ducking")).on_hover_text(ducking_hint(percent)).changed() {
+        a.push(Action::SetDucking { server: s.server_key.clone(), uid: c.uid.clone(), enabled });
+        ui.close();
+    }
+}
+
 fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Response, c: &ClientInfo, a: &mut Vec<Action>) {
     let perms = s.perms();
     let me = c.id == s.me;
@@ -2086,12 +2101,13 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
                 }
             }
             ui.separator();
-            let mut vol = shared.volumes.lock().get(&c.id).copied().unwrap_or(1.0);
+            let mut vol = shared.playback.lock().volumes.get(&c.id).copied().unwrap_or(1.0);
             ui.label(t!("User volume"));
             if ui.add(egui::Slider::new(&mut vol, 0.0..=3.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0))).changed() {
                 a.push(Action::SetVolume(c.id, vol));
             }
-            let muted = shared.local_muted.lock().contains(&c.id);
+            ducking_menu_item(ui, s, shared, c.id, a);
+            let muted = shared.playback.lock().local_muted.contains(&c.id);
             if ui.button(if muted { t!("🔊  Unmute for me") } else { t!("🔇  Mute for me") }).clicked() {
                 a.push(Action::ToggleLocalMute(c.id));
                 ui.close();
@@ -2281,7 +2297,8 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
     let a = &mut app.actions;
     let now = now_unix();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        let mut row = |ui: &mut Ui, uid: &str, name: &str, sub: String, dot: Option<Color32>| {
+        let mut row = |ui: &mut Ui, uid: &str, name: &str, sub: String, peer: Option<(Color32, ClientId)>| {
+            let dot = peer.map(|(dot, _)| dot);
             let online = dot.is_some();
             // The whole row is one target: the texts in it do not catch the mouse.
             let bg = ui.painter().add(egui::Shape::Noop);
@@ -2327,6 +2344,9 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
                     a.push(Action::CallPerson(uid.to_string(), name.to_string()));
                     ui.close();
                 }
+                if let Some((_, id)) = peer {
+                    ducking_menu_item(ui, s, &app.voice_shared, id, a);
+                }
                 if !online && can_forget && ui.button(RichText::new(t!("🗑  Remove from server…")).color(RED)).on_hover_text(t!("Forget them: groups, permissions, picture (they start fresh if they come back)")).clicked() {
                     a.push(Action::Dialog(dialogs::Open::ForgetClient(uid.to_string(), name.to_string())));
                     ui.close();
@@ -2354,7 +2374,7 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
                 Some(st) => format!("{st} · {place}"),
                 None => place,
             };
-            row(ui, &c.uid, &c.nickname, sub, Some(dot));
+            row(ui, &c.uid, &c.nickname, sub, Some((dot, c.id)));
         }
         if !can_list {
             ui.add_space(8.0);
@@ -3007,10 +3027,10 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
     let title = if unread > 0 { tf!("({unread}) {what} - Voxa Messages"; unread = unread, what = what) } else { tf!("{what} - Voxa Messages"; what = what) };
     let builder = messages_builder(title, egui_shown);
     let t = theme();
-    let VoxaApp { sess, actions, settings, previews, dm_create_blocked, .. } = app;
+    let VoxaApp { sess, actions, settings, previews, voice_shared, dm_create_blocked, .. } = app;
     let Some(s) = sess.as_mut() else { return };
     let mut chat_actions: Vec<Action> = Vec::new();
-    let mut calls: Vec<Action> = Vec::new();
+    let mut sidebar_actions = Vec::new();
     let made = guarded(|| ctx.show_viewport_immediate(vid, builder, |ui, _class| {
         if ui.input(|i| i.viewport().close_requested()) {
             // Hidden, not destroyed: making it again may not be possible from the tray.
@@ -3028,13 +3048,13 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
             paint_background(ui.ctx(), ui.painter(), ui.ctx().content_rect(), g);
         }
         egui::Panel::left("dm_list").resizable(false).exact_size(250.0).frame(Frame::new().fill(t.side).inner_margin(Margin::same(8))).show(ui, |ui| {
-            messages_sidebar(s, ui, &open_ids, sel);
+            messages_sidebar(s, ui, &open_ids, sel, voice_shared, &mut sidebar_actions);
         });
         if let Some(id) = s.dm_win.call.take() {
-            calls.push(Action::StartCall(id));
+            sidebar_actions.push(Action::StartCall(id));
         }
         if let Some((uid, name)) = s.dm_win.forget.take() {
-            calls.push(Action::Dialog(dialogs::Open::ForgetClient(uid, name)));
+            sidebar_actions.push(Action::Dialog(dialogs::Open::ForgetClient(uid, name)));
         }
         egui::CentralPanel::default().frame(Frame::new().fill(t.main)).show(ui, |ui| {
             if s.dm_win.compose.is_some() {
@@ -3052,7 +3072,7 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
         });
     }));
     *dm_create_blocked |= made.is_none();
-    actions.append(&mut calls);
+    actions.append(&mut sidebar_actions);
     // Everything the chat asked for applies to its conversation.
     if let Some(sel) = sel {
         actions.extend(chat_actions.into_iter().map(|a| Action::InDm(sel, Box::new(a))));
@@ -3106,7 +3126,7 @@ fn messages_row(ui: &mut Ui, selected: bool, avatar_of: (&str, &str), dot: Optio
 }
 
 /// The left side of the Messages window: chats, then the people on the server.
-fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option<DmId>) {
+fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option<DmId>, shared: &crate::audio::VoiceShared, a: &mut Vec<Action>) {
     let t = theme();
     ui.add(egui::TextEdit::singleline(&mut s.dm_win.search).hint_text(t!("🔍 Search people and chats")).desired_width(f32::INFINITY));
     let q = s.dm_win.search.trim().to_lowercase();
@@ -3161,7 +3181,7 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
                 _ => (GREEN, s.clients.get(&cid).and_then(|c| s.channels.get(&c.channel)).map(|ch| format!("in {}", ch.name)).unwrap_or_else(|| "on the server".into())),
             };
             let r = messages_row(ui, false, (&name, &uid), Some(dot), &name, (&status, t.dim), 0).on_hover_text(t!("Click to chat, right-click to call and more"));
-            person_menu(s, &r, &uid, &name, groups_ok, true);
+            person_menu(s, &r, &uid, &name, Some(cid), shared, a);
             if r.clicked() {
                 let id = s.dm_open(&uid, &name);
                 s.dm_win.sel = Some(id);
@@ -3176,7 +3196,7 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
         for (uid, name, seen) in offline {
             let sub = if seen == 0 { t!("Offline").to_string() } else { tf!("Seen {} ago", fmt_duration(now.saturating_sub(seen))) };
             let r = messages_row(ui, false, (&name, &uid), None, &name, (&sub, t.dim), 0).on_hover_text(t!("Messages are delivered when they come online"));
-            person_menu(s, &r, &uid, &name, groups_ok, false);
+            person_menu(s, &r, &uid, &name, None, shared, a);
             if r.clicked() {
                 let id = s.dm_open(&uid, &name);
                 s.dm_win.sel = Some(id);
@@ -3187,9 +3207,13 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
 }
 
 /// Right-click menu of a person in the Messages window.
-fn person_menu(s: &mut Session, r: &egui::Response, uid: &str, name: &str, groups_ok: bool, online: bool) {
+fn person_menu(s: &mut Session, r: &egui::Response, uid: &str, name: &str, cid: Option<ClientId>, shared: &crate::audio::VoiceShared, a: &mut Vec<Action>) {
+    let online = cid.is_some();
     r.context_menu(|ui| {
         ui.label(RichText::new(name).strong());
+        if let Some(id) = cid {
+            ducking_menu_item(ui, s, shared, id, a);
+        }
         if ui.button(t!("💬  Send message")).clicked() {
             let id = s.dm_open(uid, name);
             s.dm_win.sel = Some(id);
@@ -3207,7 +3231,7 @@ fn person_menu(s: &mut Session, r: &egui::Response, uid: &str, name: &str, group
             s.dm_win.forget = Some((uid.to_string(), name.to_string()));
             ui.close();
         }
-        if !groups_ok {
+        if !s.supports("1.19.0") {
             return;
         }
         // Group chats you are in that they are not.
@@ -4537,14 +4561,14 @@ fn stream_view(app: &mut VoxaApp, ui: &mut Ui, id: ClientId, fullscreen: bool) {
             }
             // Stream sound: mute button and volume (only for other people's streams).
             if !mine {
-                let mut vol = app.voice_shared.stream_volumes.lock().get(&id).copied().unwrap_or(1.0);
+                let mut vol = app.voice_shared.playback.lock().stream_volumes.get(&id).copied().unwrap_or(1.0);
                 let silent = vol <= 0.0;
                 ui.spacing_mut().slider_width = 70.0;
                 ui.add(egui::Slider::new(&mut vol, 0.0..=2.0).show_value(false)).on_hover_text(format!("Stream volume: {:.0}%", vol * 100.0));
                 if icon_button(ui, if silent { "🔇" } else { "🔊" }, if silent { t!("Unmute the stream's sound") } else { t!("Mute the stream's sound") }, Some(Color32::WHITE)).clicked() {
                     vol = if silent { 1.0 } else { 0.0 };
                 }
-                app.voice_shared.stream_volumes.lock().insert(id, vol);
+                app.voice_shared.playback.lock().stream_volumes.insert(id, vol);
             }
         });
     });
@@ -4675,17 +4699,28 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
             }
         }
         Action::ToggleLocalMute(id) => {
-            let mut m = app.voice_shared.local_muted.lock();
-            if !m.remove(&id) {
-                m.insert(id);
+            let mut playback = app.voice_shared.playback.lock();
+            if !playback.local_muted.remove(&id) {
+                playback.local_muted.insert(id);
             }
         }
         Action::SetVolume(id, v) => {
-            app.voice_shared.volumes.lock().insert(id, v);
+            app.voice_shared.playback.lock().volumes.insert(id, v);
             if let Some(uid) = app.sess.as_ref().and_then(|s| s.clients.get(&id)).map(|c| c.uid.clone()) {
                 app.settings.client_volumes.insert(uid, v);
                 app.settings.save();
             }
+        }
+        Action::SetDucking { server, uid, enabled } => {
+            let Some(s) = app.sess.as_ref().filter(|s| s.server_key == server && !server.is_empty()) else { return };
+            app.settings.set_user_ducking(&server, &uid, enabled);
+            {
+                let mut playback = app.voice_shared.playback.lock();
+                for c in s.clients.values().filter(|c| c.uid == uid && c.id != s.me) {
+                    playback.set_ducked(c.id, enabled);
+                }
+            }
+            app.settings.save();
         }
         Action::ToggleMic => {
             if let Some(me) = app.sess.as_ref().and_then(|s| s.me()) {

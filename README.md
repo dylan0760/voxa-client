@@ -123,6 +123,14 @@ server needs a newer version, Voxa tells you and opens the update window.
   from the game. Options ▸ Playback shows whether that is the case, with a **Use Sonar
   Chat and Sonar Microphone** button when it isn't.
 * **Volume:** per-user volume, local mute and notification sounds.
+* **Audio ducking (1.39.0):** right-click the person playing music in the channel tree
+  or People list and check **Audio ducking**. While you speak into your transmitting
+  microphone or another unmarked person speaks, that user's voice and screen-share
+  audio fade to **20% of their usual volume**. For example, a user set to 50% plays at
+  10% during speech, then fades back to 50%. Short pauses between words don't reset it.
+  * Choose the percentage in **Options ▸ Playback ▸ Volume while ducked** (0–100%).
+    You can mark several music users; they won't trigger ducking for each other.
+    The choices are saved on your device by identity for this server.
 * **Saves upload bandwidth:** when nobody else in your channel can hear you (you're alone,
   or the others are on the web page or have muted their speakers), Voxa sends no voice
   at all. Your speaking ring still lights up, and sending starts the moment someone who

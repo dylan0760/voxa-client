@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -208,6 +208,8 @@ pub struct AudioSettings {
     pub ptt_release_ms: u32,
     pub input_gain: f32,
     pub output_volume: f32,
+    /// Percentage of each marked user's normal playback volume to keep during speech.
+    pub ducking_percent: u8,
     pub sounds: bool,
     /// Warn (sound + banner) when talking while the microphone is muted.
     pub muted_warning: bool,
@@ -225,6 +227,7 @@ impl Default for AudioSettings {
             ptt_release_ms: 250,
             input_gain: 1.0,
             output_volume: 1.0,
+            ducking_percent: 20,
             sounds: true,
             muted_warning: true,
         }
@@ -313,6 +316,9 @@ pub struct Settings {
     pub download_dir: Option<String>,
     /// Per-uid local volume adjustments.
     pub client_volumes: HashMap<String, f32>,
+    /// Verified server fingerprint -> identities the listener has marked for audio ducking.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub ducked_users: HashMap<String, HashSet<String>>,
     /// Closing the window hides Voxa to the system tray instead of quitting.
     pub minimize_to_tray: bool,
     /// Check GitHub for new releases at startup and every 12 hours.
@@ -365,6 +371,7 @@ impl Default for Settings {
             show_timestamps: true,
             download_dir: None,
             client_volumes: HashMap::new(),
+            ducked_users: HashMap::new(),
             minimize_to_tray: true,
             auto_update: true,
             recent_emoji: Vec::new(),
@@ -394,6 +401,21 @@ pub fn config_dir() -> PathBuf {
 }
 
 impl Settings {
+    pub fn ducks_user(&self, server: &str, uid: &str) -> bool {
+        self.ducked_users.get(server).is_some_and(|users| users.contains(uid))
+    }
+
+    pub fn set_user_ducking(&mut self, server: &str, uid: &str, enabled: bool) {
+        if enabled {
+            self.ducked_users.entry(server.to_owned()).or_default().insert(uid.to_owned());
+        } else if let Some(users) = self.ducked_users.get_mut(server) {
+            users.remove(uid);
+            if users.is_empty() {
+                self.ducked_users.remove(server);
+            }
+        }
+    }
+
     pub fn load() -> Settings {
         let path = config_dir().join("settings.json");
         let fresh = !path.exists();
@@ -411,6 +433,7 @@ impl Settings {
             None => Settings::default(),
         };
         s.fresh = fresh;
+        s.audio.ducking_percent = s.audio.ducking_percent.min(100);
         if s.identities.is_empty() {
             s.identities.push(Identity::generate("Default"));
             s.default_identity = 0;
@@ -479,5 +502,25 @@ pub fn normalize_address(addr: &str) -> String {
         Some((_, p)) if p.parse::<u16>().is_ok() && a.matches(':').count() == 1 => a.to_string(),
         _ if a.matches(':').count() > 1 => format!("[{a}]:{}", voxa_proto::DEFAULT_PORT),
         _ => format!("{a}:{}", voxa_proto::DEFAULT_PORT),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ducking_settings_upgrade_and_round_trip_per_server() {
+        let mut settings: Settings = serde_json::from_str(r#"{"audio":{"output_volume":0.75},"client_volumes":{"music":0.5}}"#).unwrap();
+        assert_eq!(settings.audio.ducking_percent, 20);
+        assert!(!settings.ducks_user("server A", "music"));
+        settings.set_user_ducking("server A", "music", true);
+        settings.audio.ducking_percent = 10;
+        let mut saved: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(saved.ducks_user("server A", "music"));
+        assert!(!saved.ducks_user("server B", "music"));
+        assert_eq!((saved.audio.ducking_percent, saved.audio.output_volume, saved.client_volumes["music"]), (10, 0.75, 0.5));
+        saved.set_user_ducking("server A", "music", false);
+        assert!(!saved.ducks_user("server A", "music"));
     }
 }

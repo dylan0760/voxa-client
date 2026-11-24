@@ -46,8 +46,33 @@ impl MutedTalk {
     }
 }
 
+/// Local playback controls for the current connection's client IDs.
+#[derive(Default)]
+pub struct Playback {
+    pub volumes: HashMap<ClientId, f32>,
+    pub stream_volumes: HashMap<ClientId, f32>,
+    pub local_muted: HashSet<ClientId>,
+    pub ducked: HashSet<ClientId>,
+}
+
+impl Playback {
+    pub fn set_ducked(&mut self, id: ClientId, enabled: bool) {
+        if enabled {
+            self.ducked.insert(id);
+        } else {
+            self.ducked.remove(&id);
+        }
+    }
+
+    pub fn forget(&mut self, id: ClientId) {
+        self.volumes.remove(&id);
+        self.stream_volumes.remove(&id);
+        self.local_muted.remove(&id);
+        self.ducked.remove(&id);
+    }
+}
+
 pub struct VoiceShared {
-    pub stop: AtomicBool,
     /// False when muted or lacking talk power.
     pub transmit_allowed: AtomicBool,
     pub output_muted: AtomicBool,
@@ -60,9 +85,9 @@ pub struct VoiceShared {
     pub muted_talk_ms: AtomicU64,
     /// Repainted when a warning fires, so the banner shows at once.
     pub ctx: Mutex<Option<egui::Context>>,
-    /// Sound of watched streams (stereo) and their volumes (1.0 = normal).
+    /// Sound of watched streams (stereo).
     pub streams: Mutex<HashMap<ClientId, StreamSound>>,
-    pub stream_volumes: Mutex<HashMap<ClientId, f32>>,
+    pub playback: Mutex<Playback>,
     input_level: AtomicU32,
     pub bitrate: AtomicI32,
     pub ping_ms: AtomicU32,
@@ -70,8 +95,6 @@ pub struct VoiceShared {
     pub packets_lost: AtomicU64,
     pub packets_out: AtomicU64,
     pub talking: Mutex<HashMap<ClientId, Instant>>,
-    pub volumes: Mutex<HashMap<ClientId, f32>>,
-    pub local_muted: Mutex<HashSet<ClientId>>,
     pub settings: Mutex<AudioSettings>,
     effects: Mutex<VecDeque<f32>>,
     /// Sequence number (and nonce) of the next sent voice packet. Never reset: the
@@ -100,7 +123,6 @@ pub struct VoiceShared {
 impl VoiceShared {
     pub fn new(settings: AudioSettings) -> Arc<VoiceShared> {
         Arc::new(VoiceShared {
-            stop: AtomicBool::new(false),
             transmit_allowed: AtomicBool::new(true),
             output_muted: AtomicBool::new(false),
             self_talking: AtomicBool::new(false),
@@ -109,7 +131,7 @@ impl VoiceShared {
             muted_talk_ms: AtomicU64::new(0),
             ctx: Mutex::new(None),
             streams: Mutex::new(HashMap::new()),
-            stream_volumes: Mutex::new(HashMap::new()),
+            playback: Mutex::new(Playback::default()),
             input_level: AtomicU32::new((-90f32).to_bits()),
             bitrate: AtomicI32::new(voxa_proto::quality_to_bitrate(6)),
             ping_ms: AtomicU32::new(0),
@@ -117,8 +139,6 @@ impl VoiceShared {
             packets_lost: AtomicU64::new(0),
             packets_out: AtomicU64::new(0),
             talking: Mutex::new(HashMap::new()),
-            volumes: Mutex::new(HashMap::new()),
-            local_muted: Mutex::new(HashSet::new()),
             settings: Mutex::new(settings),
             effects: Mutex::new(VecDeque::new()),
             tx_seq: Arc::new(AtomicU64::new(1)),
@@ -424,66 +444,125 @@ pub struct StreamSound {
     buffering: bool,
 }
 
+// Continuous transmitters send frames even during silence. Measure the voice PCM
+// being played instead of treating every packet or held PTT key as speech.
+const DUCK_SPEECH_RMS: f32 = 0.004; // about -48 dBFS
+
+#[derive(Default)]
+struct VoiceRun {
+    // Specific to these devices/threads. Starting the next connection must never
+    // re-enable an old voice sender or carry its microphone activity into a new mix.
+    stopped: AtomicBool,
+    mic_activity: AtomicBool,
+}
+
+impl VoiceRun {
+    fn note_input(&self, transmitting: bool, source: &CaptureSource, rms: f32) {
+        if transmitting && *source == CaptureSource::Microphone && rms >= DUCK_SPEECH_RMS {
+            self.mic_activity.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+struct Ducker {
+    // Stereo sum of marked sources *after* their individual volume sliders.
+    background: Vec<f32>,
+    gain: f32,
+    hold_frames: usize,
+}
+
+impl Default for Ducker {
+    fn default() -> Self {
+        Self { background: Vec::new(), gain: 1.0, hold_frames: 0 }
+    }
+}
+
+impl Ducker {
+    fn add_to_mix(&mut self, out: &mut [f32], speech: bool, percent: u8) {
+        let fraction = f32::from(percent.min(100)) / 100.0;
+        const ATTACK: f32 = 1.0 / (SAMPLE_RATE as f32 * 0.030);
+        const RELEASE: f32 = 1.0 / (SAMPLE_RATE as f32 * 0.300);
+        if speech {
+            // Bridge the spaces between words. All timing uses 48 kHz mix frames,
+            // independent of output device, network packet size or UI frame rate.
+            self.hold_frames = SAMPLE_RATE as usize / 4;
+        }
+        for (dst, src) in out.chunks_exact_mut(2).zip(self.background.chunks_exact(2)) {
+            let target = if speech || self.hold_frames > 0 { fraction } else { 1.0 };
+            self.gain += (target - self.gain).clamp(-ATTACK, RELEASE);
+            dst[0] += src[0] * self.gain;
+            dst[1] += src[1] * self.gain;
+            if !speech {
+                self.hold_frames = self.hold_frames.saturating_sub(1);
+            }
+        }
+    }
+}
+
+/// Drain one stereo jitter buffer. Optionally measure its pre-volume RMS for ducking.
+fn mix_source(queue: &mut VecDeque<f32>, buffering: &mut bool, prebuffer: usize, dst: &mut [f32], volume: f32, detect: bool) -> bool {
+    if *buffering && queue.len() < prebuffer {
+        return false;
+    }
+    let n = queue.len().min(dst.len()) & !1;
+    *buffering = n < dst.len();
+    let mut energy = 0.0;
+    for (sample, pcm) in dst.iter_mut().zip(queue.drain(..n)) {
+        *sample += pcm * volume;
+        if detect {
+            energy += pcm * pcm;
+        }
+    }
+    detect && n > 0 && energy >= n as f32 * DUCK_SPEECH_RMS * DUCK_SPEECH_RMS
+}
+
 #[derive(Default)]
 struct Mixer {
     talkers: HashMap<ClientId, Talker>,
+    run: Arc<VoiceRun>,
+    ducker: Ducker,
 }
 
 impl Mixer {
     /// Mixes the next block into `out` (interleaved stereo): voice (mono, both sides),
     /// the sound of watched streams (stereo) and notification tones.
     fn pull(&mut self, shared: &VoiceShared, out: &mut [f32]) {
-        out.iter_mut().for_each(|s| *s = 0.0);
+        out.fill(0.0);
         let frames = out.len() / 2;
-        let volumes = shared.volumes.lock().clone();
-        for (id, t) in self.talkers.iter_mut() {
-            if t.buffering && t.queue.len() >= FRAME_SAMPLES * 2 * 2 {
-                t.buffering = false;
-            }
-            if t.buffering {
-                continue;
-            }
-            let vol = volumes.get(id).copied().unwrap_or(1.0);
-            for f in 0..frames {
-                match (t.queue.pop_front(), t.queue.pop_front()) {
-                    (Some(l), Some(r)) => {
-                        out[2 * f] += l * vol;
-                        out[2 * f + 1] += r * vol;
-                    }
-                    _ => {
-                        t.buffering = true;
-                        break;
-                    }
-                }
-            }
+        let (master, percent) = {
+            let settings = shared.settings.lock();
+            (settings.output_volume, settings.ducking_percent)
+        };
+        let peers = shared.playback.lock();
+        let armed = !peers.ducked.is_empty();
+        let mut speech = self.run.mic_activity.swap(false, Ordering::Relaxed);
+        if armed {
+            self.ducker.background.resize(out.len(), 0.0);
+            self.ducker.background.fill(0.0);
+        }
+        for (id, t) in &mut self.talkers {
+            let marked = peers.ducked.contains(id);
+            let vol = if peers.local_muted.contains(id) { 0.0 } else { peers.volumes.get(id).copied().unwrap_or(1.0) };
+            let detect = armed && !marked && vol > 0.0 && !speech;
+            let dst = if marked { self.ducker.background.as_mut_slice() } else { &mut *out };
+            speech |= mix_source(&mut t.queue, &mut t.buffering, FRAME_SAMPLES * 2 * 2, dst, vol, detect);
         }
         {
-            let svols = shared.stream_volumes.lock().clone();
             let mut streams = shared.streams.lock();
             for (id, s) in streams.iter_mut() {
-                // ~60 ms cushion against network jitter before playing.
-                if s.buffering && s.queue.len() >= FRAME_SAMPLES * 2 * 3 {
-                    s.buffering = false;
-                }
-                if s.buffering {
-                    continue;
-                }
-                let vol = svols.get(id).copied().unwrap_or(1.0);
-                for f in 0..frames {
-                    match (s.queue.pop_front(), s.queue.pop_front()) {
-                        (Some(l), Some(r)) => {
-                            out[2 * f] += l * vol;
-                            out[2 * f + 1] += r * vol;
-                        }
-                        _ => {
-                            s.buffering = true;
-                            break;
-                        }
-                    }
-                }
+                let vol = peers.stream_volumes.get(id).copied().unwrap_or(1.0);
+                let dst = if peers.ducked.contains(id) { self.ducker.background.as_mut_slice() } else { &mut *out };
+                // Screen-share sound can be ducked but never signals speech.
+                mix_source(&mut s.queue, &mut s.buffering, FRAME_SAMPLES * 2 * 3, dst, vol, false);
             }
         }
-        let master = shared.settings.lock().output_volume;
+        drop(peers);
+        if armed {
+            self.ducker.add_to_mix(out, speech, percent);
+        } else {
+            self.ducker.gain = 1.0;
+            self.ducker.hold_frames = 0;
+        }
         let muted = shared.output_muted.load(Ordering::Relaxed);
         let mut fx = shared.effects.lock();
         for f in 0..frames {
@@ -498,7 +577,7 @@ impl Mixer {
 }
 
 pub struct Voice {
-    pub shared: Arc<VoiceShared>,
+    run: Arc<VoiceRun>,
     _input: Option<cpal::Stream>,
     /// System / application sound capture (instead of the microphone).
     _loopback: Option<crate::loopback::Capture>,
@@ -508,20 +587,21 @@ pub struct Voice {
 
 impl Drop for Voice {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Relaxed);
+        self.run.stopped.store(true, Ordering::Relaxed);
     }
 }
 
 impl Voice {
     pub fn start(server: SocketAddr, key: [u8; 32], me: ClientId, shared: Arc<VoiceShared>) -> anyhow::Result<Voice> {
-        shared.stop.store(false, Ordering::Relaxed);
         let bind: SocketAddr = if server.is_ipv6() { "[::]:0".parse()? } else { "0.0.0.0:0".parse()? };
         let sock = UdpSocket::bind(bind)?;
         sock.connect(server)?;
         sock.set_read_timeout(Some(Duration::from_millis(200)))?;
         let cipher = Arc::new(VoiceCipher::new(&key));
         let seq = shared.tx_seq.clone();
-        let mixer = Arc::new(Mutex::new(Mixer::default()));
+        let mixer = Mixer::default();
+        let run = mixer.run.clone();
+        let mixer = Arc::new(Mutex::new(mixer));
         let capture: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
         let mut warnings = Vec::new();
 
@@ -555,24 +635,27 @@ impl Voice {
             }
         };
 
+        // Drop also stops workers if starting the second thread fails.
+        let voice = Voice { run: run.clone(), _input: input, _loopback: loopback, _output: output, warnings };
         // Encoder / sender thread.
         {
             let sock = sock.try_clone()?;
             let shared = shared.clone();
             let cipher = cipher.clone();
             let seq = seq.clone();
+            let run = run.clone();
             std::thread::Builder::new().name("voxa-voice-tx".into()).spawn(move || {
-                encoder_loop(sock, cipher, seq, me, shared, capture, in_rate);
+                encoder_loop(sock, cipher, seq, me, shared, capture, in_rate, run);
             })?;
         }
         // Receiver thread.
         {
             let shared = shared.clone();
             std::thread::Builder::new().name("voxa-voice-rx".into()).spawn(move || {
-                receiver_loop(sock, cipher, shared, mixer);
+                receiver_loop(sock, cipher, shared, mixer, run);
             })?;
         }
-        Ok(Voice { shared, _input: input, _loopback: loopback, _output: output, warnings })
+        Ok(voice)
     }
 }
 
@@ -840,6 +923,7 @@ fn encoder_loop(
     shared: Arc<VoiceShared>,
     capture: Arc<Mutex<VecDeque<f32>>>,
     in_rate: u32,
+    run: Arc<VoiceRun>,
 ) {
     // Opus Voice: mono, speech tuned. Opus Music: stereo, full band. Rebuilt when the
     // channel's codec changes.
@@ -867,14 +951,20 @@ fn encoder_loop(
     let mut ptt_release_at: Option<Instant> = None;
     let mut last_ping = Instant::now() - Duration::from_secs(10);
     let send = |kind: Kind, payload: &[u8]| {
+        if run.stopped.load(Ordering::Relaxed) {
+            return;
+        }
         let s = seq.fetch_add(1, Ordering::Relaxed);
         let pkt = cipher.seal(Direction::ToServer, kind, me, s, payload);
         if sock.send(&pkt).is_ok() {
             voxa_proto::traffic::TRAFFIC.sent(voxa_proto::traffic::Cat::Voice, pkt.len());
         }
     };
-    while !shared.stop.load(Ordering::Relaxed) {
+    loop {
         std::thread::sleep(Duration::from_millis(5));
+        if run.stopped.load(Ordering::Relaxed) {
+            break;
+        }
         if last_ping.elapsed() >= Duration::from_secs(2) {
             last_ping = Instant::now();
             send(Kind::Ping, &now_ms().to_be_bytes());
@@ -949,6 +1039,7 @@ fn encoder_loop(
                 && !shared.push_to_mute.load(Ordering::Relaxed)
                 && !shared.testing.load(Ordering::Relaxed);
             let unheard = shared.no_listeners.load(Ordering::Relaxed);
+            run.note_input(active && !unheard, &settings.source, rms);
             if active && unheard {
                 // Nobody can hear it, so nothing is sent; your speaking ring still shows.
                 transmitting = true;
@@ -993,15 +1084,18 @@ fn encoder_loop(
     }
 }
 
-fn receiver_loop(sock: UdpSocket, cipher: Arc<VoiceCipher>, shared: Arc<VoiceShared>, mixer: Arc<Mutex<Mixer>>) {
+fn receiver_loop(sock: UdpSocket, cipher: Arc<VoiceCipher>, shared: Arc<VoiceShared>, mixer: Arc<Mutex<Mixer>>, run: Arc<VoiceRun>) {
     let mut buf = [0u8; 2048];
     let mut replay = ReplayWindow::default();
     let mut pcm = vec![0f32; FRAME_SAMPLES * 6 * 2];
-    while !shared.stop.load(Ordering::Relaxed) {
+    while !run.stopped.load(Ordering::Relaxed) {
         let n = match sock.recv(&mut buf) {
             Ok(n) => n,
             Err(_) => continue,
         };
+        if run.stopped.load(Ordering::Relaxed) {
+            break;
+        }
         voxa_proto::traffic::TRAFFIC.received(voxa_proto::traffic::Cat::Voice, n);
         let Some(pkt) = cipher.open(Direction::ToClient, &buf[..n]) else { continue };
         if !replay.accept(pkt.seq) {
@@ -1025,7 +1119,7 @@ fn receiver_loop(sock: UdpSocket, cipher: Arc<VoiceCipher>, shared: Arc<VoiceSha
                     }
                     continue;
                 }
-                if shared.local_muted.lock().contains(&talker) {
+                if shared.playback.lock().local_muted.contains(&talker) {
                     continue;
                 }
                 shared.talking.lock().insert(talker, Instant::now());
@@ -1100,6 +1194,112 @@ mod muted_talk_tests {
     #[test]
     fn silence_never_warns() {
         assert!(run(|_| false, 30_000).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod ducking_tests {
+    use super::*;
+
+    // Feed pre-decoded stereo PCM directly to the playback mixer; no audio devices.
+    fn pcm(left: f32, right: f32) -> VecDeque<f32> {
+        [left, right].into_iter().cycle().take(SAMPLE_RATE as usize * 2 * 2).collect()
+    }
+
+    fn talker(left: f32, right: f32) -> Talker {
+        Talker { queue: pcm(left, right), ..Talker::new(true, false).unwrap() }
+    }
+
+    fn stream(left: f32, right: f32) -> StreamSound {
+        StreamSound { decoder: OpusDecoder::new(SAMPLE_RATE as i32, 2).unwrap(), queue: pcm(left, right), buffering: true }
+    }
+
+    fn near(actual: &[f32], expected: [f32; 2]) {
+        assert!((actual[0] - expected[0]).abs() < 1e-5 && (actual[1] - expected[1]).abs() < 1e-5, "{actual:?} != {expected:?}");
+    }
+
+    #[test]
+    fn music_ducks_relative_to_each_slider_and_recovers_across_pauses() {
+        let shared = VoiceShared::new(AudioSettings { output_volume: 0.5, ..Default::default() });
+        let mut m = Mixer::default();
+        {
+            let mut p = shared.playback.lock();
+            p.set_ducked(1, true);
+            p.set_ducked(2, true);
+            p.volumes.insert(1, 0.5);
+            p.stream_volumes.insert(1, 0.75);
+        }
+        // Two marked music users in the left channel; one also shares audio in the
+        // right. An unmarked stream and a silent continuous transmitter aren't speech.
+        m.talkers.insert(1, talker(0.4, 0.0));
+        m.talkers.insert(2, talker(0.1, 0.0));
+        m.talkers.insert(3, talker(0.0, 0.0));
+        shared.streams.lock().insert(1, stream(0.0, 0.4));
+        shared.streams.lock().insert(4, stream(0.0, 0.1));
+        let mut out = [0.0; FRAME_SAMPLES]; // 10 ms of interleaved stereo
+        m.pull(&shared, &mut out);
+        near(&out[0..2], [0.15, 0.20]);
+        near(&out[out.len() - 2..], [0.15, 0.20]);
+
+        m.talkers.insert(3, talker(0.0, 0.08));
+        m.pull(&shared, &mut out);
+        assert!(out[0] > out[out.len() - 2] && out[out.len() - 2] > 0.03, "attack should be a fade");
+        for _ in 0..4 {
+            m.pull(&shared, &mut out);
+        }
+        near(&out[0..2], [0.03, 0.12]); // 20% of music only; full speech and unmarked stream
+
+        shared.settings.lock().ducking_percent = 10;
+        shared.playback.lock().volumes.insert(1, 1.0);
+        for _ in 0..5 {
+            m.pull(&shared, &mut out);
+        }
+        near(&out[0..2], [0.025, 0.105]); // new sliders apply without restarting playback
+        m.talkers.remove(&3);
+        for _ in 0..20 {
+            m.pull(&shared, &mut out);
+        }
+        near(&out[0..2], [0.025, 0.065]); // short gap, keep the music down
+        for _ in 0..15 {
+            m.pull(&shared, &mut out);
+        }
+        assert!(out[0] > 0.025 && out[0] < 0.25, "release should be a fade");
+        for _ in 0..30 {
+            m.pull(&shared, &mut out);
+        }
+        near(&out[0..2], [0.25, 0.20]); // returns to the updated normal volume
+    }
+
+    #[test]
+    fn only_transmitted_mic_or_unmuted_voice_can_trigger_ducking() {
+        let shared = VoiceShared::new(AudioSettings { ducking_percent: 0, ..Default::default() });
+        let mut m = Mixer::default();
+        m.talkers.insert(1, talker(0.25, 0.25));
+        m.talkers.insert(2, talker(0.5, 0.5));
+        m.talkers.insert(3, talker(0.5, 0.5));
+        {
+            let mut p = shared.playback.lock();
+            p.set_ducked(1, true);
+            p.local_muted.insert(2);
+            p.volumes.insert(3, 0.0);
+        }
+        let mut out = [0.0; FRAME_SAMPLES];
+        for (sending, source, rms) in [(false, CaptureSource::Microphone, 0.2), (true, CaptureSource::Microphone, 0.0), (true, CaptureSource::SystemSound, 0.8)] {
+            m.run.note_input(sending, &source, rms);
+            m.pull(&shared, &mut out);
+            near(&out[out.len() - 2..], [0.25, 0.25]);
+        }
+        m.run.note_input(true, &CaptureSource::Microphone, 0.2);
+        for _ in 0..5 {
+            m.pull(&shared, &mut out);
+        }
+        shared.effects.lock().push_back(0.12);
+        m.pull(&shared, &mut out);
+        near(&out[0..2], [0.12, 0.12]); // notifications aren't reduced
+        near(&out[2..4], [0.0, 0.0]);
+        shared.playback.lock().set_ducked(1, false);
+        m.pull(&shared, &mut out);
+        near(&out[0..2], [0.25, 0.25]); // unchecking is effective immediately
     }
 }
 
@@ -1229,7 +1429,7 @@ mod stream_sound_tests {
         }
         assert!(l > 100.0 * r.max(1e-6), "left {l} right {r}");
         // Volume 0 for that stream silences it.
-        shared.stream_volumes.lock().insert(7, 0.0);
+        shared.playback.lock().stream_volumes.insert(7, 0.0);
         mixer.pull(&shared, &mut out);
         assert!(out.iter().all(|s| s.abs() < 1e-6));
     }

@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use voxa_proto::*;
 
-use crate::audio::{Voice, VoiceShared};
+use crate::audio::{Playback, Voice, VoiceShared};
 use crate::config::{normalize_address, Bookmark, Settings};
 use crate::dialogs::Dialogs;
 use crate::net::{self, Connection, NetEvent};
@@ -417,6 +417,15 @@ pub struct Stage {
 }
 
 impl Session {
+    /// Numeric IDs belong to one connection; restore local controls from the person's identity.
+    fn bind_playback(&self, playback: &mut Playback, settings: &Settings, c: &ClientInfo) {
+        playback.forget(c.id);
+        if let Some(&vol) = settings.client_volumes.get(&c.uid) {
+            playback.volumes.insert(c.id, vol);
+        }
+        playback.set_ducked(c.id, c.id != self.me && settings.ducks_user(&self.server_key, &c.uid));
+    }
+
     pub fn me(&self) -> Option<&ClientInfo> {
         self.clients.get(&self.me)
     }
@@ -2209,6 +2218,7 @@ impl VoxaApp {
                 if self.sess.is_some() {
                     let was_welcomed = self.sess.as_ref().map(|s| s.welcomed).unwrap_or(false);
                     self.sess = None;
+                    self.voice_shared.streams.lock().clear();
                     self.textures.clear();
                     self.dlg.close_session_dialogs();
                     self.offline_log = ChatLog::default();
@@ -2450,15 +2460,11 @@ impl VoxaApp {
                     p if s.supports("1.17.0") => s.conn.send(C2S::SetPresence(p)),
                     _ => {}
                 }
-                // Restore per-user volumes.
-                let mut vols = shared.volumes.lock();
-                vols.clear();
+                let mut playback = Playback::default();
                 for c in s.clients.values() {
-                    if let Some(v) = self.settings.client_volumes.get(&c.uid) {
-                        vols.insert(c.id, *v);
-                    }
+                    s.bind_playback(&mut playback, &self.settings, c);
                 }
-                drop(vols);
+                *shared.playback.lock() = playback;
                 self.dlg.voice_key = Some(voice.key);
                 self.dlg.voice_port = voice.udp_port;
                 shared.play_tones(&[(523.0, 80), (659.0, 80), (784.0, 120)]);
@@ -2563,9 +2569,7 @@ impl VoxaApp {
                 }
             }
             S2C::ClientJoined(c) => {
-                if let Some(v) = self.settings.client_volumes.get(&c.uid) {
-                    shared.volumes.lock().insert(c.id, *v);
-                }
+                s.bind_playback(&mut shared.playback.lock(), &self.settings, &c);
                 if c.channel == s.my_channel() && c.channel != NO_CHANNEL && c.id != s.me {
                     shared.play_tones(JOIN_TONES);
                 }
@@ -2592,6 +2596,8 @@ impl VoxaApp {
                 s.cameras.remove(&id);
                 s.camera_viewer.clear(id);
                 self.textures.remove(&id);
+                shared.stop_stream_audio(id);
+                shared.playback.lock().forget(id);
                 shared.talking.lock().remove(&id);
                 if s.selected == Selection::Client(id) {
                     s.selected = Selection::Server;
@@ -2622,6 +2628,7 @@ impl VoxaApp {
                     let ids: Vec<ClientId> = s.watching.drain().collect();
                     for w in ids {
                         s.viewer.clear(w);
+                        shared.stop_stream_audio(w);
                         self.textures.remove(&w);
                     }
                     s.pins_open = false;
@@ -2653,6 +2660,7 @@ impl VoxaApp {
                     }
                     if channel != my_channel && s.watching.remove(&id) {
                         s.viewer.clear(id);
+                        shared.stop_stream_audio(id);
                         self.textures.remove(&id);
                     }
                     if let Some(by) = by {
@@ -2661,6 +2669,9 @@ impl VoxaApp {
                 }
             }
             S2C::ClientUpdated(c) => {
+                if s.clients.get(&c.id).is_none_or(|old| old.uid != c.uid) {
+                    s.bind_playback(&mut shared.playback.lock(), &self.settings, &c);
+                }
                 if let Some(old) = s.clients.get(&c.id).cloned() {
                     if old.talk_request.is_none() && c.talk_request.is_some() && c.channel == s.my_channel() {
                         let msg = c.talk_request.clone().unwrap_or_default();

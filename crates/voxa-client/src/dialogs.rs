@@ -1044,6 +1044,10 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     form_row(ui, t!("Voice volume:"), |ui| {
                         ui.add(egui::Slider::new(&mut d.audio.output_volume, 0.0..=2.0).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
                     });
+                    form_row(ui, t!("Volume while ducked:"), |ui| {
+                        ui.add(egui::Slider::new(&mut d.audio.ducking_percent, 0..=100).suffix("%"))
+                            .on_hover_text(crate::ui::ducking_hint(d.audio.ducking_percent));
+                    });
                     form_row(ui, t!("Notification sounds:"), |ui| {
                         ui.checkbox(&mut d.audio.sounds, t!("Play sounds for pokes, messages and joins"));
                     });
