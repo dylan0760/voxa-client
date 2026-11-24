@@ -366,7 +366,9 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   * A shared screen sends everything your PC plays except Voxa.
   * A shared application sends only its own sound.
   * Viewers get a mute button and a volume slider per stream.
-* **Your own stream** shows on the stage as a preview of what viewers see.
+* **Your own stream** shows on the stage as a preview of what viewers see, with a
+  **🔒 Encrypted** badge (like video calls, screen sharing picture and sound are
+  encrypted in transit).
 * **Full screen:** 🖵 or double-click a stream to fill the whole monitor; Esc leaves.
 
 ### Channels

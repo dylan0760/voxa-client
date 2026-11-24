@@ -4511,6 +4511,8 @@ fn stream_view(app: &mut VoxaApp, ui: &mut Ui, id: ClientId, fullscreen: bool) {
         Frame::new().fill(RED).corner_radius(4).inner_margin(Margin::symmetric(5, 1)).show(ui, |ui| {
             ui.label(RichText::new(t!("LIVE")).small().strong().color(Color32::WHITE));
         });
+        ui.label(RichText::new(t!("🔒 Encrypted")).small().color(Color32::from_gray(170)))
+            .on_hover_text(t!("Voice and video are encrypted between every member and the server (like all Voxa traffic)"));
         ui.label(RichText::new(format!("{name} - {title}")).color(Color32::WHITE));
         if mine {
             ui.label(RichText::new(t!("preview · this is what viewers see")).small().color(Color32::from_gray(170)));

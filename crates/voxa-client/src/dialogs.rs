@@ -2442,6 +2442,8 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                             t.set_sources(d.sources.clone());
                         }
                     }
+                    ui.label(RichText::new(t!("🔒 Encrypted")).small().weak())
+                        .on_hover_text(t!("Voice and video are encrypted between every member and the server (like all Voxa traffic)"));
                 });
             });
             ui.separator();
