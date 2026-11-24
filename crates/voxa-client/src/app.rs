@@ -674,7 +674,10 @@ impl Session {
         self.perms() & bit == bit
     }
 
-    pub fn talk_power(&self, c: &ClientInfo) -> i32 {
+    pub fn real_talk_power(&self, c: &ClientInfo) -> i32 {
+        if c.id == self.me && self.account_limited() {
+            return self.groups.get(&GUEST_GROUP).map(|g| g.talk_power).unwrap_or(0);
+        }
         c.server_groups
             .iter()
             .chain(std::iter::once(&c.channel_group))
@@ -684,12 +687,25 @@ impl Session {
             .unwrap_or(0)
     }
 
+    pub fn talk_power(&self, c: &ClientInfo) -> i32 {
+        let real = self.real_talk_power(c);
+        if let (true, Some(v)) = (c.id == self.me, &self.view_as) {
+            let def_cg = self.server.as_ref().map(|i| i.default_channel_group).unwrap_or(c.channel_group);
+            let p = v.iter().chain(std::iter::once(&def_cg)).filter_map(|g| self.groups.get(g)).map(|g| g.talk_power).max().unwrap_or(0);
+            return p.min(real);
+        }
+        real
+    }
+
     pub fn can_talk(&self, c: &ClientInfo) -> bool {
         let needed = self.channels.get(&c.channel).map(|ch| ch.needed_talk_power).unwrap_or(0);
         c.is_talker || self.talk_power(c) >= needed
     }
 
-    pub fn join_power(&self, c: &ClientInfo) -> i32 {
+    pub fn real_join_power(&self, c: &ClientInfo) -> i32 {
+        if c.id == self.me && self.account_limited() {
+            return self.groups.get(&GUEST_GROUP).map(|g| g.join_power).unwrap_or(0);
+        }
         c.server_groups
             .iter()
             .chain(std::iter::once(&c.channel_group))
@@ -697,6 +713,16 @@ impl Session {
             .map(|g| g.join_power)
             .max()
             .unwrap_or(0)
+    }
+
+    pub fn join_power(&self, c: &ClientInfo) -> i32 {
+        let real = self.real_join_power(c);
+        if let (true, Some(v)) = (c.id == self.me, &self.view_as) {
+            let def_cg = self.server.as_ref().map(|i| i.default_channel_group).unwrap_or(c.channel_group);
+            let p = v.iter().chain(std::iter::once(&def_cg)).filter_map(|g| self.groups.get(g)).map(|g| g.join_power).max().unwrap_or(0);
+            return p.min(real);
+        }
+        real
     }
 
     /// Client-side estimate of whether I may enter a channel (the server decides).
@@ -1097,6 +1123,15 @@ impl VoxaApp {
                     d.app_tab = 0;
                 }
             }
+            // Channel chat with the emoji picker open (for screenshots).
+            "emoji" => match &mut self.sess {
+                Some(s) if s.welcomed => {
+                    s.tab = crate::app::ChatKey::Channel;
+                    self.emoji.open = true;
+                    self.emoji.category = 0;
+                }
+                _ => self.debug_done = false,
+            },
             // "View as" Guest with its bar, and the View As window (VOXA_PRIVKEY makes me an
             // admin first; for screenshots).
             "view-as" => {

@@ -521,8 +521,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     // Thai): a font of the system, right after the main font.
     if let Some(script) = voxa_proto::i18n::lang(voxa_proto::i18n::current()).map(|l| l.script) {
         if let Some((bytes, index)) = voxa_proto::i18n::system_font(script) {
-            let mut data = egui::FontData::from_owned(bytes);
-            data.index = index;
+            let data = egui::FontData::from_blob(bytes, index);
             fonts.font_data.insert("language".to_owned(), std::sync::Arc::new(data));
             for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace, chat_family(), chat_bold_family()] {
                 if let Some(list) = fonts.families.get_mut(&fam) {
@@ -532,6 +531,14 @@ pub fn install_fonts(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
+    // Any other script's letters (the Language list, chat in other languages): loaded on
+    // demand from the system fonts, the first time a character from that script appears.
+    ctx.set_font_providers(vec![crate::i18n::script_font_provider(vec![
+        egui::FontFamily::Proportional,
+        egui::FontFamily::Monospace,
+        chat_family(),
+        chat_bold_family(),
+    ])]);
 }
 
 /// A font of the system: the Windows font `file`, or its Android counterpart.
@@ -2394,7 +2401,7 @@ fn info_view(app: &mut VoxaApp, ui: &mut Ui) {
                 let verified = app.settings.known_servers.get(&s.req.address).map(String::as_str).unwrap_or("unknown");
                 grid_row(ui, t!("Fingerprint"), RichText::new(verified).monospace().small());
                 grid_row(ui, t!("Chat history"), if info.chat_retention_days == 0 { t!("Encrypted on server").to_string() } else { tf!("Encrypted, {} days", info.chat_retention_days) });
-                grid_row(ui, t!("Voice"), "Encrypted");
+                grid_row(ui, t!("Voice"), t!("Encrypted"));
             });
             // Only for server admins ("Edit virtual server settings", server-wide).
             let admin = s.me().map(|me| s.server_perms_of(me) & perm::SERVER_EDIT != 0).unwrap_or(false);
@@ -2638,7 +2645,7 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                     }
                 }
             }
-            tab(ui, ChatKey::Server, format!("{SERVER_ICON} Server"), s.server_log.unread);
+            tab(ui, ChatKey::Server, format!("{SERVER_ICON} {}", t!("Server")), s.server_log.unread);
             // The server calendar: whatever channel I am in (servers 1.23.0+).
             if s.sees_server_calendar() {
                 let on = s.server_calendar_open;
@@ -3727,19 +3734,21 @@ fn video_card(ui: &mut Ui, previews: &crate::links::Previews, v: &crate::links::
 
 fn emoji_picker(ui: &mut Ui, anchor: egui::Rect, picker: &mut EmojiPicker, input: &mut String, recent: &[String], a: &mut Vec<Action>, toggled: bool) {
     let t = theme();
-    let size = egui::vec2(352.0, 340.0);
-    let pos = egui::pos2((anchor.left() - 40.0).max(4.0), anchor.top() - size.y - 8.0);
-    let area = egui::Area::new(egui::Id::unique("voxa_emoji_picker")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
-        Frame::new().fill(t.card).corner_radius(10).stroke(Stroke::new(1.0, t.hover)).inner_margin(Margin::same(10)).show(ui, |ui| {
+    let ctx = ui.ctx().clone();
+    let size = egui::vec2(400.0_f32.min(ctx.content_rect().width() - 8.0), 340.0_f32.min(ctx.content_rect().height() * 0.75));
+    let pos = egui::pos2((anchor.right() - size.x).max(4.0), (anchor.top() - size.y - 8.0).max(4.0));
+    let area = egui::Area::new(egui::Id::unique("voxa_emoji_picker")).order(egui::Order::Foreground).fixed_pos(pos).show(&ctx, |ui| {
+        Frame::new().fill(t.window).corner_radius(10).stroke(Stroke::new(1.0, t.hover)).inner_margin(Margin::same(10)).show(ui, |ui| {
             ui.set_min_size(size - egui::vec2(20.0, 20.0));
-            ui.set_max_width(size.x - 20.0);
+            ui.set_max_size(size - egui::vec2(20.0, 20.0));
             let search = ui.add(egui::TextEdit::singleline(&mut picker.search).hint_text(t!("🔍 Search emoji (e.g. fire, heart, gg)")).desired_width(f32::INFINITY));
             if toggled {
                 search.request_focus();
             }
             // Category tabs.
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                ui.spacing_mut().button_padding = egui::vec2(6.0, 4.0);
                 let mut tab = |ui: &mut Ui, idx: usize, icon: &str, name: &str| {
                     let sel = picker.category == idx && picker.search.is_empty();
                     let b = egui::Button::new(RichText::new(icon).font(chat_font(18.0))).fill(if sel { accent().linear_multiply(0.5) } else { Color32::TRANSPARENT });
@@ -3765,7 +3774,8 @@ fn emoji_picker(ui: &mut Ui, anchor: egui::Rect, picker: &mut EmojiPicker, input
                 ui.label(RichText::new(cat.name.to_uppercase()).small().strong().color(t.dim));
                 cat.items.iter().map(|e| (e.ch.to_string(), e.code.to_string())).collect()
             };
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let avail = ui.available_height().max(40.0);
+            egui::ScrollArea::vertical().auto_shrink([false, false]).max_height(avail).show(ui, |ui| {
                 if items.is_empty() {
                     ui.label(RichText::new(t!("No emoji found")).color(t.dim));
                 }
@@ -3926,6 +3936,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
             ui.add_space(4.0);
         }
         crate::chat_images::pending_sends(ui, &s.images, t.dim);
+        let bar_top = ui.cursor().top();
         Frame::new().fill(t.card).corner_radius(10).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if matches!(target, TextTarget::Channel(_)) && icon_button(ui, "➕", t!("Upload a file to the channel"), None).clicked() {
@@ -4038,9 +4049,12 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
                     r.request_focus();
                 }
                 if picker.open {
-                    emoji_picker(ui, rect, picker, input, &settings.recent_emoji, a, toggled);
+                    let mut anchor = rect;
+                    anchor.min.y = bar_top;
+                    emoji_picker(ui, anchor, picker, input, &settings.recent_emoji, a, toggled);
                 }
-                if let (true, Some(gr)) = (s.gif.open, gif_rect) {
+                if let (true, Some(mut gr)) = (s.gif.open, gif_rect) {
+                    gr.min.y = bar_top;
                     let caps = crate::gifs::Caps { library: gif_library, manage: can_add_gifs, bulk_ready: s.bulk_ready };
                     match crate::gifs::picker(ui, gr, &mut s.gif, &s.conn, caps, gif_toggled) {
                         Some(crate::gifs::Pick::Search(id)) => a.push(Action::Send(C2S::SendGif { target, id })),
@@ -4053,7 +4067,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
         ui.label(RichText::new(match target {
             TextTarget::Private(_) => "🔒 Encrypted in transit · direct messages are stored encrypted only on this PC",
             TextTarget::Group(_) => "🔒 Encrypted in transit · group chats are stored encrypted only on the members' PCs",
-            _ => "🔒 Messages are encrypted in transit and stored encrypted on the server",
+            _ => t!("🔒 Messages are encrypted in transit and stored encrypted on the server"),
         }).small().color(t.dim));
     });
     let log = match s.tab {

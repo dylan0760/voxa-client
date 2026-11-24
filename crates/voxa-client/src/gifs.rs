@@ -718,8 +718,9 @@ pub fn gif_link(text: &str) -> Option<String> {
 fn agent() -> ureq::Agent {
     let cfg = ureq::Agent::config_builder()
         .tls_config(voxa_proto::update::tls_config(true))
+        .https_only(true)
         .timeout_global(Some(Duration::from_secs(20)))
-        .max_redirects(4)
+        .max_redirects(0)
         .user_agent(format!("Mozilla/5.0 (compatible; Voxa/{})", voxa_proto::APP_VERSION))
         .build();
     ureq::Agent::new_with_config(cfg)
@@ -733,12 +734,39 @@ fn public_host(url: &str) -> bool {
     host.contains('.') && !host.starts_with('[') && host.parse::<std::net::Ipv4Addr>().is_err() && !host.ends_with(".localhost") && !host.ends_with(".local")
 }
 
-fn download(url: &str, limit: usize) -> Result<Vec<u8>, String> {
-    if !public_host(url) {
-        return Err(t!("Only https links to websites can be loaded").into());
+/// Resolves a `Location` redirect against `base` (https only).
+fn resolve_redirect(base: &str, loc: &str) -> Option<String> {
+    let loc = loc.trim();
+    if loc.starts_with("https://") {
+        Some(loc.to_string())
+    } else if loc.starts_with("//") {
+        Some(format!("https:{loc}"))
+    } else if loc.starts_with('/') {
+        let rest = base.strip_prefix("https://")?;
+        let origin = rest.split('/').next()?;
+        Some(format!("https://{origin}{loc}"))
+    } else {
+        None
     }
-    let mut r = agent().get(url).call().map_err(|e| tf!("The link could not be loaded ({e})"; e = e))?;
-    r.body_mut().with_config().limit(limit as u64).read_to_vec().map_err(|_| format!("The GIF is larger than {} MB", limit / (1024 * 1024)))
+}
+
+fn download(url: &str, limit: usize) -> Result<Vec<u8>, String> {
+    let a = agent();
+    let mut cur = url.to_string();
+    for _ in 0..=4 {
+        if !public_host(&cur) {
+            return Err(t!("Only https links to websites can be loaded").into());
+        }
+        let mut r = a.get(&cur).call().map_err(|e| tf!("The link could not be loaded ({e})"; e = e))?;
+        let status = r.status().as_u16();
+        if (300..400).contains(&status) {
+            let loc = r.headers().get("location").and_then(|v| v.to_str().ok()).and_then(|l| resolve_redirect(&cur, l));
+            cur = loc.ok_or_else(|| t!("Only https links to websites can be loaded").to_string())?;
+            continue;
+        }
+        return r.body_mut().with_config().limit(limit as u64).read_to_vec().map_err(|_| format!("The GIF is larger than {} MB", limit / (1024 * 1024)));
+    }
+    Err("Too many redirects".into())
 }
 
 /// Downloads the GIF behind a link (the page's GIF for GIPHY / Tenor / KLIPY pages).

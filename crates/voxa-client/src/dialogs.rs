@@ -2533,6 +2533,8 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut close = false;
         let Some(s) = app.sess.as_ref() else { return };
         let real = s.me().map(|m| s.real_server_perms_of(m)).unwrap_or(0);
+        let real_talk = s.me().map(|m| s.real_talk_power(m)).unwrap_or(0);
+        let real_join = s.me().map(|m| s.real_join_power(m)).unwrap_or(0);
         let mut groups: Vec<GroupInfo> = s.groups.values().filter(|g| g.kind == GroupKind::Server).cloned().collect();
         groups.sort_by_key(|g| (g.sort, g.id));
         let mut send: Option<C2S> = None;
@@ -2542,7 +2544,7 @@ fn chat_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
             ui.label(RichText::new(t!("A yellow bar shows while you preview; ✖ Stop (or disconnecting) brings your own permissions back.")).small().weak());
             ui.add_space(4.0);
             for g in &groups {
-                let allowed = g.perms & !real == 0;
+                let allowed = g.perms & !real == 0 && (real == perm::ALL || (g.talk_power <= real_talk && g.join_power <= real_join));
                 let mut on = picked.contains(&g.id);
                 let r = ui.add_enabled(allowed, egui::Checkbox::new(&mut on, g.name.as_str()));
                 let r = if allowed { r } else { r.on_disabled_hover_text(t!("It has permissions you do not have")) };
@@ -3223,19 +3225,34 @@ fn device_now(ui: &mut Ui, cache: &mut HashMap<(bool, Option<String>), Option<St
     }
 }
 
-/// The language list: the system's language first, then each language in its own name.
+/// The language list: the system's language first, then each language with its flag and own name.
 fn language_picker(ui: &mut Ui, choice: &mut Option<String>) {
-    let system = voxa_proto::i18n::lang(&crate::i18n::chosen(None)).map(|l| l.name).unwrap_or("English");
-    let shown = match choice.as_deref().and_then(voxa_proto::i18n::lang) {
-        Some(l) => l.name.to_string(),
-        None => format!("{} ({system})", t!("System language")),
+    let sys_code = crate::i18n::chosen(None);
+    let sys_lang = voxa_proto::i18n::lang(&sys_code).unwrap_or(&voxa_proto::i18n::LANGS[0]);
+    let sys_name = if sys_lang.rtl { crate::i18n::shape(sys_lang.name) } else { sys_lang.name.to_string() };
+    let sys_label = format!("{} ({sys_name})", t!("System language"));
+    let (sel_code, sel_text) = match choice.as_deref().and_then(voxa_proto::i18n::lang) {
+        Some(l) => (l.code, if l.rtl { crate::i18n::shape(l.name) } else { l.name.to_string() }),
+        None => (sys_lang.code, sys_label.clone()),
     };
-    egui::ComboBox::from_id_salt("language").selected_text(shown).height(420.0).show_ui(ui, |ui| {
-        ui.selectable_value(choice, None, format!("{} ({system})", t!("System language")));
-        for l in voxa_proto::i18n::LANGS {
-            ui.selectable_value(choice, Some(l.code.to_string()), l.name).on_hover_text(l.english);
+    let r = egui::ComboBox::from_id_salt("language")
+        .selected_text((crate::i18n::flag_atom(sel_code), sel_text))
+        .height(420.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(choice, None, (crate::i18n::flag_atom(sys_lang.code), sys_label));
+            for l in voxa_proto::i18n::LANGS {
+                let name = if l.rtl { crate::i18n::shape(l.name) } else { l.name.to_string() };
+                ui.selectable_value(choice, Some(l.code.to_string()), (crate::i18n::flag_atom(l.code), name))
+                    .on_hover_text(l.english);
+            }
+        });
+    // Screenshot hook: keep the language dropdown open when requested.
+    if std::env::var_os("VOXA_DEBUG_LANG_OPEN").is_some() {
+        let pid = r.response.id.with("popup");
+        if !egui::Popup::is_id_open(ui.ctx(), pid) {
+            egui::Popup::open_id(ui.ctx(), pid);
         }
-    });
+    }
 }
 /// Options ▸ Application: General / Themes.
 fn app_tabs(ui: &mut Ui, tab: &mut u8) {

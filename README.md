@@ -79,16 +79,19 @@ server needs a newer version, Voxa tells you and opens the update window.
   Greek, Ukrainian, Bulgarian, Croatian, Serbian, Slovenian, Lithuanian, Latvian,
   Estonian and Catalan.
 * It starts in your system's language. Change it in **Options ▸ Application ▸ 🌐
-  Language** (each language is listed in its own name). The same on Android.
+  Language**: each language appears with a small flag icon and its own name (1.38.1).
+  The same on Android.
 * Translated: everything you see every day (the main window, menus, chat, voice,
   connecting, Options, accounts, GIFs, the calendar) and the server's usual messages.
   Some rarely used admin windows are still English.
-* Chinese, Japanese, Korean, Hindi, Bengali, Thai and Arabic letters come from the fonts
-  Windows (or Android) already has.
-* Arabic, Persian and Urdu: the letters are joined and each line reads right to left,
-  but the layout stays as it is (menus on the left). Hindi and Bengali letters that
-  combine into one shape may not always join perfectly.
+* Chinese, Japanese, Korean, Hindi, Bengali, Thai, Vietnamese and Arabic letters come
+  from the fonts Windows (or Android) already has, loaded on demand as soon as a script
+  appears (so every language name in the list and chat in other scripts renders properly
+  without loading unused fonts at startup).
+* Arabic, Persian and Urdu: letters are joined and each line reads right to left
+  (shaped cleanly via HarfBuzz, 1.38.1), while the window layout stays left-to-right.
 * Names, messages and anything people type are never translated.
+
 ### Voice
 * **Codecs**, chosen per channel:
 
