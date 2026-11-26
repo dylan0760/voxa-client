@@ -2420,10 +2420,13 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
                 (None, Some(Presence::Invisible)) => (Color32::GRAY, Some(t!("Invisible").to_string())),
                 _ => (GREEN, None),
             };
-            let sub = match status {
+            let mut sub = match status {
                 Some(st) => format!("{st} · {place}"),
                 None => place,
             };
+            if let Some(game) = s.game_of(&c.uid) {
+                sub = format!("🎮 Playing {game} · {sub}");
+            }
             row(ui, &c.uid, &c.nickname, sub, Some((dot, c.id)));
         }
         if !can_list {
@@ -3249,6 +3252,10 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
                 (None, Some(Presence::Invisible)) => (Color32::GRAY, t!("Invisible").to_string()),
                 _ => (GREEN, s.clients.get(&cid).and_then(|c| s.channels.get(&c.channel)).map(|ch| format!("in {}", ch.name)).unwrap_or_else(|| "on the server".into())),
             };
+            let status = match s.game_of(&uid) {
+                Some(game) => format!("🎮 Playing {game} · {status}"),
+                None => status,
+            };
             let r = messages_row(ui, false, (&name, &uid), Some(dot), &name, (&status, t.dim), 0).on_hover_text(t!("Click to chat, right-click to call and more"));
             person_menu(s, &r, &uid, &name, Some(cid), shared, a);
             if r.clicked() {
@@ -3965,7 +3972,8 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
     let dm_blocked = matches!(s.tab,ChatKey::Dm(id) if s.dms.get(id).is_some_and(|d| s.blocks.contains(&d.uid)));
     if let ChatKey::Dm(id) = s.tab {
         if s.supports("1.31.0") && s.dms.get(id).is_some_and(|d| d.group.is_none()) {
-            let peer = s.dm_online(id);
+            // Live private media needs the Voxa app; the web admin page has none.
+            let peer = s.dm_online(id).filter(|c| s.clients.get(c).is_some_and(|c| c.platform != "Web"));
             let uid = s.dms[id].uid.clone();
             egui::Panel::top("dm-private-media").show(ui, |ui| {
                 if s.direct.ui(ui, &uid, peer, s.blocks.contains(&uid), s.streamer.is_some() || s.camera.is_some(), &s.conn, settings) {

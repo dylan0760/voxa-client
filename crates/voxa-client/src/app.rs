@@ -631,6 +631,11 @@ impl Session {
         self.dms.iter().position(|d| d.uid == uid)
     }
 
+    /// What an identity is playing, from whichever of its sessions reports it.
+    pub fn game_of(&self, uid: &str) -> Option<&String> {
+        self.clients.values().filter(|c| c.uid == uid).find_map(|c| self.games.get(&c.id))
+    }
+
     /// The session id of the person in a conversation, if they are online.
     pub fn dm_online(&self, id: DmId) -> Option<ClientId> {
         let uid = &self.dms.get(id)?.uid;

@@ -1,10 +1,17 @@
-//! Only match known game executables/packages or ones explicitly registered by the user.
-//! Window titles, paths and the process list are never sent to the server.
+//! Opt-in game status. Windows finds games automatically (see `scan`); Android uses the
+//! app in front when Usage access is granted. Programs the user registers always count.
+//! Only the game's name is sent: never window titles, paths or the list of programs.
 use crate::config::Settings;
 use crate::net::Connection;
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
+
+#[cfg(windows)]
+mod scan;
+
+/// How often the running programs are checked.
+const POLL: Duration = Duration::from_secs(5);
 
 const KNOWN: &[(&str, &str)] = &[
     ("cs2.exe", "Counter-Strike 2"),
@@ -21,34 +28,15 @@ const KNOWN: &[(&str, &str)] = &[
     ("com.supercell.clashofclans", "Clash of Clans"),
 ];
 
-fn match_game(apps: Vec<String>, custom: &BTreeMap<String, String>) -> Option<String> {
-    apps.into_iter().find_map(|app| {
-        let key = app.to_lowercase();
-        custom.get(&key).cloned().or_else(|| KNOWN.iter().find(|(k, _)| *k == key).map(|(_, name)| name.to_string()))
-    })
+/// A program (file or package name) the user registered, or a well-known game.
+fn named(app: &str, custom: &BTreeMap<String, String>) -> Option<String> {
+    let key = app.to_lowercase();
+    custom.get(&key).cloned().or_else(|| KNOWN.iter().find(|(k, _)| *k == key).map(|(_, name)| name.to_string()))
 }
 
-#[cfg(windows)]
-fn windows_game(custom: &BTreeMap<String, String>) -> Option<String> {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
-    };
-    // The snapshot includes minimized games and manually registered games with
-    // no visible top-level window. Do not inspect memory or start executables.
-    unsafe {
-        let handle = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
-        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
-        let mut ok = Process32FirstW(handle, &mut entry).is_ok();
-        let mut apps = Vec::new();
-        while ok {
-            let end = entry.szExeFile.iter().position(|&n| n == 0).unwrap_or(entry.szExeFile.len());
-            apps.push(String::from_utf16_lossy(&entry.szExeFile[..end]));
-            ok = Process32NextW(handle, &mut entry).is_ok();
-        }
-        let _ = CloseHandle(handle);
-        match_game(apps, custom)
-    }
+#[cfg_attr(windows, allow(dead_code))]
+fn match_game(apps: Vec<String>, custom: &BTreeMap<String, String>) -> Option<String> {
+    apps.iter().find_map(|app| named(app, custom))
 }
 
 #[derive(Default)]
@@ -81,32 +69,37 @@ impl Detection {
         self.worker = Some(GameWorker { active: active.clone(), wake });
         let custom = settings.games.clone();
         let tx = conn.tx.clone();
-        std::thread::spawn(move || {
-            let mut sent = None;
-            loop {
+        std::thread::Builder::new()
+            .name("voxa-game-status".into())
+            .spawn(move || {
                 #[cfg(windows)]
-                let game = windows_game(&custom);
-                #[cfg(not(any(windows, target_os = "android")))]
-                let game = match_game(Vec::new(), &custom);
-                #[cfg(target_os = "android")]
-                let game = crate::mobile::foreground_game().and_then(|(pkg, name)| match_game(vec![pkg], &custom).or(name));
-                {
-                    let enabled = active.lock();
-                    if !*enabled || tx.is_closed() {
-                        return;
-                    }
-                    if sent != game {
-                        if tx.send(voxa_proto::C2S::SetGame(game.clone())).is_err() {
+                let mut scanner = scan::Scanner::default();
+                let mut sent = None;
+                loop {
+                    #[cfg(windows)]
+                    let game = scanner.scan(&custom);
+                    #[cfg(not(any(windows, target_os = "android")))]
+                    let game = match_game(Vec::new(), &custom);
+                    #[cfg(target_os = "android")]
+                    let game = crate::mobile::foreground_game().and_then(|(pkg, name)| match_game(vec![pkg], &custom).or(name));
+                    {
+                        let enabled = active.lock();
+                        if !*enabled || tx.is_closed() {
                             return;
                         }
-                        sent = game;
+                        if sent != game {
+                            if tx.send(voxa_proto::C2S::SetGame(game.clone())).is_err() {
+                                return;
+                            }
+                            sent = game;
+                        }
+                    }
+                    if !matches!(rx.recv_timeout(POLL), Err(mpsc::RecvTimeoutError::Timeout)) {
+                        return;
                     }
                 }
-                if !matches!(rx.recv_timeout(Duration::from_secs(5)), Err(mpsc::RecvTimeoutError::Timeout)) {
-                    return;
-                }
-            }
-        });
+            })
+            .ok();
     }
 }
 

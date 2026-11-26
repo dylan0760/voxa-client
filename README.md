@@ -29,11 +29,13 @@ server needs a newer version, Voxa tells you and opens the update window.
 ### What's new in 1.40
 * **Private media** (Server 1.31+): open a one-to-one DM and choose **Private screen
   share** or **Private camera**. Only the invited person can accept and
-  watch, and neither person has to change voice channels. These live pictures do not
+  watch (in Voxa on Windows or Android; the web admin page has no live media), and
+  neither person has to change voice channels. These live pictures do not
   redirect your channel microphone. Close the preview to end the private share.
 * **Video messages:** in a DM choose **Record video message**. Record up to 15 seconds
-  of camera and microphone, stop, then **Send** or **Discard**. The recipient can play
-  the clip on Windows, Android or the web, including after offline delivery.
+  of camera and microphone, stop, then **Send** or **Discard**. The recipient plays
+  the clip in Voxa on Windows or Android, including after offline delivery. The web
+  admin page only shows that a video message arrived.
   Clips are limited to 8 MiB, encrypted on the server and retained for up to 30 days
   (less if chat retention is shorter).
 * **Block DMs:** right-click a person or open their DM, then choose **Block DMs**.
@@ -41,11 +43,20 @@ server needs a newer version, Voxa tells you and opens the update window.
   offline DMs, private attachments and live invitations too. It does not hide
   their messages in shared channels or group chats.
 * **Game activity is off by default.** Enable it in **Options ▸ Application ▸
-  Transfers & games** to show a game beside your name. Windows checks known games
-  and the executable names you register; pick a running application or browse for
-  its executable and edit its display name. Android needs **Usage access** and
-  can recognize games by Android's app category or by a package you select.
-  Only the game label is sent, never your list of apps, paths or window titles.
+  Transfers & games** to show what you're playing beside your name in the channel
+  list, in **👥 People** and in the Messages window (1.40.1). While it is on, Voxa
+  checks the running programs every five seconds, so a game you start or quit shows
+  up within a few seconds; installed games are looked up again every two minutes.
+  * **Windows** recognises games installed with Steam, Epic Games, GOG Galaxy,
+    Ubisoft Connect, EA, Battle.net, Riot, the Xbox app, Amazon Games and itch.io
+    (it reads their libraries for the game's name), games Windows' Game Bar knows,
+    and Minecraft: Java Edition. Only programs with a window on screen count, and
+    the game in front wins when several are open.
+  * For anything else, pick a running application or browse for its executable,
+    then edit the name to show. Registered programs count even without a window.
+  * **Android** needs **Usage access** and recognises apps that Android lists as
+    games, or a package you select.
+  * Only the game's name is sent, never your list of programs, paths or window titles.
 * **Appearance:** choose **12 hour (AM/PM)** or **24 hour** under **Options ▸
   Application**. Dialogs and menus rise into place when opened. On Server 1.31+
   an administrator can choose a server picture under **Edit Virtual Server**;
@@ -709,6 +720,8 @@ Tests:
   * `spacer_test` (separators);
   * `group_test`, `video_test` and `calendar_test` (group chats, video, calendar);
   * `names_test` (unique names and the platform shown for a person; Voxa Server 1.26.0+);
+  * `game_presence_test` (what someone is playing reaches the others, also people who
+    connect later; Voxa Server 1.31.0+, `--hold <seconds>` keeps the player connected);
   * `web_origin_test` (the web page only accepts sign-ins for its own address; Voxa
     Server 1.26.0+, web page on, its address as a third argument);
   * `stream_rate` (frame rate of a screen share).

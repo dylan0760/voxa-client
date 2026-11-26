@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/voxa-proto", "crates/voxa-client", "crates/voxa-android"]
 
 [workspace.package]
-version = "1.40.0"
+version = "1.40.1"
 edition = "2021"
 license-file = "LICENSE"
 authors = ["Voxa contributors"]
