@@ -65,13 +65,28 @@ try {
     & $aapt2 compile --dir (Join-Path $Crate 'res') -o (Join-Path $work 'res.zip')
     if ($LASTEXITCODE -ne 0) { throw 'aapt2 compile failed' }
     $unsigned = Join-Path $work 'unsigned.apk'
+    $classes = Join-Path $work 'callbacks'
+    $hostTool = Join-Path $work "android-callbacks$exe"
+    $hostFlags = @()
+    if ($Toolchain -like '*windows-gnullvm') { $hostFlags = @('-C','linker=x86_64-w64-mingw32-clang','-C','target-feature=+crt-static') }
+    & rustc "+$Toolchain" --edition 2021 @hostFlags (Join-Path $Crate 'tools/android_callbacks.rs') -o $hostTool
+    if ($LASTEXITCODE -ne 0) { throw 'Android callback generator did not build' }
+    & $hostTool $classes
+    if ($LASTEXITCODE -ne 0) { throw 'Could not generate framework callback classes' }
+    & (Join-Path $bt.FullName "d8$bat") --min-api 26 --lib $androidJar --output $work @((Get-ChildItem "$classes/*.class").FullName)
+    if ($LASTEXITCODE -ne 0) { throw 'Could not package Android framework callbacks' }
     & $aapt2 link -o $unsigned -I $androidJar --manifest (Join-Path $work 'AndroidManifest.xml') (Join-Path $work 'res.zip')
     if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 
     # The app itself: lib/<abi>/libvoxa.so.
     Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    & (Join-Path $Root 'installer\notices.ps1') -Toolchain $Toolchain -Target 'aarch64-linux-android' -Version $version -Stage $work
     $zip = [System.IO.Compression.ZipFile]::Open($unsigned, 'Update')
     try {
+        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,(Join-Path $work 'classes.dex'),'classes.dex','Optimal') | Out-Null
+        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,(Join-Path $Root 'LICENSE'),'assets/VOXA-LICENSE.txt','Optimal') | Out-Null
+        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,(Join-Path $Crate 'fonts\DejaVu-LICENSE.txt'),'assets/DejaVu-LICENSE.txt','Optimal') | Out-Null
+        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip,(Join-Path $work 'THIRD-PARTY-NOTICES.txt'),'assets/THIRD-PARTY-NOTICES.txt','Optimal') | Out-Null
         foreach ($a in $abis) {
             $so = Join-Path $env:CARGO_TARGET_DIR "$($a.Target)\release\libvoxa.so"
             [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $so, "lib/$($a.Abi)/libvoxa.so", 'Optimal') | Out-Null

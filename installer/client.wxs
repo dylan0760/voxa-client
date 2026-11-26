@@ -5,14 +5,14 @@
   <Product Id="*" Name="Voxa" Language="1033" Version="$(var.Version)"
            Manufacturer="Voxa Project" UpgradeCode="53EF9CAB-2FD8-4B53-B4F2-501F4A026ED4">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64"
-             Description="Voxa voice, chat and screen sharing client" Comments="Free and open source software" />
+             Description="Voxa voice, chat and screen sharing client" Comments="Free for non-commercial use" />
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of Voxa is already installed." AllowSameVersionUpgrades="yes" />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Icon Id="VoxaIcon" SourceFile="$(var.Assets)\voxa.ico" />
     <Property Id="ARPPRODUCTICON" Value="VoxaIcon" />
-    <Property Id="ARPCOMMENTS" Value="Free and open source voice chat. No license keys required." />
+    <Property Id="ARPCOMMENTS" Value="Non-commercial voice chat. No license keys required." />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Voxa" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
@@ -51,8 +51,8 @@
       <!-- Microsoft's redistributable loader for the WebView2 runtime (in-app video player). -->
       <Component Id="WebView2Loader" Guid="*" Win64="yes"><File Id="WebView2LoaderDll" Source="$(var.Bin)\WebView2Loader.dll" KeyPath="yes" /></Component>
       <Component Id="DocReadme" Guid="*" Win64="yes"><File Id="Readme" Source="$(var.Docs)\README.txt" KeyPath="yes" /></Component>
-      <Component Id="DocMit" Guid="*" Win64="yes"><File Id="LicenseMit" Source="$(var.Docs)\LICENSE-MIT.txt" KeyPath="yes" /></Component>
-      <Component Id="DocApache" Guid="*" Win64="yes"><File Id="LicenseApache" Source="$(var.Docs)\LICENSE-APACHE.txt" KeyPath="yes" /></Component>
+      <Component Id="DocLicense" Guid="*" Win64="yes"><File Id="VoxaLicense" Source="$(var.Docs)\LICENSE.txt" KeyPath="yes" /></Component>
+
       <Component Id="DocNotices" Guid="*" Win64="yes"><File Id="Notices" Source="$(var.Docs)\THIRD-PARTY-NOTICES.txt" KeyPath="yes" /></Component>
     </DirectoryRef>
 
@@ -77,8 +77,7 @@
       <ComponentRef Id="VoxaExe" />
       <ComponentRef Id="WebView2Loader" />
       <ComponentRef Id="DocReadme" />
-      <ComponentRef Id="DocMit" />
-      <ComponentRef Id="DocApache" />
+      <ComponentRef Id="DocLicense" />
       <ComponentRef Id="DocNotices" />
       <ComponentRef Id="StartMenuShortcut" />
       <Feature Id="Desktop" Title="Desktop shortcut" Description="Create a shortcut on the desktop." Level="1" AllowAdvertise="no">

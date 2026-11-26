@@ -89,12 +89,13 @@ fn card(ui: &mut Ui, src: &Source, tex: Option<&egui::TextureHandle>, selected: 
                     egui::Image::new((t.id(), img_rect.size())).corner_radius(4).paint_at(ui, img_rect);
                 }
                 None => {
-                    ui.put(egui::Rect::from_center_size(rect.center(), egui::vec2(20.0, 20.0)), egui::Spinner::new());
+                    if cfg!(target_os="android"){ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,"🖥",egui::FontId::proportional(25.0),Color32::WHITE);}
+                    else {ui.put(egui::Rect::from_center_size(rect.center(), egui::vec2(20.0, 20.0)), egui::Spinner::new());}
                 }
             }
             let (title, sub) = match src {
                 Source::Window { title, app, .. } => (title.clone(), app.clone()),
-                Source::Monitor { name, w, h, .. } => (name.clone(), format!("{w} × {h}")),
+                Source::Monitor { name, w, h, .. } => (name.clone(), if cfg!(target_os="android"){"Android will ask what to share".into()}else{format!("{w} × {h}")}),
             };
             ui.add(egui::Label::new(RichText::new(&title).strong()).truncate()).on_hover_text(&title);
             ui.add(egui::Label::new(RichText::new(sub).small().weak()).truncate());

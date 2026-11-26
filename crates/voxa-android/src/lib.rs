@@ -15,6 +15,10 @@ mod audio;
 mod calendar;
 #[path = "../../voxa-client/src/camera.rs"]
 mod camera;
+#[path = "../../voxa-client/src/activity.rs"]
+mod activity;
+#[path = "../../voxa-client/src/private_media.rs"]
+mod private_media;
 #[path = "../../voxa-client/src/autostart.rs"]
 mod autostart;
 #[path = "../../voxa-client/src/chat_images.rs"]
@@ -83,6 +87,7 @@ mod weblogin;
 mod updater;
 #[path = "../../voxa-client/src/mobile.rs"]
 mod mobile;
+mod projection;
 
 pub use launch::{link_arg, pending_link_file, Link};
 

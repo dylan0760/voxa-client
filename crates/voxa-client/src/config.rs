@@ -260,11 +260,23 @@ pub struct CameraSettings {
     pub height: u32,
     pub fps: u8,
     pub quality: u8,
+    /// Clockwise quarter-turns after the driver's orientation correction.
+    pub rotation: u8,
+    pub background: CameraBackground,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub enum CameraBackground {
+    #[default]
+    Off,
+    Blur,
+    Studio,
+    Picture(PathBuf),
 }
 
 impl Default for CameraSettings {
     fn default() -> Self {
-        CameraSettings { device: String::new(), height: 360, fps: 15, quality: 60 }
+        CameraSettings { device: String::new(), height: 360, fps: 15, quality: 60, rotation: 0, background: CameraBackground::Off }
     }
 }
 
@@ -283,6 +295,11 @@ impl CameraSettings {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Settings {
+    pub transfers: voxa_proto::transfers::TransferLimits,
+    pub clock_12h: bool,
+    pub game_detection: bool,
+    /// Executable/package name -> user-chosen display name. No paths leave the device.
+    pub games: std::collections::BTreeMap<String, String>,
     pub nickname: String,
     pub identities: Vec<Identity>,
     pub default_identity: usize,
@@ -351,6 +368,10 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            transfers: voxa_proto::transfers::TransferLimits { uploads: 3, downloads: 3, ..Default::default() },
+            clock_12h: false,
+            game_detection: false,
+            games: Default::default(),
             nickname: std::env::var("USERNAME").unwrap_or_else(|_| "Voxa User".into()),
             identities: Vec::new(),
             default_identity: 0,
@@ -434,6 +455,11 @@ impl Settings {
         };
         s.fresh = fresh;
         s.audio.ducking_percent = s.audio.ducking_percent.min(100);
+        s.transfers.upload_kib = s.transfers.upload_kib.min(1_000_000);
+        s.transfers.download_kib = s.transfers.download_kib.min(1_000_000);
+        s.transfers.uploads = s.transfers.uploads.min(1024);
+        s.transfers.downloads = s.transfers.downloads.min(1024);
+        s.camera.rotation %= 4;
         if s.identities.is_empty() {
             s.identities.push(Identity::generate("Default"));
             s.default_identity = 0;

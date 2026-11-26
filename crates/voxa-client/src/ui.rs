@@ -42,6 +42,8 @@ pub enum Action {
     ToggleCommander,
     RequestTalkPower,
     ShareScreen,
+    PrivateScreen(ClientId, String),
+    PlayClip(u64),
     /// Turns your camera on or off (video in your channel).
     ToggleCamera,
     /// Shows one video tile large, or all of them again (None).
@@ -574,6 +576,7 @@ pub fn chat_font(size: f32) -> FontId {
 }
 
 pub fn apply_style(ctx: &egui::Context, s: &Settings) {
+    CLOCK_12H.store(s.clock_12h, Ordering::Relaxed);
     let kind = s.theme_kind();
     if let Ok(mut b) = BACKGROUND.lock() {
         *b = (s.background_image.clone(), s.background_dim);
@@ -704,23 +707,44 @@ fn icon_button(ui: &mut Ui, icon: &str, tip: &str, active_color: Option<Color32>
     resp.on_hover_text(tip)
 }
 
+static CLOCK_12H: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn clock_format() -> &'static str {
+    if CLOCK_12H.load(Ordering::Relaxed) {
+        "%-I:%M %p"
+    } else {
+        "%H:%M"
+    }
+}
 pub fn fmt_time(ts: u64) -> String {
     use chrono::TimeZone;
-    chrono::Local.timestamp_opt(ts as i64, 0).single().map(|t| t.format("%H:%M").to_string()).unwrap_or_default()
+    chrono::Local.timestamp_opt(ts as i64, 0).single().map(|t| t.format(clock_format()).to_string()).unwrap_or_default()
 }
 
 pub fn fmt_date(ts: u64) -> String {
     use chrono::TimeZone;
-    chrono::Local.timestamp_opt(ts as i64, 0).single().map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
+    chrono::Local.timestamp_opt(ts as i64, 0).single().map(|t| format!("{} {}", t.format("%Y-%m-%d"), t.format(clock_format()))).unwrap_or_default()
 }
 
 fn fmt_day_time(ts: u64) -> String {
     use chrono::TimeZone;
     let Some(t) = chrono::Local.timestamp_opt(ts as i64, 0).single() else { return String::new() };
     if t.date_naive() == chrono::Local::now().date_naive() {
-        format!("Today at {}", t.format("%H:%M"))
+        format!("Today at {}", t.format(clock_format()))
     } else {
-        t.format("%d/%m/%Y %H:%M").to_string()
+        format!("{} {}", t.format("%d/%m/%Y"), t.format(clock_format()))
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn clock_displays_noon_and_midnight() {
+    use chrono::NaiveTime;
+    for (twelve, midnight, noon) in [(true, "12:05 AM", "12:05 PM"), (false, "00:05", "12:05")] {
+        CLOCK_12H.store(twelve, Ordering::Relaxed);
+        for (hour, expected) in [(0, midnight), (12, noon)] {
+            let t = NaiveTime::from_hms_opt(hour, 5, 0).unwrap();
+            assert_eq!(t.format(clock_format()).to_string(), expected);
+        }
     }
 }
 
@@ -841,9 +865,9 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
             }
         });
 
-    // Full view of my own preview ends when I stop sharing or hide the preview.
+    // Full view of my own preview ends when I stop sharing.
     if let (Some(id), Some(s)) = (app.fullscreen_stream, &app.sess) {
-        if id == s.me && !s.streamer.as_ref().map(|st| st.preview_on.load(Ordering::Relaxed)).unwrap_or(false) {
+        if id == s.me && s.streamer.is_none() {
             app.fullscreen_stream = None;
         }
     }
@@ -872,8 +896,8 @@ pub fn draw(app: &mut VoxaApp, ui: &mut Ui) {
     dialogs::draw_all(app, &ctx);
 }
 
-/// Screen sharing (Windows; phones only watch).
-const CAN_SHARE: bool = cfg!(windows);
+/// Windows desktop/window capture or Android's consent-gated MediaProjection.
+const CAN_SHARE: bool = cfg!(any(windows, target_os = "android"));
 
 /// The Server tab's icon (Android has no font with 🖧).
 pub const SERVER_ICON: &str = if cfg!(target_os = "android") { "🖥" } else { "🖧" };
@@ -1097,7 +1121,12 @@ fn mobile_home_bar(app: &mut VoxaApp, ui: &mut Ui) {
         ui.spacing_mut().button_padding = egui::vec2(10.0, 8.0);
         if let Some(s) = &app.sess {
             let name = s.server.as_ref().map(|i| i.name.clone()).unwrap_or(s.req.label.clone());
-            if ui.add(egui::Button::new(RichText::new(format!("{SERVER_ICON} {name}")).color(Color32::WHITE)).fill(accent())).clicked() {
+            let button = if let Some(icon) = &s.server_icon {
+                egui::Button::new((egui::Image::new(icon).fit_to_exact_size(egui::vec2(22.0, 22.0)), name))
+            } else {
+                egui::Button::new(RichText::new(format!("{SERVER_ICON} {name}")).color(Color32::WHITE))
+            };
+            if ui.add(button.fill(accent())).clicked() {
                 a.push(Action::Home(false));
             }
         }
@@ -1155,7 +1184,11 @@ fn rail(app: &mut VoxaApp, ui: &mut Ui) {
         ui.painter().hline(r.x_range().shrink(18.0), r.center().y, Stroke::new(2.0, t.hover));
         if let Some(s) = &app.sess {
             let name = s.server.as_ref().map(|i| i.name.clone()).unwrap_or(s.req.label.clone());
-            if rail_button(ui, &initials(&name), &name, !app.home, t.card, false).clicked() {
+            let r = rail_button(ui, &initials(&name), &name, !app.home, t.card, false);
+            if let Some(tex) = &s.server_icon {
+                egui::Image::new(tex).corner_radius(9).paint_at(ui, egui::Rect::from_center_size(r.rect.center(), Vec2::splat(44.0)));
+            }
+            if r.clicked() {
                 a.push(Action::Home(false));
             }
         }
@@ -1165,6 +1198,19 @@ fn rail(app: &mut VoxaApp, ui: &mut Ui) {
             }
             let label = if b.name.is_empty() { b.address.clone() } else { b.name.clone() };
             let r = rail_button(ui, &initials(&label), &format!("{label}\nClick to connect, drag to reorder"), false, t.card, false);
+            if let Some(key) = app.settings.known_servers.get(&crate::config::normalize_address(&b.address)) {
+                let icon = app.rail_icons.entry(key.clone()).or_insert_with(|| {
+                    let p = crate::avatars::server_icon_path(key);
+                    if std::fs::metadata(&p).ok()?.len() > MAX_AVATAR_BYTES as u64 {
+                        return None;
+                    }
+                    let img = crate::avatars::decode(&std::fs::read(p).ok()?)?;
+                    Some(ui.ctx().load_texture(format!("server-icon-{key}"), img, egui::TextureOptions::LINEAR))
+                });
+                if let Some(tex) = icon.as_ref() {
+                    egui::Image::new(tex).corner_radius(9).paint_at(ui, egui::Rect::from_center_size(r.rect.center(), Vec2::splat(44.0)));
+                }
+            }
             // Drag a server onto another to put it there.
             let r = r.interact(Sense::drag());
             r.dnd_set_drag_payload(RailDrag(i));
@@ -1273,7 +1319,7 @@ fn home_view(app: &mut VoxaApp, ui: &mut Ui) {
         ui.painter().text(r.center(), Align2::CENTER_CENTER, "🎧", FontId::proportional(42.0), Color32::WHITE);
         ui.add_space(12.0);
         ui.label(RichText::new(t!("Welcome to Voxa")).size(26.0).strong());
-        ui.label(RichText::new(t!("Free and open source voice, chat and screen sharing")).color(t.dim));
+        ui.label(RichText::new(t!("Non-commercial voice, chat and screen sharing")).color(t.dim));
         ui.add_space(18.0);
         ui.horizontal(|ui| {
             let w = 340.0;
@@ -1403,11 +1449,9 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         let cam_on = s.camera.is_some();
         // Leave the channel but stay on the server (servers 1.17.0+).
         let show_leave = in_channel && s.supports("1.17.0");
-        let show_preview = s.streamer.as_ref().map(|st| !st.preview_on.load(Ordering::Relaxed)).unwrap_or(false);
         // Video: your camera for everyone in the channel (servers 1.21.0+).
         let show_cam = (in_channel || cam_on) && s.supports("1.21.0");
-        // Screens are shared with a channel, so not outside one (phones can watch streams,
-        // but not share their screen).
+        // The voice card's share button starts a channel broadcast.
         let show_share = CAN_SHARE && (in_channel || sharing);
         // The server calendar is global, so it is there in and outside channels.
         let show_cal = s.sees_server_calendar();
@@ -1420,9 +1464,6 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
             }
             if show_leave && icon_button(ui, "🚪", t!("Leave the channel (stay connected to the server)"), None).clicked() {
                 a.push(Action::Send(C2S::SwitchChannel { channel: NO_CHANNEL, password: None }));
-            }
-            if show_preview && icon_button(ui, "👁", t!("Show the preview of your own stream"), None).clicked() {
-                a.push(Action::Watch(s.me, true));
             }
             if show_cam && icon_button(ui, "📷", if cam_on { t!("Turn your camera off") } else { t!("Turn your camera on (video for everyone in the channel)") }, cam_on.then_some(GREEN)).clicked() {
                 a.push(Action::ToggleCamera);
@@ -1440,7 +1481,7 @@ fn self_panel(s: &Session, shared: &crate::audio::VoiceShared, settings: &Settin
         // Side by side when it fits, otherwise the buttons go on a row of their own (a
         // narrow channel list, a big UI scale, long channel names).
         let gap = ui.spacing().item_spacing.x;
-        let n = 1 + [show_leave, show_preview, show_cam, show_share, show_cal].iter().filter(|b| **b).count();
+        let n = 1 + [show_leave, show_cam, show_share, show_cal].iter().filter(|b| **b).count();
         let small = egui::TextStyle::Small.resolve(ui.style());
         let body = egui::TextStyle::Body.resolve(ui.style());
         let width = |text: &str, font: FontId| ui.painter().layout_no_wrap(text.to_string(), font, Color32::WHITE).size().x;
@@ -1976,6 +2017,9 @@ fn client_row(s: &Session, shared: &crate::audio::VoiceShared, ui: &mut Ui, c: &
         }
         let color = if c.away.is_some() { t.dim } else if c.id == s.me { ui.visuals().strong_text_color() } else { ui.visuals().text_color() };
         ui.label(text.color(color));
+        if let Some(game) = s.games.get(&c.id) {
+            ui.label(RichText::new(format!("🎮 {game}")).small().weak());
+        }
         for g in c.server_groups.iter().chain(std::iter::once(&c.channel_group)).filter_map(|g| s.groups.get(g)).filter(|g| g.show_name) {
             let gc = name_color(&g.name);
             Frame::new().fill(gc.linear_multiply(0.25)).corner_radius(4).inner_margin(Margin::symmetric(4, 0)).show(ui, |ui| {
@@ -2085,6 +2129,9 @@ fn client_menu(s: &Session, shared: &crate::audio::VoiceShared, r: &egui::Respon
                 ui.close();
             }
         } else {
+            if s.supports("1.31.0") && s.block_button(ui, &c.uid) {
+                ui.close();
+            }
             if ui.button(t!("💬  Send Message")).clicked() {
                 a.push(Action::OpenPrivate(c.id));
                 ui.close();
@@ -2336,6 +2383,9 @@ fn people_panel(app: &mut VoxaApp, ui: &mut Ui) {
             }
             r.context_menu(|ui| {
                 ui.label(RichText::new(name).strong());
+                if s.supports("1.31.0") && s.block_button(ui, uid) {
+                    ui.close();
+                }
                 if ui.button(t!("💬  Send message")).clicked() {
                     a.push(Action::OpenDm(uid.to_string(), name.to_string()));
                     ui.close();
@@ -2499,6 +2549,9 @@ fn info_view(app: &mut VoxaApp, ui: &mut Ui) {
             ui.vertical_centered(|ui| {
                 avatar(ui, 72.0, &c.nickname, &c.uid, None);
                 ui.label(RichText::new(&c.nickname).strong().size(18.0));
+                if let Some(game) = s.games.get(&c.id) {
+                    ui.label(format!("🎮 Playing {game}"));
+                }
                 let status = if let Some(m) = &c.away { away_text(m) } else { t!("Online").to_string() };
                 ui.label(RichText::new(status).color(if c.away.is_some() { YELLOW } else { GREEN }));
                 if !c.description.is_empty() {
@@ -2599,10 +2652,24 @@ fn main_view(app: &mut VoxaApp, ui: &mut Ui) {
                 if my_channel != NO_CHANNEL && icon_button(ui, "📁", t!("Channel files"), None).clicked() {
                     a.push(Action::Dialog(dialogs::Open::Files(my_channel)));
                 }
-                if my_channel != NO_CHANNEL && s.supports("1.21.0") && icon_button(ui, "📷", if s.camera.is_some() { t!("Turn your camera off") } else { t!("Turn your camera on") }, s.camera.is_some().then_some(GREEN)).clicked() {
+                if !matches!(s.tab, ChatKey::Dm(_))
+                    && my_channel != NO_CHANNEL
+                    && s.supports("1.21.0")
+                    && icon_button(
+                        ui,
+                        "📷",
+                        if s.camera.is_some() { t!("Turn your camera off") } else { t!("Turn your camera on") },
+                        s.camera.is_some().then_some(GREEN),
+                    )
+                    .clicked()
+                {
                     a.push(Action::ToggleCamera);
                 }
-                if CAN_SHARE && my_channel != NO_CHANNEL && icon_button(ui, "🖥", t!("Share your screen"), s.streamer.is_some().then_some(RED)).clicked() {
+                if !matches!(s.tab, ChatKey::Dm(_))
+                    && CAN_SHARE
+                    && my_channel != NO_CHANNEL
+                    && icon_button(ui, "🖥", t!("Share your screen"), s.streamer.is_some().then_some(RED)).clicked()
+                {
                     a.push(Action::ShareScreen);
                 }
                 let chat_target = match s.tab {
@@ -2835,7 +2902,7 @@ fn server_welcome(s: &Session, ui: &mut Ui) {
 }
 
 /// Shows a conversation: in the Messages window (brought to the front), or as a chat tab.
-fn show_dm(s: &mut Session, dm: DmId, popped: bool) {
+pub(crate) fn show_dm(s: &mut Session, dm: DmId, popped: bool) {
     if let Some(d) = s.dms.get_mut(dm) {
         d.open = true;
     }
@@ -3036,6 +3103,7 @@ pub fn dm_window(app: &mut VoxaApp, ctx: &egui::Context) {
             // Hidden, not destroyed: making it again may not be possible from the tray.
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
             s.dm_win.open = false;
+            s.direct.close(&s.conn,None);
             // Closed from the taskbar while waiting there: eframe has it hidden already.
             #[cfg(windows)]
             if quiet {
@@ -3161,6 +3229,7 @@ fn messages_sidebar(s: &mut Session, ui: &mut Ui, open_ids: &[DmId], sel: Option
                 if ui.button(t!("✖  Close this chat")).on_hover_text(t!("It stays saved on this PC")).clicked() {
                     if let Some(d) = s.dms.get_mut(id) {
                         d.open = false;
+                        s.direct.close(&s.conn, Some(&d.uid));
                     }
                     ui.close();
                 }
@@ -3211,6 +3280,9 @@ fn person_menu(s: &mut Session, r: &egui::Response, uid: &str, name: &str, cid: 
     let online = cid.is_some();
     r.context_menu(|ui| {
         ui.label(RichText::new(name).strong());
+        if s.supports("1.31.0") && s.block_button(ui, uid) {
+            ui.close();
+        }
         if let Some(id) = cid {
             ducking_menu_item(ui, s, shared, id, a);
         }
@@ -3857,6 +3929,12 @@ fn message_body(
     previews: Option<&crate::links::Previews>,
     a: &mut Vec<Action>,
 ) {
+    if let Some(id) = voxa_proto::direct::clip_id(text) {
+        if ui.button(format!("▶ {}", t!("Video message"))).clicked() {
+            a.push(Action::PlayClip(id));
+        }
+        return;
+    }
     ui.vertical(|ui| match ImageRef::parse(text) {
         Some(r) => crate::chat_images::chat_image(ui, imgs, conn, bulk_ready, &r, dim),
         None if parse_call(text).is_some() => {
@@ -3884,6 +3962,20 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
         return;
     }
     let my_uid = s.my_uid.clone();
+    let dm_blocked = matches!(s.tab,ChatKey::Dm(id) if s.dms.get(id).is_some_and(|d| s.blocks.contains(&d.uid)));
+    if let ChatKey::Dm(id) = s.tab {
+        if s.supports("1.31.0") && s.dms.get(id).is_some_and(|d| d.group.is_none()) {
+            let peer = s.dm_online(id);
+            let uid = s.dms[id].uid.clone();
+            egui::Panel::top("dm-private-media").show(ui, |ui| {
+                if s.direct.ui(ui, &uid, peer, s.blocks.contains(&uid), s.streamer.is_some() || s.camera.is_some(), &s.conn, settings) {
+                    if let Some(peer) = peer {
+                        a.push(Action::PrivateScreen(peer, uid));
+                    }
+                }
+            });
+        }
+    }
     let my_channel = s.my_channel();
     let target = chat_target(s);
     let gif_library = s.supports("1.28.0");
@@ -3936,6 +4028,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
     let read_only = s.tab == ChatKey::Server;
     // Input bar (bottom).
     egui::Panel::bottom("chatinput").frame(Frame::new().fill(t.inner(t.main)).inner_margin(Margin { left: 14, right: 14, top: 4, bottom: 14 })).show(ui, |ui| {
+        if dm_blocked {ui.weak("Direct messages are blocked. Unblock this person to send a message.");return;}
         if read_only {
             ui.label(RichText::new(t!("ℹ This tab shows what happens on the server. Chat in a channel, or with direct and group messages (💬 Messages).")).small().color(t.dim));
             return;
@@ -4089,7 +4182,7 @@ fn chat_area(s: &mut Session, a: &mut Vec<Action>, input: &mut String, settings:
             });
         });
         ui.label(RichText::new(match target {
-            TextTarget::Private(_) => "🔒 Encrypted in transit · direct messages are stored encrypted only on this PC",
+            TextTarget::Private(_) => "🔒 Encrypted in transit · DM history is local; private attachments are stored encrypted on the server",
             TextTarget::Group(_) => "🔒 Encrypted in transit · group chats are stored encrypted only on the members' PCs",
             _ => t!("🔒 Messages are encrypted in transit and stored encrypted on the server"),
         }).small().color(t.dim));
@@ -4266,7 +4359,9 @@ fn toggle_camera(app: &mut VoxaApp) {
         s.log(EventKind::Info, t!("You turned your camera off"));
         return;
     }
-    let problem = if !s.supports("1.21.0") {
+    let problem = if s.direct.capturing() {
+        Some("Stop private capture before starting a channel broadcast.")
+    } else if !s.supports("1.21.0") {
         Some("Video needs Voxa Server 1.21.0 or newer on this server.")
     } else if s.my_channel() == NO_CHANNEL {
         Some("Join a channel to turn on your camera.")
@@ -4440,6 +4535,16 @@ fn video_grid(app: &mut VoxaApp, ui: &mut Ui) {
             let lock = egui::Rect::from_min_size(area.left_top() + egui::vec2(4.0, 4.0), egui::vec2(110.0, 18.0));
             ui.put(lock, egui::Label::new(RichText::new(t!("🔒 Encrypted")).small().color(Color32::from_gray(170))))
                 .on_hover_text(t!("Voice and video are encrypted between every member and the server (like all Voxa traffic)"));
+            if my_cam {
+                let close = egui::Rect::from_min_size(area.right_top() + egui::vec2(-30.0, 4.0), egui::vec2(26.0, 22.0));
+                if ui.put(close, egui::Button::new("✖")).on_hover_text(t!("Turn your camera off")).clicked() {
+                    if let Some(s) = &mut app.sess {
+                        s.camera = None;
+                        s.camera_viewer.clear(s.me);
+                        s.conn.send(C2S::StopCamera);
+                    }
+                }
+            }
             if hidden > 0 && focus.is_none() {
                 let txt = format!("+{hidden} more in the call");
                 let r = egui::Rect::from_min_size(area.right_bottom() + egui::vec2(-150.0, -26.0), egui::vec2(146.0, 22.0));
@@ -4448,7 +4553,7 @@ fn video_grid(app: &mut VoxaApp, ui: &mut Ui) {
             // Others in the call while one is shown large.
             if focus.is_some() && names.len() > 1 {
                 let txt = format!("+{} more", names.len() - 1);
-                let r = egui::Rect::from_min_size(area.right_top() + egui::vec2(-90.0, 4.0), egui::vec2(84.0, 22.0));
+                let r = egui::Rect::from_min_size(area.right_top() + egui::vec2(if my_cam { -120.0 } else { -90.0 }, 4.0), egui::vec2(84.0, 22.0));
                 if ui.put(r, egui::Button::new(RichText::new(txt).small())).clicked() {
                     clicked = focus;
                 }
@@ -4542,7 +4647,7 @@ fn stream_view(app: &mut VoxaApp, ui: &mut Ui, id: ClientId, fullscreen: bool) {
             ui.label(RichText::new(t!("preview · this is what viewers see")).small().color(Color32::from_gray(170)));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_button(ui, "✖", if mine { t!("Hide my preview (keeps streaming)") } else { t!("Stop watching") }, Some(Color32::WHITE)).clicked() {
+            if icon_button(ui, "✖", if mine { t!("Stop sharing your screen") } else { t!("Stop watching") }, Some(Color32::WHITE)).clicked() {
                 app.actions.push(Action::Watch(id, false));
             }
             let full_screen = app.screen_fullscreen;
@@ -4660,6 +4765,7 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
                 // The tab closes; the history stays on this PC.
                 if let Some(d) = s.dms.get_mut(id) {
                     d.open = false;
+                    s.direct.close(&s.conn, Some(&d.uid));
                 }
                 if s.tab == ChatKey::Dm(id) {
                     // Back to the channel chat, or the server chat when not in a channel.
@@ -4669,16 +4775,17 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         }
         Action::Watch(id, watch) => {
             if let Some(s) = &mut app.sess {
-                // My own stream: only the local preview is shown / hidden.
+                // Closing our own preview ends capture and its audio. Other viewers
+                // unsubscribe only themselves.
                 if id == s.me {
-                    if let Some(st) = &s.streamer {
-                        st.preview_on.store(watch, Ordering::Relaxed);
-                    }
                     if !watch {
+                        s.streamer = None;
+                        s.conn.send(C2S::StopStream);
                         s.viewer.frames.lock().remove(&id);
                         app.textures.remove(&id);
                         if app.fullscreen_stream == Some(id) {
                             app.fullscreen_stream = None;
+                            set_screen_full(app, &app.ctx.clone(), false);
                         }
                     }
                     return;
@@ -4782,6 +4889,23 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
                 s.camera_focus = id;
             }
         }
+        Action::PrivateScreen(peer, uid) => {
+            if let Some(s) = app.sess.as_ref().filter(|s| s.clients.get(&peer).is_some_and(|c| c.uid == uid)) {
+                app.dlg.open(dialogs::Open::Share, &app.settings, s);
+                if let Some(d) = &mut app.dlg.share {
+                    d.direct_to = Some((peer, uid));
+                }
+            }
+        }
+        Action::PlayClip(id) => {
+            if let Some(s) = &mut app.sess {
+                if let ChatKey::Dm(dm) = s.tab {
+                    if let Some(d) = s.dms.get(dm) {
+                        s.direct.request_clip(&s.conn, d.uid.clone(), id);
+                    }
+                }
+            }
+        }
         Action::ShareScreen => {
             let Some(s) = &mut app.sess else { return };
             if s.streamer.is_some() {
@@ -4840,7 +4964,7 @@ pub fn apply(app: &mut VoxaApp, a: Action) {
         }
         Action::InDm(id, inner) => {
             // Confirmations open in the main window: make sure it can be seen.
-            if matches!(*inner, Action::Dialog(_)) && app.hidden {
+            if matches!(*inner, Action::Dialog(_) | Action::PrivateScreen(_, _)) && app.hidden {
                 app.show_window();
             }
             let Some(s) = &mut app.sess else { return };

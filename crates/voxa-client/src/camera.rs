@@ -6,6 +6,7 @@
 //! and offered when `VOXA_TEST_CAMERA` is set).
 
 use crate::capture::Captured;
+use crate::config::{CameraBackground, CameraSettings};
 
 /// A camera Voxa can use.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,6 +30,7 @@ pub fn devices() -> Vec<CameraDevice> {
 
 pub struct Camera {
     inner: Inner,
+    effects: Option<CameraEffects>,
 }
 
 enum Inner {
@@ -40,21 +42,151 @@ impl Camera {
     /// Opens a camera (`id` empty: the default one) for pictures of about `w` x `h`.
     pub fn open(id: &str, w: u32, h: u32, fps: u32) -> Result<Camera, String> {
         if id == TEST_PATTERN {
-            return Ok(Camera { inner: Inner::Test { w, h, n: 0, started: std::time::Instant::now() } });
+            return Ok(Camera { inner: Inner::Test { w, h, n: 0, started: std::time::Instant::now() }, effects: None });
         }
         let id = if id.is_empty() { imp::devices().first().map(|d| d.id.clone()).ok_or("No camera was found")? } else { id.to_string() };
-        Ok(Camera { inner: Inner::Real(imp::Camera::open(&id, w, h, fps)?) })
+        Ok(Camera { inner: Inner::Real(imp::Camera::open(&id, w, h, fps)?), effects: None })
     }
 
+    pub fn configured(settings: &CameraSettings, w: u32, h: u32, fps: u32) -> Result<Self, String> {
+        let mut camera = Self::open(&settings.device, w, h, fps)?;
+        camera.effects = Some(CameraEffects::new(settings)?);
+        Ok(camera)
+    }
     /// The next picture (waits for it, at most about a second). None if the camera failed.
     pub fn grab(&mut self) -> Option<Captured> {
-        match &mut self.inner {
+        let picture = match &mut self.inner {
             Inner::Test { w, h, n, started } => {
                 *n += 1;
                 Some(test_picture(*w, *h, started.elapsed().as_secs_f32()))
             }
             Inner::Real(c) => c.grab(),
+        }?;
+        Some(match &mut self.effects {
+            Some(e) => e.apply(picture),
+            None => picture,
+        })
+    }
+}
+
+/// Compare to an empty-room reference rather than transmitting frames to a
+/// segmentation service. The calibration frames themselves are never sent.
+struct CameraEffects {
+    rotation: u8,
+    mode: CameraBackground,
+    picture: Option<image::RgbImage>,
+    reference: Option<Captured>,
+    backdrop: Vec<u8>,
+    calibrate_until: std::time::Instant,
+}
+
+impl CameraEffects {
+    fn new(s: &CameraSettings) -> Result<Self, String> {
+        let picture =
+            if let CameraBackground::Picture(path) = &s.background { Some(load_picture(path)?.thumbnail(1920, 1920).to_rgb8()) } else { None };
+        Ok(Self {
+            rotation: s.rotation % 4,
+            mode: s.background.clone(),
+            picture,
+            reference: None,
+            backdrop: Vec::new(),
+            calibrate_until: std::time::Instant::now() + std::time::Duration::from_secs(3),
+        })
+    }
+
+    fn apply(&mut self, mut frame: Captured) -> Captured {
+        if self.mode != CameraBackground::Off {
+            if self.reference.as_ref().is_none_or(|r| (r.w, r.h) != (frame.w, frame.h)) {
+                let (w, h) = (frame.w, frame.h);
+                let blank = Captured { w, h, bgra: [46, 34, 28, 255].repeat(w as usize * h as usize) };
+                if std::time::Instant::now() >= self.calibrate_until {
+                    let mut rgb = image::RgbImage::new(w, h);
+                    for (p, b) in rgb.pixels_mut().zip(frame.bgra.chunks_exact(4)) {
+                        p.0 = [b[2], b[1], b[0]];
+                    }
+                    let bg = match &self.picture {
+                        Some(img) => image::imageops::resize(img, w, h, image::imageops::FilterType::Triangle),
+                        None if self.mode == CameraBackground::Blur => {
+                            let small = image::imageops::thumbnail(&rgb, (w / 20).max(1), (h / 20).max(1));
+                            image::imageops::resize(&small, w, h, image::imageops::FilterType::Triangle)
+                        }
+                        None => image::RgbImage::from_pixel(w, h, image::Rgb([41, 61, 84])),
+                    };
+                    self.backdrop = bg.pixels().flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+                    self.reference = Some(frame);
+                }
+                frame = blank;
+            } else if let Some(reference) = &self.reference {
+                for ((px, bg), base) in frame.bgra.chunks_exact_mut(4).zip(self.backdrop.chunks_exact(4)).zip(reference.bgra.chunks_exact(4)) {
+                    let diff = (0..3).map(|i| px[i].abs_diff(base[i])).max().unwrap_or(0) as u32;
+                    let alpha = diff.saturating_sub(16).min(30);
+                    for i in 0..3 {
+                        px[i] = ((u32::from(px[i]) * alpha + u32::from(bg[i]) * (30 - alpha)) / 30) as u8;
+                    }
+                }
+            }
         }
+        rotate(frame, self.rotation)
+    }
+}
+
+pub fn load_picture(path: &std::path::Path) -> Result<image::DynamicImage, String> {
+    use std::io::Read;
+    let mut b = Vec::new();
+    std::fs::File::open(path).and_then(|f| f.take(16 * 1024 * 1024 + 1).read_to_end(&mut b)).map_err(|e| e.to_string())?;
+    if b.len() > 16 * 1024 * 1024 {
+        return Err("Choose a picture under 16 MiB".into());
+    }
+    crate::avatars::decode_limited(&b, 4096).ok_or_else(|| "Unsupported picture or dimensions over 4096 pixels".into())
+}
+
+fn rotate(frame: Captured, turns: u8) -> Captured {
+    let (w, h) = (frame.w as usize, frame.h as usize);
+    if turns == 0 {
+        return frame;
+    }
+    let (dw, dh) = if turns % 2 == 1 { (h, w) } else { (w, h) };
+    let mut data = vec![0; frame.bgra.len()];
+    for (i, pixel) in frame.bgra.chunks_exact(4).enumerate() {
+        let (x, y) = (i % w, i / w);
+        let (dx, dy) = match turns {
+            1 => (h - 1 - y, x),
+            2 => (w - 1 - x, h - 1 - y),
+            _ => (y, w - 1 - x),
+        };
+        let off = (dy * dw + dx) * 4;
+        data[off..off + 4].copy_from_slice(pixel);
+    }
+    Captured { w: dw as u32, h: dh as u32, bgra: data }
+}
+
+#[cfg(test)]
+mod effects_tests {
+    use super::*;
+    #[test]
+    fn clockwise_rotation_changes_pixels_and_frame_shape() {
+        let frame = Captured { w: 3, h: 2, bgra: (1..=6).flat_map(|v| [v, 0, 0, 255]).collect() };
+        for (turns, shape, values) in [
+            (0, (3, 2), vec![1, 2, 3, 4, 5, 6]),
+            (1, (2, 3), vec![4, 1, 5, 2, 6, 3]),
+            (2, (3, 2), vec![6, 5, 4, 3, 2, 1]),
+            (3, (2, 3), vec![3, 6, 2, 5, 1, 4]),
+        ] {
+            let output = rotate(frame.clone(), turns);
+            assert_eq!((output.w, output.h), shape);
+            assert_eq!(output.bgra.chunks_exact(4).map(|p| p[0]).collect::<Vec<_>>(), values);
+        }
+    }
+    #[test]
+    fn calibration_hides_the_room_and_preserves_changed_foreground() {
+        let frame = Captured { w: 2, h: 1, bgra: vec![12, 13, 14, 255, 18, 20, 22, 255] };
+        let mut filter = CameraEffects::new(&CameraSettings { background: CameraBackground::Studio, ..Default::default() }).unwrap();
+        assert_ne!(filter.apply(frame.clone()).bgra, frame.bgra);
+        filter.calibrate_until = std::time::Instant::now();
+        assert_ne!(filter.apply(frame.clone()).bgra, frame.bgra);
+        let mut portrait = frame;
+        portrait.bgra[..4].copy_from_slice(&[200, 182, 173, 255]);
+        assert_eq!(filter.apply(portrait).bgra, [200, 182, 173, 255, 84, 61, 41, 255]);
     }
 }
 
@@ -164,6 +296,7 @@ mod imp {
         source: IMFMediaSource,
         w: u32,
         h: u32,
+        stride: i32,
         failures: u32,
     }
 
@@ -199,16 +332,16 @@ mod imp {
                 let mut i = 0;
                 while let Ok(t) = reader.GetNativeMediaType(FIRST_VIDEO_STREAM, i) {
                     i += 1;
-                    let Some((w, h)) = size_of(&t) else { continue };
+                    if i > 400 {
+                        break;
+                    }
+                    let Some((w, h)) = size_of(&t).filter(|(w, h)| (1..=8192).contains(w) && (1..=8192).contains(h)) else { continue };
                     let score = |w: u32, h: u32| {
                         let short = (w * h) < (want_w * want_h);
                         (short as u64) << 40 | ((w * h) as i64 - (want_w * want_h) as i64).unsigned_abs()
                     };
                     if best.as_ref().map(|(_, bw, bh)| score(w, h) < score(*bw, *bh)).unwrap_or(true) {
                         best = Some((t, w, h));
-                    }
-                    if i > 400 {
-                        break;
                     }
                 }
                 let (native, nw, nh) = best.ok_or("The camera reports no picture formats")?;
@@ -225,7 +358,11 @@ mod imp {
                     .map_err(|e| format!("The camera's pictures could not be converted: {}", e.message()))?;
                 let cur = reader.GetCurrentMediaType(FIRST_VIDEO_STREAM).ok();
                 let (w, h) = cur.as_ref().and_then(size_of).unwrap_or((w, h));
-                Ok(Camera { reader, source, w, h, failures: 0 })
+                if w == 0 || h == 0 || w > 8192 || h > 8192 || u64::from(w) * u64::from(h) > 16_777_216 {
+                    return Err("Invalid camera dimensions".into());
+                }
+                let stride = cur.as_ref().and_then(|t| t.GetUINT32(&MF_MT_DEFAULT_STRIDE).ok()).map(|s| s as i32).unwrap_or(-(w as i32) * 4);
+                Ok(Camera { reader, source, w, h, stride, failures: 0 })
             }
         }
 
@@ -257,6 +394,10 @@ mod imp {
                         let mut p: *mut u8 = std::ptr::null_mut();
                         let mut pitch = 0i32;
                         if b2.Lock2D(&mut p, &mut pitch).is_ok() && !p.is_null() {
+                            if (pitch.unsigned_abs() as usize) < w * 4 {
+                                let _ = b2.Unlock2D();
+                                return None;
+                            }
                             for y in 0..h {
                                 let row = p.offset(y as isize * pitch as isize);
                                 std::ptr::copy_nonoverlapping(row, bgra.as_mut_ptr().add(y * w * 4), w * 4);
@@ -269,12 +410,14 @@ mod imp {
                         let mut p: *mut u8 = std::ptr::null_mut();
                         let mut len = 0u32;
                         buf.Lock(&mut p, None, Some(&mut len)).ok()?;
-                        let n = (len as usize).min(bgra.len());
-                        // Plain buffers of RGB32 are bottom-up.
-                        if n == bgra.len() {
-                            for y in 0..h {
-                                std::ptr::copy_nonoverlapping(p.add((h - 1 - y) * w * 4), bgra.as_mut_ptr().add(y * w * 4), w * 4);
-                            }
+                        let stride = self.stride.unsigned_abs() as usize;
+                        if p.is_null() || stride < w * 4 || (h - 1).saturating_mul(stride).saturating_add(w * 4) > len as usize {
+                            let _ = buf.Unlock();
+                            return None;
+                        }
+                        for y in 0..h {
+                            let row = if self.stride < 0 { h - 1 - y } else { y };
+                            std::ptr::copy_nonoverlapping(p.add(row * stride), bgra.as_mut_ptr().add(y * w * 4), w * 4);
                         }
                         let _ = buf.Unlock();
                     }
@@ -574,12 +717,12 @@ mod imp {
             let (mut w, mut h) = (0, 0);
             AImage_getWidth(image, &mut w);
             AImage_getHeight(image, &mut h);
-            if w <= 0 || h <= 0 {
+            if w <= 0 || h <= 0 || w > 8192 || h > 8192 || i64::from(w) * i64::from(h) > 16_777_216 {
                 return None;
             }
             let plane = |i: c_int| -> Option<(&[u8], usize, usize)> {
                 let (mut p, mut len, mut rs, mut ps) = (std::ptr::null_mut(), 0, 0, 0);
-                if AImage_getPlaneData(image, i, &mut p, &mut len) != 0 || p.is_null() {
+                if AImage_getPlaneData(image, i, &mut p, &mut len) != 0 || p.is_null() || len <= 0 {
                     return None;
                 }
                 AImage_getPlaneRowStride(image, i, &mut rs);

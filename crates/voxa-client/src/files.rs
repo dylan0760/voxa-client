@@ -23,6 +23,8 @@ pub enum PickKind {
     Background,
     /// GIFs to add to the server's GIF library.
     ServerGifs,
+    CameraBackdrop,
+    ServerIcon,
 }
 
 /// Asks for files (`folder`: one folder). Windows: the chosen paths, None if cancelled.

@@ -36,6 +36,7 @@ pub struct ConnectParams {
 }
 
 pub struct Connection {
+    pub download_rate: Arc<voxa_proto::transfers::Rate>,
     pub tx: mpsc::UnboundedSender<C2S>,
     /// Bounded queue for bulk data (screen share frames, file chunks).
     pub bulk_tx: mpsc::Sender<BulkC2S>,
@@ -71,11 +72,12 @@ pub fn connect(rt: &tokio::runtime::Handle, p: ConnectParams, events: Sender<Net
     let (bulk_tx, bulk_rx) = mpsc::channel(16);
     let (bulk_ctl, bulk_ctl_rx) = mpsc::unbounded_channel();
     let shutdown = Arc::new(Notify::new());
-    let conn = Connection { tx, bulk_tx, bulk_ctl, shutdown: shutdown.clone() };
+    let rate = Arc::new(voxa_proto::transfers::Rate::new(0));
+    let conn = Connection { tx, bulk_tx, bulk_ctl, shutdown: shutdown.clone(), download_rate: rate.clone() };
     rt.spawn(async move {
         let ev = events.clone();
         let c2 = ctx.clone();
-        let reason = match run(p, rx, bulk_rx, bulk_ctl_rx, events, ctx, shutdown).await {
+        let reason = match run(p, rx, bulk_rx, bulk_ctl_rx, events, ctx, shutdown, rate).await {
             Ok(r) => r,
             Err(e) => e.to_string(),
         };
@@ -93,6 +95,7 @@ async fn run(
     events: Sender<NetEvent>,
     ctx: egui::Context,
     shutdown: Arc<Notify>,
+    rate: Arc<voxa_proto::transfers::Rate>,
 ) -> anyhow::Result<String> {
     let emit = |e: NetEvent| {
         let _ = events.send(e);
@@ -145,7 +148,7 @@ async fn run(
         let alive = alive.clone();
         let server_key = sec.remote_static.clone();
         tokio::spawn(async move {
-            bulk_loop(addr, identity, server_key, token, bulk_rx, bulk_ctl_rx, events, ctx, alive).await;
+            bulk_loop(addr, identity, server_key, token, bulk_rx, bulk_ctl_rx, events, ctx, alive, rate).await;
         });
     }
 
@@ -204,6 +207,7 @@ async fn bulk_loop(
     events: Sender<NetEvent>,
     ctx: egui::Context,
     alive: Arc<AtomicBool>,
+    rate: Arc<voxa_proto::transfers::Rate>,
 ) {
     let mut first = true;
     while alive.load(Ordering::Relaxed) {
@@ -217,7 +221,7 @@ async fn bulk_loop(
             }
         }
         first = false;
-        let res = bulk_session(addr, &identity, &server_key, token, &mut out, &mut ctl, &events, &ctx, &alive).await;
+        let res = bulk_session(addr, &identity, &server_key, token, &mut out, &mut ctl, &events, &ctx, &alive, &rate).await;
         if !alive.load(Ordering::Relaxed) {
             break;
         }
@@ -240,6 +244,7 @@ async fn bulk_session(
     events: &Sender<NetEvent>,
     ctx: &egui::Context,
     alive: &AtomicBool,
+    rate: &voxa_proto::transfers::Rate,
 ) -> anyhow::Result<()> {
     let stream = timeout(Duration::from_secs(10), TcpStream::connect(addr)).await??;
     stream.set_nodelay(true)?;
@@ -261,38 +266,45 @@ async fn bulk_session(
     }
     let _ = events.send(NetEvent::BulkReady);
     ctx.request_repaint();
-    let mut check = tokio::time::interval(Duration::from_secs(2));
-    loop {
-        // `recv` on the secure reader is cancel-safe, so racing it here is fine.
-        tokio::select! {
-            biased;
-            m = ctl.recv() => match m {
-                Some(m) => {
-                    writer.send(&m).await?;
-                    TRAFFIC.sent(traffic::bulk_c2s(&m), writer.last_size);
+    let write = async {
+        loop {
+            let next = tokio::select! {
+                biased;
+                m = ctl.recv() => m,
+                m = out.recv() => m,
+            };
+            let Some(message) = next else { return Ok(()) };
+            writer.send(&message).await?;
+            TRAFFIC.sent(traffic::bulk_c2s(&message), writer.last_size);
+        }
+    };
+    let read = async {
+        loop {
+            let m = reader.recv::<BulkS2C>().await?;
+            TRAFFIC.received(traffic::bulk_s2c(&m), reader.last_size);
+            match m {
+                BulkS2C::DownloadChunk { id, data } => {
+                    for piece in data.chunks(rate.chunk()) {
+                        rate.pace(piece.len()).await;
+                        if events.send(NetEvent::Bulk(BulkS2C::DownloadChunk { id, data: piece.to_vec() })).is_err() {
+                            return Ok(());
+                        }
+                        ctx.request_repaint();
+                    }
                 }
-                None => return Ok(()),
-            },
-            m = out.recv() => match m {
-                Some(m) => {
-                    writer.send(&m).await?;
-                    TRAFFIC.sent(traffic::bulk_c2s(&m), writer.last_size);
-                }
-                None => return Ok(()),
-            },
-            m = reader.recv::<BulkS2C>() => {
-                let m = m?;
-                TRAFFIC.received(traffic::bulk_s2c(&m), reader.last_size);
-                if events.send(NetEvent::Bulk(m)).is_err() {
-                    return Ok(());
-                }
-                ctx.request_repaint();
-            }
-            _ = check.tick() => {
-                if !alive.load(Ordering::Relaxed) {
-                    return Ok(());
+                other => {
+                    if events.send(NetEvent::Bulk(other)).is_err() {
+                        return Ok(());
+                    }
+                    ctx.request_repaint();
                 }
             }
         }
-    }
+    };
+    let closed = async {
+        while alive.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
+    tokio::select! {result=write=>result,result=read=>result,_=closed=>Ok(())}
 }

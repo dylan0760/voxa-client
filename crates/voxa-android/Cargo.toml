@@ -3,7 +3,7 @@ name = "voxa-android"
 description = "Voxa for Android: the same client as on Windows, built into an APK"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 
 # The Android app is the Voxa client's own code (crates/voxa-client/src), built as the
 # library an Android NativeActivity loads. On other systems this crate is empty.
@@ -13,7 +13,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [target.'cfg(target_os = "android")'.dependencies]
-voxa-proto = { path = "../voxa-proto", features = ["update"] }
+voxa-proto = { path = "../voxa-proto", features = ["update","native-ui"] }
 anyhow = "1.0.104"
 cpal = "0.18.2"
 eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "wgpu", "android-native-activity"] }

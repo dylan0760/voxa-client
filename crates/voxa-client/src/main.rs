@@ -1,4 +1,4 @@
-//! Voxa - free and open source voice, text chat and screen sharing client.
+//! Voxa - non-commercial voice, text chat and screen sharing client.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -8,6 +8,8 @@ mod app;
 mod audio;
 mod calendar;
 mod camera;
+mod activity;
+mod private_media;
 mod autostart;
 mod chat_images;
 mod capture;

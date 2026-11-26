@@ -107,6 +107,8 @@ pub struct VoiceShared {
     pub lossless: AtomicBool,
     /// A microphone test is recording: nothing is transmitted meanwhile.
     pub testing: AtomicBool,
+    /// While recording a private video note, the channel must not hear its microphone.
+    pub private_recording: Arc<AtomicBool>,
     /// A push-to-talk hotkey (extra key or controller button) is held.
     pub ptt_hotkey: AtomicBool,
     /// The on-screen push-to-talk button is held (phones).
@@ -145,6 +147,7 @@ impl VoiceShared {
             music: AtomicBool::new(false),
             lossless: AtomicBool::new(false),
             testing: AtomicBool::new(false),
+            private_recording: Default::default(),
             ptt_hotkey: AtomicBool::new(false),
             ptt_button: AtomicBool::new(false),
             no_channel: AtomicBool::new(false),
@@ -825,6 +828,18 @@ struct Recorder {
 }
 
 impl MicTest {
+    pub fn pcm16(&self, max_samples: usize) -> Vec<u8> {
+        self.clip.iter().take(max_samples).flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect()
+    }
+
+    pub fn play_pcm16(bytes: &[u8], settings: &AudioSettings) -> Result<Self, String> {
+        let mut player = Self::default();
+        player.clip = bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect();
+        if !player.clip.is_empty() {
+            player.play(settings)?;
+        }
+        Ok(player)
+    }
     /// Starts a new recording (stops any playback).
     pub fn start(&mut self, settings: &AudioSettings) -> Result<(), String> {
         self.play = None;
@@ -1037,7 +1052,8 @@ fn encoder_loop(
             let active = wants
                 && shared.transmit_allowed.load(Ordering::Relaxed)
                 && !shared.push_to_mute.load(Ordering::Relaxed)
-                && !shared.testing.load(Ordering::Relaxed);
+                && !shared.testing.load(Ordering::Relaxed)
+                && !shared.private_recording.load(Ordering::Acquire);
             let unheard = shared.no_listeners.load(Ordering::Relaxed);
             run.note_input(active && !unheard, &settings.source, rms);
             if active && unheard {

@@ -19,8 +19,6 @@ pub struct Streamer {
     stop: Arc<AtomicBool>,
     pub keyframe: Arc<AtomicBool>,
     pub error: Arc<Mutex<Option<String>>>,
-    /// Show the streamer their own stream (local preview, nothing extra is sent).
-    pub preview_on: Arc<AtomicBool>,
     /// Sound capture (stopped when the streamer is dropped).
     _audio: Option<crate::loopback::Capture>,
     /// Why the sound is not shared, if it was asked for but could not start.
@@ -193,13 +191,12 @@ impl Streamer {
         let stop = Arc::new(AtomicBool::new(false));
         let keyframe = Arc::new(AtomicBool::new(true));
         let error = Arc::new(Mutex::new(None));
-        let preview_on = Arc::new(AtomicBool::new(true));
         let (audio_capture, audio_error) = match audio.map(start_audio) {
             Some(Ok(c)) => (Some(c), None),
             Some(Err(e)) => (None, Some(e)),
             None => (None, None),
         };
-        let s = Streamer { stop: stop.clone(), keyframe: keyframe.clone(), error: error.clone(), preview_on: preview_on.clone(), _audio: audio_capture, audio_error };
+        let s = Streamer { stop: stop.clone(), keyframe: keyframe.clone(), error: error.clone(), _audio: audio_capture, audio_error };
         std::thread::Builder::new()
             .name("voxa-screenshare".into())
             .spawn(move || {
@@ -217,6 +214,10 @@ impl Streamer {
                 let mut preview_version = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
                 while !stop.load(Ordering::Relaxed) {
                     let Some(cap) = grabber.grab() else {
+                        if grabber.pending() {
+                            std::thread::sleep(Duration::from_millis(75));
+                            continue;
+                        }
                         failures += 1;
                         if failures > 50 {
                             *error.lock() = Some("The shared screen or window is no longer available".into());
@@ -227,7 +228,7 @@ impl Streamer {
                     };
                     failures = 0;
                     let img = scale(cap, settings.max_width);
-                    if preview_on.load(Ordering::Relaxed) && last_preview.map(|t| t.elapsed() >= PREVIEW_EVERY).unwrap_or(true) {
+                    if last_preview.map(|t| t.elapsed() >= PREVIEW_EVERY).unwrap_or(true) {
                         last_preview = Some(Instant::now());
                         preview_version += 1;
                         let image = preview_image(&img);
@@ -240,6 +241,7 @@ impl Streamer {
                         last_key = Instant::now();
                     }
                     let tiles = changed_tiles(&img, prev.as_ref(), key, settings.quality, threads);
+                    if stop.load(Ordering::Relaxed) { break; }
                     if !tiles.is_empty() {
                         let frame = StreamFrame { width: img.w, height: img.h, keyframe: key, tiles };
                         match bulk.try_send(BulkC2S::Frame(frame)) {
@@ -275,14 +277,13 @@ impl Streamer {
         let stop = Arc::new(AtomicBool::new(false));
         let keyframe = Arc::new(AtomicBool::new(true));
         let error = Arc::new(Mutex::new(None));
-        let preview_on = Arc::new(AtomicBool::new(true));
-        let s = Streamer { stop: stop.clone(), keyframe: keyframe.clone(), error: error.clone(), preview_on: preview_on.clone(), _audio: None, audio_error: None };
+        let s = Streamer { stop: stop.clone(), keyframe: keyframe.clone(), error: error.clone(), _audio: None, audio_error: None };
         std::thread::Builder::new()
             .name("voxa-camera".into())
             .spawn(move || {
                 let (want_w, want_h) = settings.size();
                 let fps = settings.fps.clamp(5, voxa_proto::CameraInfo::MAX_FPS);
-                let mut cam = match crate::camera::Camera::open(&settings.device, want_w, want_h, fps as u32) {
+                let mut cam = match crate::camera::Camera::configured(&settings, want_w, want_h, fps as u32) {
                     Ok(c) => c,
                     Err(e) => {
                         *error.lock() = Some(e);
@@ -313,17 +314,16 @@ impl Streamer {
                     let long = want_w.max(want_h);
                     let max_w = if cap.w >= cap.h { long } else { (long as u64 * cap.w as u64 / cap.h.max(1) as u64) as u32 };
                     let img = scale(cap, max_w.min(voxa_proto::CameraInfo::MAX_LONG));
-                    if preview_on.load(Ordering::Relaxed) {
-                        version += 1;
-                        preview.frames.lock().insert(preview.me, ViewerFrame { image: preview_image(&img), version });
-                        preview.ctx.request_repaint();
-                    }
+                    version += 1;
+                    preview.frames.lock().insert(preview.me, ViewerFrame { image: preview_image(&img), version });
+                    preview.ctx.request_repaint();
                     let dims_changed = prev.as_ref().map(|p| p.w != img.w || p.h != img.h).unwrap_or(true);
                     let key = keyframe.swap(false, Ordering::Relaxed) || dims_changed || last_key.elapsed() > Duration::from_secs(10);
                     if key {
                         last_key = Instant::now();
                     }
                     let tiles = changed_tiles(&img, prev.as_ref(), key, settings.quality.clamp(20, 90), threads);
+                    if stop.load(Ordering::Relaxed) { break; }
                     if !tiles.is_empty() {
                         let frame = StreamFrame { width: img.w, height: img.h, keyframe: key, tiles };
                         match bulk.try_send(BulkC2S::CameraFrame(frame)) {

@@ -1,6 +1,6 @@
 # Voxa (client)
 
-Voxa is free, open source voice chat with persistent encrypted text chat, video calls,
+Voxa is free, source-available voice chat with persistent encrypted text chat, video calls,
 screen sharing and channel calendars. It is written in Rust for **Windows and Android**
 and has a TeamSpeak-6-style interface. There are no license keys, registrations or
 fees. Servers can optionally ask for a per-server account (username, password and an
@@ -25,6 +25,31 @@ Servers running Voxa Server 1.10.0 or newer normally require the newest Voxa. If
 server needs a newer version, Voxa tells you and opens the update window.
 
 ## Features
+
+### What's new in 1.40
+* **Private media** (Server 1.31+): open a one-to-one DM and choose **Private screen
+  share** or **Private camera**. Only the invited person can accept and
+  watch, and neither person has to change voice channels. These live pictures do not
+  redirect your channel microphone. Close the preview to end the private share.
+* **Video messages:** in a DM choose **Record video message**. Record up to 15 seconds
+  of camera and microphone, stop, then **Send** or **Discard**. The recipient can play
+  the clip on Windows, Android or the web, including after offline delivery.
+  Clips are limited to 8 MiB, encrypted on the server and retained for up to 30 days
+  (less if chat retention is shorter).
+* **Block DMs:** right-click a person or open their DM, then choose **Block DMs**.
+  Unblock in the same place. The server remembers this by identity and checks
+  offline DMs, private attachments and live invitations too. It does not hide
+  their messages in shared channels or group chats.
+* **Game activity is off by default.** Enable it in **Options ▸ Application ▸
+  Transfers & games** to show a game beside your name. Windows checks known games
+  and the executable names you register; pick a running application or browse for
+  its executable and edit its display name. Android needs **Usage access** and
+  can recognize games by Android's app category or by a package you select.
+  Only the game label is sent, never your list of apps, paths or window titles.
+* **Appearance:** choose **12 hour (AM/PM)** or **24 hour** under **Options ▸
+  Application**. Dialogs and menus rise into place when opened. On Server 1.31+
+  an administrator can choose a server picture under **Edit Virtual Server**;
+  its icon replaces the initials in the server rail. **Use initials** removes it.
 
 ### Layout
 * **TeamSpeak 6 style:**
@@ -312,6 +337,14 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   make the video bigger or smaller.
 * **Options ▸ Video:** which camera, picture size (360p, 480p or 720p), frame rate and
   image quality. Phones send upright (portrait) pictures.
+  * If the picture is upside down, select **180°** under **Camera rotation**.
+    The 90° and 270° options also correct sideways cameras. The orientation affects
+    both your preview and what other people receive.
+  * Choose **Off** (default), **Blur**, **Solid** or your own background picture.
+    With an effect on, leave the camera facing an empty room for the first three
+    seconds, then step back in. Voxa compares frames against that reference
+    locally; keep the camera still and restart capture to recalibrate after moving
+    it. Lighting changes can affect the mask. No cloud service is used.
 * **Calls with a group chat or someone you message:** 📞 in the chat's header starts a
   call. Voxa makes a private, password-protected temporary channel for it and posts a
   **Join call** card in the chat; only the people in that chat get the password. The
@@ -377,6 +410,8 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
 * **Your own stream** shows on the stage as a preview of what viewers see, with a
   **🔒 Encrypted** badge (like video calls, screen sharing picture and sound are
   encrypted in transit).
+  Closing your own preview now stops transmission. Closing another person's
+  channel stream unsubscribes only you.
 * **Full screen:** 🖵 or double-click a stream to fill the whole monitor; Esc leaves.
 
 ### Channels
@@ -411,10 +446,16 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   * Download several files, or whole folders, into a folder.
 * **Transfers:**
   * They show progress, with **Cancel** and **Retry**.
-  * Big batches are queued, running 3 transfers at a time.
+  * By default three uploads and three downloads can run at once. In **Options ▸
+    Application ▸ Transfers & games**, choose separate upload/download speeds
+    (KiB/s) and simultaneous transfer counts. Leave a speed unchecked for
+    **Unlimited**. Zero slots means no configured limit; up to eight uploads and
+    64 downloads can run per native connection. Files in the same direction share
+    one rate. Voice, chat and live media do not use these file-transfer budgets.
   * Stalled transfers are detected, and the file connection reconnects by itself.
 * **Limits:** admins set the max file size and per-channel storage under **Edit Virtual
-  Server ▸ File transfers**.
+  Server ▸ File transfers**. Server 1.31 also supports aggregate upload/download
+  rates and slots across all clients. A personal setting cannot override a server cap.
 
 ### Administration
 * **View as** (Voxa Server 1.30.0+): see the server as members of other groups see it.
@@ -424,7 +465,8 @@ Click your name at the bottom left to set your status. Voxa remembers it for nex
   power, and the default channel group. A yellow bar shows "Viewing as …" with
   **✖ Stop**; disconnecting ends it too. Nobody else notices.
   * Only for people who may manage groups, and only groups that give no more than you
-    have (you cannot use it to get more permissions).* Permissions (server and channel groups), privilege keys, bans, kick, move, poke, talk
+    have (you cannot use it to get more permissions).
+* Permissions (server and channel groups), privilege keys, bans, kick, move, poke, talk
   power and channel commander.
 * **Bans** (Voxa Server 1.16.0+): ban by **unique ID**, **IP address** and / or
   **hardware**, any combination you tick.
@@ -581,7 +623,10 @@ x86_64 for Chromebooks).
   stay). The first time, Android asks you to allow Voxa to install apps: turn it on and go
   back. (Voxa 1.31.0 and older could not install updates themselves and opened the
   download in the browser; from 1.32.0 it works in the app.)
-* **Not on phones:** sharing your screen (you can watch others'), global hotkeys, the
+* **Screen sharing** (1.40+): Android asks you to approve a MediaProjection capture
+  on each share. You can stop from Voxa or Android's sharing controls. Screen
+  capture on Android is picture-only.
+* **Not on phones:** global hotkeys, the
   tray and starting with Windows. Android may stop the microphone while Voxa is in the
   background, so keep it open while you talk.
 * **Your data** (identity, settings, direct messages) is in Voxa's private app storage,
@@ -643,7 +688,7 @@ Requirements: Rust (rustup) and PowerShell.
 
 The Android build needs the Rust targets `aarch64-linux-android` and
 `x86_64-linux-android`, the Android NDK (`ANDROID_NDK_HOME`), the SDK with build-tools
-and a platform (`ANDROID_HOME`) and Java (for `apksigner`). Every version must be
+and a platform (`ANDROID_HOME`) and Java (for `d8` and `apksigner`). Every version must be
 signed with the same key (`VOXA_APK_KEYSTORE` / `VOXA_APK_KEYPASS`), or Android refuses
 to update the app. The Android app is `crates/voxa-android`: it builds the client's own
 code as the library an Android NativeActivity loads.
@@ -696,5 +741,4 @@ To point a fork's updater at another repository, build with
   version supports them.
 
 ## License
-Dual-licensed under MIT or Apache-2.0, at your option. Third-party licenses are listed
-in `THIRD-PARTY-NOTICES.txt` in the installed program folder.
+The [Voxa Non-Commercial License 1.0](LICENSE) permits free non-commercial use and forks. Credit and link the original [client](https://github.com/dylan0760/voxa-client) and [server](https://github.com/dylan0760/voxa-server), identify changes and keep the same terms. Monetizing Voxa or a fork is not permitted. Earlier releases keep their original licenses; dependencies retain their own licenses.

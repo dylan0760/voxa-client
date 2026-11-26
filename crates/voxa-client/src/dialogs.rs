@@ -75,6 +75,11 @@ pub struct BookmarksDlg {
 }
 
 pub struct OptionsDlg {
+    pub clock_12h: bool,
+    pub transfers: voxa_proto::transfers::TransferLimits,
+    pub game_detection: bool,
+    pub games: std::collections::BTreeMap<String, String>,
+    pub game_apps: Vec<(String, String)>,
     pub tab: u8,
     pub audio: AudioSettings,
     pub stream: StreamSettings,
@@ -151,6 +156,9 @@ pub struct ChannelDlg {
 }
 
 pub struct ServerDlg {
+    pub transfers: Option<voxa_proto::transfers::TransferLimits>,
+    pub icon_change: Option<Option<Vec<u8>>>,
+    pub icon_error: Option<String>,
     pub edit: ServerEdit,
     pub password: String,
     pub change_password: bool,
@@ -222,6 +230,7 @@ pub struct FileBrowser {
 }
 
 pub struct ShareDlg {
+    pub direct_to: Option<(ClientId, String)>,
     pub sources: Vec<crate::capture::Source>,
     /// Key of the chosen source (see Source::key).
     pub selected: Option<String>,
@@ -436,6 +445,9 @@ impl Dialogs {
             Open::ServerEdit => {
                 if let Some(i) = &s.server {
                     self.server = Some(ServerDlg {
+                        transfers: s.transfer_limits,
+                        icon_change: None,
+                        icon_error: None,
                         edit: ServerEdit {
                             name: i.name.clone(),
                             welcome_message: i.welcome_message.clone(),
@@ -529,7 +541,7 @@ impl Dialogs {
             Open::Share => {
                 let sources = crate::capture::sources();
                 let tab = if sources.iter().any(|s| matches!(s, crate::capture::Source::Window { .. })) { 0 } else { 1 };
-                self.share = Some(ShareDlg { sources, selected: None, tab, settings: settings.stream.clone(), thumbs: None });
+                self.share = Some(ShareDlg { sources, selected: None, tab, settings: settings.stream.clone(), thumbs: None, direct_to: None });
             }
         }
     }
@@ -582,6 +594,11 @@ fn perm_matches(q: &str, name: &str) -> bool {
 
 fn options_dlg(s: &Settings) -> OptionsDlg {
     OptionsDlg {
+        clock_12h: s.clock_12h,
+        transfers: s.transfers,
+        game_detection: s.game_detection,
+        games: s.games.clone(),
+        game_apps: Vec::new(),
         tab: 0,
         audio: s.audio.clone(),
         stream: s.stream.clone(),
@@ -1067,6 +1084,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
             }
             2 => {
                 ui.label(RichText::new(t!("Camera")).strong());
+                camera_options(ui,&mut d.camera);
                 egui::Grid::new("cam").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                     form_row(ui, t!("Camera:"), |ui| {
                         let current = d.cameras.iter().find(|c| c.id == d.camera.device).map(|c| c.name.clone());
@@ -1100,8 +1118,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     });
                 });
                 ui.label(RichText::new(t!("Turn your camera on with the camera button while you are in a channel: everyone in the channel sees it (needs Voxa Server 1.21.0). Bigger pictures and more frames need a faster connection.")).weak());
-                // Phones only watch screen shares.
-                if cfg!(windows) {
+                if cfg!(any(windows,target_os="android")) {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.label(RichText::new(t!("Screen sharing")).strong());
@@ -1213,6 +1230,11 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                     ui.label(RichText::new(t!("Click OK or Apply to use the chosen theme.")).small().weak());
                 });
             }
+            _ if d.app_tab==2 => {
+                app_tabs(ui,&mut d.app_tab);
+                transfer_options(ui,&mut d.transfers);
+                game_options(ui,&mut d);
+            }
             _ => {
                 app_tabs(ui, &mut d.app_tab);
                 egui::Grid::new("app").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
@@ -1220,6 +1242,7 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                         ui.text_edit_singleline(&mut d.nickname);
                     });
                     form_row(ui, t!("🌐 Language:"), |ui| language_picker(ui, &mut d.language));
+                    form_row(ui,t!("Clock"),|ui|{ui.selectable_value(&mut d.clock_12h,false,"24 h");ui.selectable_value(&mut d.clock_12h,true,"12 h (AM/PM)");});
                     form_row(ui, t!("Theme:"), |ui| {
                         ui.horizontal(|ui| {
                             ui.label(d.theme.name());
@@ -1303,6 +1326,21 @@ fn options_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         app.settings.audio = d.audio.clone();
         app.settings.stream = d.stream.clone();
         app.settings.camera = d.camera.clone();
+        app.settings.clock_12h = d.clock_12h;
+        let activity_changed = app.settings.game_detection != d.game_detection || app.settings.games != d.games;
+        app.settings.game_detection = d.game_detection;
+        app.settings.games = d.games.clone();
+        app.settings.transfers = d.transfers;
+        if let Some(s) = &mut app.sess {
+            s.upload_rate.set(d.transfers.upload_kib);
+            s.conn.download_rate.set(d.transfers.download_kib);
+            if s.supports("1.31.0") {
+                s.conn.send(C2S::ClientTransferLimits(d.transfers));
+            }
+            if activity_changed && s.supports("1.31.0") {
+                s.activity.configure(&app.settings, &s.conn);
+            }
+        }
         if !d.nickname.trim().is_empty() {
             app.settings.nickname = d.nickname.trim().to_string();
         }
@@ -1732,6 +1770,19 @@ fn server_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         }
         ui.add_space(6.0);
         ui.label(RichText::new(t!("File transfers")).strong());
+        if let Some(l)=&mut d.transfers { transfer_options(ui,l); }
+        if s.supports("1.31.0") {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button(format!("{}…",t!("Server icon"))).clicked(){
+                    if let Some(p)=crate::files::pick(crate::files::PickKind::ServerIcon,"Server icon",&["png","jpg","jpeg"],false,false).and_then(|v|v.into_iter().next()){
+                        set_icon_picture(&mut d,&p);
+                    }
+                }
+                if ui.button(t!("Use initials")).clicked(){d.icon_change=Some(None);d.icon_error=None;}
+            });
+            if let Some((_,paths))=crate::files::take(|k|*k==crate::files::PickKind::ServerIcon){if let Some(p)=paths.first(){set_icon_picture(&mut d,p);}}
+            if let Some(note)=&d.icon_error{ui.label(note);}
+        }
         if d.limits.is_some() {
             egui::Grid::new("srvfiles").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                 form_row(ui, t!("Max file size:"), |ui| {
@@ -1765,6 +1816,8 @@ fn server_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 PasswordChange::Keep
             };
             s.conn.send(C2S::EditServer(e));
+            if let Some(icon)=d.icon_change.take(){s.conn.send(C2S::SetServerIcon(icon));}
+            if let Some(l)=d.transfers.filter(|l|Some(*l)!=s.transfer_limits){s.conn.send(C2S::SetTransferLimits(l));}
             if let (Some(m), Some(old)) = (d.auto_away, s.server_options) {
                 if m != old.auto_away_minutes {
                     s.conn.send(C2S::SetServerOptions(ServerOptions { auto_away_minutes: m }));
@@ -2387,6 +2440,10 @@ fn transfers_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
 /// Starts sharing `src` with the current channel.
 pub fn start_share(app: &mut VoxaApp, ctx: &egui::Context, src: crate::capture::Source, settings: StreamSettings) {
     let Some(s) = &mut app.sess else { return };
+    if s.direct.capturing() {
+        app.dlg.error = Some("Stop private capture before starting a channel broadcast.".into());
+        return;
+    }
     if !s.bulk_ready {
         app.dlg.error = Some(t!("The stream connection is not ready yet. Please try again in a moment.").into());
         return;
@@ -2407,6 +2464,7 @@ pub fn start_share(app: &mut VoxaApp, ctx: &egui::Context, src: crate::capture::
     };
     let server_ok = s.supports("1.6.0");
     let audio = audio_target
+        .filter(|_| cfg!(windows))
         .filter(|_| settings.audio && server_ok)
         .map(|target| crate::stream::AudioSetup { target, ctl: s.conn.bulk_ctl.clone() });
     let streamer = crate::stream::Streamer::start(src, settings.clone(), s.conn.bulk_tx.clone(), preview, audio);
@@ -2427,7 +2485,17 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
         d.thumbs = Some(crate::share_picker::Thumbs::start(ctx, d.sources.clone()));
     }
     let (windows, screens): (Vec<_>, Vec<_>) = d.sources.iter().cloned().partition(|s| matches!(s, crate::capture::Source::Window { .. }));
-    egui::Window::new(t!("Share your screen"))
+    let title = d
+        .direct_to
+        .as_ref()
+        .map(|(_, uid)| {
+            format!(
+                "Private screen share · {}",
+                app.sess.as_ref().and_then(|s| s.clients.values().find(|c| c.uid == *uid)).map(|c| c.nickname.as_str()).unwrap_or("DM")
+            )
+        })
+        .unwrap_or_else(|| t!("Share your screen").into());
+    egui::Window::new(title)
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
@@ -2463,22 +2531,26 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 }
             });
             ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                ui.label(t!("Frame rate:"));
-                ui.add(egui::Slider::new(&mut d.settings.fps, 1..=60).suffix(" fps"));
-                ui.add_space(8.0);
-                ui.label(t!("Quality:"));
-                ui.add(egui::Slider::new(&mut d.settings.quality, 20..=95));
-                ui.add_space(8.0);
-                ui.checkbox(&mut d.settings.audio, t!("🔊 Share sound")).on_hover_text(t!("Screens: everything your PC plays, except Voxa itself (so nobody hears the voice chat twice). Applications: only that application's sound."));
-                ui.add_space(8.0);
-                ui.label(t!("Max width:"));
-                egui::ComboBox::from_id_salt("sharew").selected_text(format!("{} px", d.settings.max_width)).show_ui(ui, |ui| {
-                    for w in [854u32, 1280, 1600, 1920, 2560, 3840] {
-                        ui.selectable_value(&mut d.settings.max_width, w, format!("{w} px"));
+            if d.direct_to.is_none() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(t!("Frame rate:"));
+                    ui.add(egui::Slider::new(&mut d.settings.fps, 1..=60).suffix(" fps"));
+                    ui.add_space(8.0);
+                    ui.label(t!("Quality:"));
+                    ui.add(egui::Slider::new(&mut d.settings.quality, 20..=95));
+                    ui.add_space(8.0);
+                    if cfg!(windows) {
+                        ui.checkbox(&mut d.settings.audio, t!("🔊 Share sound")).on_hover_text(t!("Screens: everything your PC plays, except Voxa itself (so nobody hears the voice chat twice). Applications: only that application's sound."));
                     }
+                    ui.add_space(8.0);
+                    ui.label(t!("Max width:"));
+                    egui::ComboBox::from_id_salt("sharew").selected_text(format!("{} px", d.settings.max_width)).show_ui(ui, |ui| {
+                        for w in [854u32, 1280, 1600, 1920, 2560, 3840] {
+                            ui.selectable_value(&mut d.settings.max_width, w, format!("{w} px"));
+                        }
+                    });
                 });
-            });
+            }
             let chosen = d.selected.as_ref().and_then(|k| d.sources.iter().find(|s| &s.key() == k)).cloned();
             ui.horizontal(|ui| {
                 let label = match &chosen {
@@ -2493,12 +2565,22 @@ fn share_dialog(app: &mut VoxaApp, ctx: &egui::Context) {
                 if ui.button(t!("Cancel")).clicked() {
                     close = true;
                 }
-                ui.label(RichText::new(t!("Tip: double-click a preview to start right away. The stream is relayed through the server.")).small().weak());
+                ui.label(RichText::new(if d.direct_to.is_some() {"Only the DM recipient can accept this invitation."}else{t!("Tip: double-click a preview to start right away. The stream is relayed through the server.")}).small().weak());
             });
         });
     if let Some(src) = start {
         close = true;
-        start_share(app, ctx, src, d.settings.clone());
+        if let Some((peer, uid)) = d.direct_to.take() {
+            if let Some(s) = app.sess.as_mut().filter(|s| {
+                s.streamer.is_none() && s.camera.is_none() && !s.blocks.contains(&uid)
+                    && s.clients.get(&peer).is_some_and(|c| c.uid == uid)
+                    && s.dms.iter().any(|d| d.open && d.uid == uid)
+            }) {
+                s.direct.invite(&s.conn, peer, uid, crate::private_media::Feed::Screen(src));
+            }
+        } else {
+            start_share(app, ctx, src, d.settings.clone());
+        }
     }
     if open && !close {
         app.dlg.share = Some(d);
@@ -3165,14 +3247,16 @@ fn small_dialogs(app: &mut VoxaApp, ctx: &egui::Context) {
         let mut open = true;
         window(t!("About Voxa")).open(&mut open).show_fill(ctx, |ui| {
             ui.heading(tf!("Voxa {}", APP_VERSION));
-            ui.label(t!("Free and open source voice chat, text chat and screen sharing."));
+            ui.label(t!("Non-commercial voice chat, text chat and screen sharing."));
             ui.label(t!("No license keys, no accounts, no registration."));
             ui.add_space(6.0);
             ui.label(t!("• Encrypted voice (Opus over ChaCha20-Poly1305)"));
             ui.label(t!("• Channel and server chat stored encrypted on the server"));
             ui.label(t!("• Screen / application sharing relayed by the server"));
             ui.add_space(6.0);
-            ui.label(RichText::new(t!("Licensed under MIT OR Apache-2.0")).weak());
+            ui.label(RichText::new("Voxa Non-Commercial License 1.0").weak());
+            ui.hyperlink_to("Original Voxa client source", "https://github.com/dylan0760/voxa-client");
+            ui.hyperlink_to("Original Voxa server source", "https://github.com/dylan0760/voxa-server");
             if let Some(gpu) = crate::gpu::adapter_info() {
                 ui.label(RichText::new(tf!("Graphics: {gpu}"; gpu = gpu)).weak());
             }
@@ -3263,13 +3347,141 @@ fn language_picker(ui: &mut Ui, choice: &mut Option<String>) {
 /// Options ▸ Application: General / Themes.
 fn app_tabs(ui: &mut Ui, tab: &mut u8) {
     ui.horizontal(|ui| {
-        for (i, t) in [t!("General"), t!("Themes")].iter().enumerate() {
+        for (i, t) in [t!("General"), t!("Themes"), t!("Transfers & games")].iter().enumerate() {
             if ui.selectable_label(*tab == i as u8, *t).clicked() {
                 *tab = i as u8;
             }
         }
     });
     ui.add_space(6.0);
+}
+
+fn transfer_options(ui: &mut Ui, l: &mut voxa_proto::transfers::TransferLimits) {
+    ui.label(RichText::new(t!("File transfers")).strong());
+    for (label, rate) in [(t!("Upload speed"), &mut l.upload_kib), (t!("Download speed"), &mut l.download_kib)] {
+        ui.horizontal_wrapped(|ui| {
+            let mut enabled = *rate != 0;
+            if ui.checkbox(&mut enabled, label).changed() {
+                *rate = if enabled { 1024 } else { 0 };
+            }
+            if enabled {
+                ui.add(egui::DragValue::new(rate).range(1..=1_000_000).suffix(" KiB/s"));
+            } else {
+                ui.weak(t!("Unlimited"));
+            }
+        });
+    }
+    for (label, slots) in [(t!("Concurrent uploads"), &mut l.uploads), (t!("Concurrent downloads"), &mut l.downloads)] {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(label);
+            ui.add(egui::DragValue::new(slots).range(0..=1024));
+            if *slots == 0 {
+                ui.weak(t!("Unlimited"));
+            }
+        });
+    }
+}
+
+fn camera_options(ui: &mut Ui, s: &mut CameraSettings) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(t!("Camera rotation"));
+        for (turns, label) in ["0°", "90°", "180°", "270°"].iter().enumerate() {
+            ui.selectable_value(&mut s.rotation, turns as u8, *label);
+        }
+    });
+    if let Some((_, paths)) = crate::files::take(|k| *k == crate::files::PickKind::CameraBackdrop) {
+        if let Some(p) = paths.into_iter().next() {
+            s.background = CameraBackground::Picture(p);
+        }
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label(t!("Camera background"));
+        ui.selectable_value(&mut s.background, CameraBackground::Off, t!("Off"));
+        ui.selectable_value(&mut s.background, CameraBackground::Blur, t!("Blur"));
+        ui.selectable_value(&mut s.background, CameraBackground::Studio, t!("Solid"));
+        if ui.selectable_label(matches!(s.background, CameraBackground::Picture(_)), "Choose picture…").clicked() {
+            if let Some(p) =
+                crate::files::pick(crate::files::PickKind::CameraBackdrop, "Camera background", &["png", "jpg", "jpeg", "webp"], false, false)
+                    .and_then(|v| v.into_iter().next())
+            {
+                s.background = CameraBackground::Picture(p);
+            }
+        }
+    });
+    if s.background != CameraBackground::Off {
+        ui.weak("When starting the camera, step out of frame for three seconds to capture the empty background. Keep the camera still.");
+    }
+    ui.weak("Camera changes apply the next time you start sharing or recording.");
+}
+
+fn set_icon_picture(d: &mut ServerDlg, p: &std::path::Path) {
+    let result = crate::camera::load_picture(p).and_then(|img| {
+        let img = img.to_rgba8();
+        let side = img.width().min(img.height());
+        crate::avatars::encode(&img, [(img.width() - side) / 2, (img.height() - side) / 2, side, side])
+            .ok_or_else(|| "Could not encode the server icon".to_string())
+    });
+    match result {
+        Ok(b) => {
+            d.icon_change = Some(Some(b));
+            d.icon_error = Some("Icon ready. Press OK to save.".into());
+        }
+        Err(e) => d.icon_error = Some(e),
+    }
+}
+
+fn game_options(ui: &mut Ui, d: &mut OptionsDlg) {
+    ui.separator();
+    ui.checkbox(&mut d.game_detection, t!("Game activity")).on_hover_text("Show the game I’m playing to other people on this server.");
+    if !d.game_detection {
+        return;
+    }
+    #[cfg(target_os = "android")]
+    if ui.button("Grant Android Usage access…").clicked() {
+        crate::mobile::usage_settings();
+    }
+    if ui.button("Refresh application list").clicked() {
+        #[cfg(target_os = "android")]
+        {
+            d.game_apps = crate::mobile::game_choices();
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            d.game_apps = capture_apps();
+        }
+    }
+    egui::ComboBox::from_id_salt("add-game").selected_text(t!("Add a game")).show_ui(ui, |ui| {
+        if d.game_apps.is_empty() {
+            ui.weak("Refresh the list to choose an application.");
+        }
+        for (exe, _) in &d.game_apps {
+            if ui.button(exe).clicked() {
+                d.games.entry(exe.to_lowercase()).or_insert_with(|| exe.trim_end_matches(".exe").to_owned());
+                ui.close();
+            }
+        }
+    });
+    #[cfg(windows)]
+    if ui.button("Choose game executable…").clicked() {
+        if let Some(path) = rfd::FileDialog::new().add_filter("Game", &["exe"]).pick_file() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                d.games.insert(name.to_lowercase(), name.trim_end_matches(".exe").to_owned());
+            }
+        }
+    }
+    let mut remove = None;
+    for (exe, name) in &mut d.games {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(exe);
+            ui.add(egui::TextEdit::singleline(name).char_limit(60));
+            if ui.button("✖").clicked() {
+                remove = Some(exe.clone());
+            }
+        });
+    }
+    if let Some(k) = remove {
+        d.games.remove(&k);
+    }
 }
 
 /// Options ▸ Themes ▸ Your picture: any picture of yours behind see-through panels.

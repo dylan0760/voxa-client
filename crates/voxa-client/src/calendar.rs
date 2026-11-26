@@ -97,7 +97,8 @@ fn local(ts: u64) -> chrono::DateTime<Local> {
 
 /// "Mon 23 Nov 20:00" in local time.
 pub fn when(ts: u64) -> String {
-    local(ts).format("%a %d %b %H:%M").to_string()
+    let t = local(ts);
+    format!("{} {}", t.format("%a %d %b"), t.format(crate::ui::clock_format()))
 }
 
 fn now() -> u64 {
@@ -297,7 +298,7 @@ fn upcoming(ui: &mut Ui, events: &[&CalendarEvent], st: &mut CalendarUi, uid: &s
         let r = Frame::new().fill(t.card).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(RichText::new(start.format("%H:%M").to_string()).strong().size(16.0).color(accent()));
+                ui.label(RichText::new(start.format(crate::ui::clock_format()).to_string()).strong().size(16.0).color(accent()));
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&e.title).strong());
@@ -368,7 +369,7 @@ fn month_grid(ui: &mut Ui, events: &[&CalendarEvent], st: &mut CalendarUi, can_e
                     let cr = ui.interact(chip, egui::Id::unique(("cal_chip", e.id)), Sense::click());
                     let p = ui.painter();
                     p.rect_filled(chip, CornerRadius::same(3), accent().linear_multiply(if cr.hovered() { 0.9 } else { 0.6 }));
-                    let label = format!("{} {}", local(e.start).format("%H:%M"), e.title);
+                    let label = format!("{} {}", local(e.start).format(crate::ui::clock_format()), e.title);
                     p.with_clip_rect(chip).text(chip.left_center() + egui::vec2(3.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(11.0), Color32::WHITE);
                     if cr.clicked() {
                         st.open_event = Some(e.id);
@@ -506,9 +507,21 @@ fn form_window(ctx: &egui::Context, st: &mut CalendarUi, calendars: &[CalendarIn
             ui.end_row();
             ui.label(t!("Time:"));
             ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut f.hour).range(0..=23).custom_formatter(|v, _| format!("{:02}", v as u32)));
+                let twelve = crate::ui::clock_format().contains("%p");
+                let mut pm = f.hour >= 12;
+                let mut hour = (f.hour + 11) % 12 + 1;
+                if twelve {
+                    ui.add(egui::DragValue::new(&mut hour).range(1..=12));
+                } else {
+                    ui.add(egui::DragValue::new(&mut f.hour).range(0..=23).custom_formatter(|v, _| format!("{:02}", v as u32)));
+                }
                 ui.label(":");
                 ui.add(egui::DragValue::new(&mut f.minute).range(0..=59).speed(0.5).custom_formatter(|v, _| format!("{:02}", v as u32)));
+                if twelve {
+                    ui.selectable_value(&mut pm, false, "AM");
+                    ui.selectable_value(&mut pm, true, "PM");
+                    f.hour = hour % 12 + 12 * u32::from(pm);
+                }
                 ui.label(RichText::new(t!("your local time")).weak());
             });
             ui.end_row();

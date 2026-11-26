@@ -1,7 +1,7 @@
 # Builds Voxa (client) and its MSI installer into .\dist
 #   .\build.ps1             full build
 #   .\build.ps1 -SkipCargo  only re-package the MSI from the last build
-param([switch]$SkipCargo)
+param([switch]$SkipCargo, [switch]$NoCopy)
 
 # ---- product configuration ----------------------------------------------------------
 $Product = @{
@@ -84,41 +84,11 @@ try {
     Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force $stage | Out-Null
     Copy-Item (Join-Path $Root 'README.md') (Join-Path $stage 'README.txt')
-    Copy-Item (Join-Path $Root 'LICENSE-MIT') (Join-Path $stage 'LICENSE-MIT.txt')
-    Copy-Item (Join-Path $Root 'LICENSE-APACHE') (Join-Path $stage 'LICENSE-APACHE.txt')
+    Copy-Item (Join-Path $Root 'LICENSE') (Join-Path $stage 'LICENSE.txt')
 
     Write-Host 'Collecting third-party licenses...'
-    $meta = (& cargo "+$Toolchain" metadata --format-version 1 --filter-platform $Target) | Out-String | ConvertFrom-Json
-    $used = @{}
-    foreach ($n in $meta.resolve.nodes) { $used[$n.id] = $true }
-    $sb = New-Object System.Text.StringBuilder
-    [void]$sb.AppendLine("Voxa $version - third-party software notices")
-    [void]$sb.AppendLine("Voxa includes the following open source components. Their license texts follow.")
-    [void]$sb.AppendLine()
-    $seen = @{}
-    $sha = [Security.Cryptography.SHA256]::Create()
-    foreach ($p in ($meta.packages | Where-Object { $_.source -and $used[$_.id] } | Sort-Object name, version)) {
-        [void]$sb.AppendLine('=' * 78)
-        [void]$sb.AppendLine("$($p.name) $($p.version)  -  License: $($p.license)")
-        if ($p.repository) { [void]$sb.AppendLine($p.repository) }
-        [void]$sb.AppendLine('=' * 78)
-        $dir = Split-Path $p.manifest_path
-        $files = Get-ChildItem $dir -File | Where-Object { $_.Name -match '^(LICEN[CS]E|COPYING|NOTICE|COPYRIGHT)' }
-        foreach ($f in $files) {
-            $text = Get-Content $f.FullName -Raw
-            $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)))
-            if ($seen.ContainsKey($hash)) {
-                [void]$sb.AppendLine("[$($f.Name): identical to the text shown for $($seen[$hash])]")
-            } else {
-                $seen[$hash] = "$($p.name) ($($f.Name))"
-                [void]$sb.AppendLine("--- $($f.Name) ---")
-                [void]$sb.AppendLine($text.Trim())
-            }
-            [void]$sb.AppendLine()
-        }
-        [void]$sb.AppendLine()
-    }
-    [IO.File]::WriteAllText((Join-Path $stage 'THIRD-PARTY-NOTICES.txt'), $sb.ToString())
+    & (Join-Path $Root 'installer\notices.ps1') -Toolchain $Toolchain -Target $Target -Version $version -Stage $stage
+
 
     # --- MSI package -------------------------------------------------------------------
     $dist = Join-Path $Root 'dist'
@@ -137,7 +107,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'light failed' }
     Write-Host "Built $msi" -ForegroundColor Green
     $copy = Join-Path $Root $Product.CopyTo
-    if ($Product.CopyTo -and (Test-Path $copy)) {
+    if (-not $NoCopy -and $Product.CopyTo -and (Test-Path $copy)) {
         Copy-Item $msi $copy -Force
         Write-Host "Copied to $((Resolve-Path $copy).Path)" -ForegroundColor Green
     }

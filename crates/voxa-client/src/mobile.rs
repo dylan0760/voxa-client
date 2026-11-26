@@ -12,6 +12,89 @@ use std::sync::OnceLock;
 static APP: OnceLock<AndroidApp> = OnceLock::new();
 
 pub const RECORD_AUDIO: &str = "android.permission.RECORD_AUDIO";
+/// Android only exposes foreground usage after the owner grants Usage access.
+pub fn usage_settings() {
+    with_env(|env, act| {
+        let action = env.new_string("android.settings.USAGE_ACCESS_SETTINGS")?;
+        let intent = env.new_object("android/content/Intent", "(Ljava/lang/String;)V", &[JValue::Object(&action)])?;
+        env.call_method(act, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(&intent)])?;
+        Ok(())
+    });
+}
+
+pub fn foreground_game() -> Option<(String, Option<String>)> {
+    with_env(|env, act| {
+        let service = env.new_string("usagestats")?;
+        let mgr = env.call_method(act, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", &[JValue::Object(&service)])?.l()?;
+        let end = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        let events =
+            env.call_method(&mgr, "queryEvents", "(JJ)Landroid/app/usage/UsageEvents;", &[JValue::Long(end - 3_600_000), JValue::Long(end)])?.l()?;
+        let event = env.new_object("android/app/usage/UsageEvents$Event", "()V", &[])?;
+        let mut current = None::<String>;
+        for _ in 0..8192 {
+            if !env.call_method(&events, "getNextEvent", "(Landroid/app/usage/UsageEvents$Event;)Z", &[JValue::Object(&event)])?.z()? {
+                break;
+            }
+            let kind = env.call_method(&event, "getEventType", "()I", &[])?.i()?;
+            if kind == 1 || kind == 2 {
+                let p = env.call_method(&event, "getPackageName", "()Ljava/lang/String;", &[])?.l()?;
+                let text = jni::objects::JString::from(p);
+                let pkg: String = env.get_string(&text)?.into();
+                env.delete_local_ref(text)?;
+                if kind == 1 {
+                    current = Some(pkg);
+                } else if current.as_ref() == Some(&pkg) {
+                    current = None;
+                }
+            }
+        }
+        let Some(pkg) = current else { return Ok(None) };
+        let pm = env.call_method(act, "getPackageManager", "()Landroid/content/pm/PackageManager;", &[])?.l()?;
+        let key = env.new_string(&pkg)?;
+        let info = env
+            .call_method(
+                &pm,
+                "getApplicationInfo",
+                "(Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;",
+                &[JValue::Object(&key), JValue::Int(0)],
+            )?
+            .l()?;
+        let is_game = env.get_field(&info, "category", "I")?.i()? == 0;
+        let name = if is_game {
+            let label = env
+                .call_method(&pm, "getApplicationLabel", "(Landroid/content/pm/ApplicationInfo;)Ljava/lang/CharSequence;", &[JValue::Object(&info)])?
+                .l()?;
+            let text = env.call_method(label, "toString", "()Ljava/lang/String;", &[])?.l()?;
+            let name: String = env.get_string(&text.into())?.into();
+            Some(name)
+        } else {
+            None
+        };
+        Ok(Some((pkg, name)))
+    })
+    .flatten()
+}
+use std::time::SystemTime;
+
+pub fn game_choices() -> Vec<(String, String)> {
+    with_env(|env, act| {
+        let pm = env.call_method(act, "getPackageManager", "()Landroid/content/pm/PackageManager;", &[])?.l()?;
+        let apps = env.call_method(pm, "getInstalledApplications", "(I)Ljava/util/List;", &[JValue::Int(0)])?.l()?;
+        let count = env.call_method(&apps, "size", "()I", &[])?.i()?;
+        let mut choices = Vec::new();
+        for i in 0..count.min(1024) {
+            let entry = env.call_method(&apps, "get", "(I)Ljava/lang/Object;", &[JValue::Int(i)])?.l()?;
+            let key = jni::objects::JString::from(env.get_field(&entry, "packageName", "Ljava/lang/String;")?.l()?);
+            let pkg: String = env.get_string(&key)?.into();
+            choices.push((pkg, String::new()));
+            env.delete_local_ref(entry)?;
+            env.delete_local_ref(key)?;
+        }
+        choices.sort();
+        Ok(choices)
+    })
+    .unwrap_or_default()
+}
 const READ_STORAGE: &str = "android.permission.READ_EXTERNAL_STORAGE";
 const WRITE_STORAGE: &str = "android.permission.WRITE_EXTERNAL_STORAGE";
 const NOTIFICATIONS: &str = "android.permission.POST_NOTIFICATIONS";
@@ -26,7 +109,7 @@ pub fn init(app: &AndroidApp) {
 }
 
 /// Runs `f` with the Java environment and the activity. None if Java threw.
-fn with_env<R>(f: impl FnOnce(&mut JNIEnv, &JObject) -> jni::errors::Result<R>) -> Option<R> {
+pub(crate) fn with_env<R>(f: impl FnOnce(&mut JNIEnv, &JObject) -> jni::errors::Result<R>) -> Option<R> {
     let app = APP.get()?;
     // SAFETY: the pointers come from the running NativeActivity and stay valid while the
     // app runs. (ndk-context's context is the Application, which has no window.)

@@ -39,6 +39,11 @@ pub fn rgb(c: u32) -> Color32 {
     Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
+pub fn server_icon_path(fingerprint: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    crate::config::config_dir().join("server-icons").join(format!("{:x}.image", Sha256::digest(fingerprint.as_bytes())))
+}
+
 /// Forgets everyone (new connection).
 pub fn clear() {
     let mut s = store().lock();

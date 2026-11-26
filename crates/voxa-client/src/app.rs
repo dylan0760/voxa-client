@@ -187,7 +187,7 @@ impl ChatLog {
 }
 
 pub enum TransferState {
-    /// Waiting for a free slot (see MAX_PARALLEL_TRANSFERS).
+    /// Waiting for a free slot in this transfer direction.
     Queued,
     Waiting,
     Active,
@@ -201,7 +201,7 @@ pub struct Transfer {
     pub size: u64,
     pub done: Arc<AtomicU64>,
     pub local: std::path::PathBuf,
-    pub file: Option<std::fs::File>,
+    file: Option<PartialDownload>,
     pub state: TransferState,
     pub channel: ChannelId,
     /// Full path on the server (for retries).
@@ -211,6 +211,32 @@ pub struct Transfer {
     /// Watchdog: bytes seen at the last progress check and when they changed.
     pub last_done: u64,
     pub last_change: Instant,
+    retry_after: Option<Instant>,
+}
+
+/// A cancelled or failed transfer never truncates an existing destination.
+struct PartialDownload {
+    path: std::path::PathBuf,
+    file: Option<std::fs::File>,
+}
+impl PartialDownload {
+    fn create(dest: &std::path::Path) -> std::io::Result<Self> {
+        let path = dest.with_file_name(format!(".voxa-{:016x}.part", rand::random::<u64>()));
+        let file = std::fs::File::create_new(&path)?;
+        Ok(Self { path, file: Some(file) })
+    }
+    fn finish(mut self, dest: &std::path::Path) -> std::io::Result<()> {
+        if let Some(file) = self.file.take() {
+            file.sync_all()?;
+        }
+        std::fs::rename(&self.path, dest)
+    }
+}
+impl Drop for PartialDownload {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 impl Transfer {
@@ -228,6 +254,7 @@ impl Transfer {
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_done: 0,
             last_change: Instant::now(),
+            retry_after: None,
         }
     }
 
@@ -282,13 +309,18 @@ pub fn safe_local_name(name: &str) -> Option<&str> {
 /// answer with endless sub-folders).
 const MAX_DOWNLOAD_DEPTH: usize = 32;
 
-/// Transfers running at the same time; the rest wait in the queue.
-pub const MAX_PARALLEL_TRANSFERS: usize = 3;
-
 /// No progress for this long marks a transfer as stalled.
 const TRANSFER_STALL: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub struct Session {
+    pub transfer_limits: Option<voxa_proto::transfers::TransferLimits>,
+    pub upload_rate: Arc<voxa_proto::transfers::Rate>,
+    upload_server_rate: Arc<voxa_proto::transfers::Rate>,
+    pub games: HashMap<ClientId, String>,
+    pub blocks: Vec<String>,
+    pub server_icon: Option<egui::TextureHandle>,
+    pub activity: crate::activity::Detection,
+    pub direct: crate::private_media::Media,
     pub conn: Connection,
     pub req: ConnectRequest,
     pub server_addr: Option<SocketAddr>,
@@ -417,6 +449,15 @@ pub struct Stage {
 }
 
 impl Session {
+    pub fn block_button(&self, ui: &mut egui::Ui, uid: &str) -> bool {
+        let blocked = self.blocks.iter().any(|u| u == uid);
+        if ui.button(if blocked { t!("Unblock DMs") } else { t!("Block DMs") }).clicked() {
+            self.conn.send(C2S::BlockDm { uid: uid.to_owned(), block: !blocked });
+            true
+        } else {
+            false
+        }
+    }
     /// Numeric IDs belong to one connection; restore local controls from the person's identity.
     fn bind_playback(&self, playback: &mut Playback, settings: &Settings, c: &ClientInfo) {
         playback.forget(c.id);
@@ -491,7 +532,7 @@ impl Session {
     /// that are open (automatically, or because I opened them).
     pub fn stage_streams(&self, auto: bool) -> Vec<ClientId> {
         let mut v = Vec::new();
-        if self.streamer.as_ref().map(|st| st.preview_on.load(Ordering::Relaxed)).unwrap_or(false) {
+        if self.streamer.is_some() {
             v.push(self.me);
         }
         let ch = self.my_channel();
@@ -898,6 +939,7 @@ pub struct VoxaApp {
     pub voice_shared: Arc<VoiceShared>,
     pub last_request: Option<ConnectRequest>,
     pub textures: HashMap<ClientId, (egui::TextureHandle, u64)>,
+    pub rail_icons: HashMap<String, Option<egui::TextureHandle>>,
     /// Pictures of the cameras shown (video calls).
     pub camera_textures: HashMap<ClientId, (egui::TextureHandle, u64)>,
     pub chat_input: String,
@@ -987,6 +1029,7 @@ impl VoxaApp {
         // The language first: the fonts follow it.
         crate::i18n::apply(&crate::i18n::chosen(settings.language.as_deref()), &cc.egui_ctx);
         crate::ui::apply_style(&cc.egui_ctx, &settings);
+        voxa_proto::motion::install(&cc.egui_ctx);
         let (tray_tx, tray_rx) = std::sync::mpsc::channel();
         crate::tray::install_handlers(tray_tx.clone(), cc.egui_ctx.clone());
         if let Some(inst) = inst {
@@ -1013,6 +1056,7 @@ impl VoxaApp {
             voice_shared,
             last_request: None,
             textures: HashMap::new(),
+            rail_icons: HashMap::new(),
             camera_textures: HashMap::new(),
             chat_input: String::new(),
             offline_log: ChatLog::default(),
@@ -1837,6 +1881,19 @@ impl VoxaApp {
         }
         // The window's close button hides to the tray when enabled.
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.settings.minimize_to_tray && self.tray.is_some() {
+            if let Some(s) = &mut self.sess {
+                if s.streamer.take().is_some() {
+                    s.conn.send(C2S::StopStream);
+                    s.viewer.clear(s.me);
+                }
+                if s.camera.take().is_some() {
+                    s.conn.send(C2S::StopCamera);
+                    s.camera_viewer.clear(s.me);
+                }
+                if !self.settings.dm_window {
+                    s.direct.close(&s.conn, None);
+                }
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.hide_window();
         }
@@ -1954,8 +2011,17 @@ impl VoxaApp {
             self.ctx.clone(),
         );
         self.settings.add_recent(&req.address);
+        conn.download_rate.set(self.settings.transfers.download_kib);
         self.settings.save();
         let mut sess = Session {
+            transfer_limits: None,
+            upload_rate: Arc::new(voxa_proto::transfers::Rate::new(self.settings.transfers.upload_kib)),
+            upload_server_rate: Arc::new(voxa_proto::transfers::Rate::new(0)),
+            games: Default::default(),
+            blocks: Vec::new(),
+            server_icon: None,
+            activity: Default::default(),
+            direct: crate::private_media::Media::new(self.voice_shared.private_recording.clone()),
             conn,
             req: req.clone(),
             server_addr: None,
@@ -2200,6 +2266,7 @@ impl VoxaApp {
             }
             NetEvent::BulkLost(why) => {
                 if let Some(s) = &mut self.sess {
+                    s.direct.close(&s.conn, None);
                     s.bulk_ready = false;
                     let mut failed = 0;
                     for t in s.transfers.values_mut().filter(|t| t.is_running()) {
@@ -2256,6 +2323,7 @@ impl VoxaApp {
     fn handle_bulk(&mut self, b: BulkS2C) {
         let Some(s) = &mut self.sess else { return };
         match b {
+            BulkS2C::DirectFrame { from, stream, jpeg } => s.direct.frame(from, stream, jpeg),
             BulkS2C::Attached => {}
             BulkS2C::StreamAudio { from, data } => {
                 if s.watching.contains(&from) {
@@ -2292,6 +2360,8 @@ impl VoxaApp {
                     let cancel = t.cancel.clone();
                     let tx = s.conn.bulk_tx.clone();
                     let ctl = s.conn.bulk_ctl.clone();
+                    let rate = s.upload_rate.clone();
+                    let server_rate = s.upload_server_rate.clone();
                     self.rt.spawn(async move {
                         use tokio::io::AsyncReadExt;
                         let Ok(mut f) = tokio::fs::File::open(&path).await else {
@@ -2303,9 +2373,15 @@ impl VoxaApp {
                             if cancel.load(Ordering::Relaxed) {
                                 return;
                             }
-                            match f.read(&mut buf).await {
+                            let chunk = rate.chunk().min(server_rate.chunk());
+                            match f.read(&mut buf[..chunk]).await {
                                 Ok(0) => break,
                                 Ok(n) => {
+                                    let active = || !cancel.load(Ordering::Relaxed) && !tx.is_closed();
+                                    tokio::join!(rate.pace_while(n, active), server_rate.pace_while(n, active));
+                                    if cancel.load(Ordering::Relaxed) {
+                                        return;
+                                    }
                                     if tx.send(BulkC2S::UploadChunk { id, data: buf[..n].to_vec() }).await.is_err() {
                                         return;
                                     }
@@ -2343,7 +2419,7 @@ impl VoxaApp {
                 if let Some(t) = s.transfers.get_mut(&id).filter(|t| !t.upload && matches!(t.state, TransferState::Waiting)) {
                     t.size = size;
                     t.last_change = Instant::now();
-                    match std::fs::File::create(&t.local) {
+                    match PartialDownload::create(&t.local) {
                         Ok(f) => {
                             t.file = Some(f);
                             t.state = TransferState::Active;
@@ -2362,8 +2438,11 @@ impl VoxaApp {
                 let mut cancel = false;
                 if let Some(t) = s.transfers.get_mut(&id).filter(|t| !t.upload) {
                     use std::io::Write;
-                    if let Some(f) = &mut t.file {
-                        if let Err(e) = f.write_all(&data) {
+                    if let Some(f) = t.file.as_mut().and_then(|p| p.file.as_mut()) {
+                        if data.len() as u64 > t.size.saturating_sub(t.done.load(Ordering::Relaxed)) {
+                            t.fail("Download exceeds the announced file size");
+                            cancel = true;
+                        } else if let Err(e) = f.write_all(&data) {
                             t.fail(tf!("Write failed: {e}"; e = e));
                             cancel = true;
                         } else {
@@ -2376,13 +2455,14 @@ impl VoxaApp {
                 }
             }
             BulkS2C::DownloadEnd { id } => {
-                if let Some(t) = s.transfers.get_mut(&id).filter(|t| !t.upload && t.is_running()) {
-                    if let Some(f) = t.file.take() {
-                        let _ = f.sync_all();
-                    }
+                if let Some(t) = s.transfers.get_mut(&id).filter(|t| !t.upload && matches!(t.state, TransferState::Active)) {
                     let got = t.done.load(Ordering::Relaxed);
                     if got != t.size {
                         t.fail(tf!("Incomplete download ({} of {})", crate::ui::fmt_size(got), crate::ui::fmt_size(t.size)));
+                    } else if let Err(e) =
+                        t.file.take().ok_or_else(|| std::io::Error::other("Missing partial file")).and_then(|part| part.finish(&t.local))
+                    {
+                        t.fail(format!("Could not finish download: {e}"));
                     } else {
                         t.state = TransferState::Done;
                         let msg = tf!("Downloaded \"{}\" to {}", t.name, t.local.display());
@@ -2391,13 +2471,30 @@ impl VoxaApp {
                 }
             }
             BulkS2C::ChatImageSent { id } => s.images.send_done(id),
-            BulkS2C::Image { image, data } => s.images.received(&self.ctx, image, data),
+            BulkS2C::Image { image, data } => {
+                if !s.direct.receive_clip(image, &data, &self.settings) {
+                    s.images.received(&self.ctx, image, data);
+                }
+            }
             BulkS2C::GifPreview { id, data } => s.gif.preview_received(&self.ctx, id, data),
             BulkS2C::ServerGifAdded { id, error } => s.gif.upload_done(id, error),
-            BulkS2C::ImageError { image, message } => s.images.failed(image, message),
+            BulkS2C::ImageError { image, message } => {
+                if !s.direct.clip_error(image, &message) {
+                    s.images.failed(image, message);
+                }
+            }
             BulkS2C::TransferError { id, message } if s.images.owns_send(id) => s.images.send_failed(id, message),
             BulkS2C::TransferError { id, message } => {
+                if id == u32::MAX - 1 {
+                    self.dlg.error = Some(message);
+                    return;
+                }
                 if let Some(t) = s.transfers.get_mut(&id).filter(|t| t.is_running()) {
+                    if matches!(t.state, TransferState::Waiting) && message == "All transfer slots in this direction are busy. Retry shortly." {
+                        t.state = TransferState::Queued;
+                        t.retry_after = Some(Instant::now() + std::time::Duration::from_secs(2));
+                        return;
+                    }
                     t.fail(message.clone());
                     let msg = tf!("Transfer of \"{}\" failed: {message}", t.name; message = message);
                     s.log(EventKind::Error, msg);
@@ -2433,6 +2530,10 @@ impl VoxaApp {
                 let supports_limits = server_at_least(&server.version, "1.3.0");
                 let accounts = server_at_least(&server.version, ACCOUNTS_SERVER);
                 s.server = Some(server);
+                if s.supports("1.31.0") {
+                    s.conn.send(C2S::ClientTransferLimits(self.settings.transfers));
+                    s.activity.configure(&self.settings, &s.conn);
+                }
                 // A remembered device signs in before anything else is asked for.
                 if accounts {
                     if let Some(t) = self.settings.account_tokens.get(&account_key(&s.req.address, &s.my_uid)) {
@@ -2528,6 +2629,71 @@ impl VoxaApp {
             }
             S2C::HiddenChannels(list) => s.hidden_channels = list.into_iter().collect(),
             S2C::ViewingAs(groups) => s.view_as = groups,
+            S2C::ServerIcon(image) => {
+                s.server_icon = image
+                    .as_deref()
+                    .and_then(crate::avatars::decode)
+                    .map(|img| self.ctx.load_texture("server-icon", img, egui::TextureOptions::LINEAR));
+                if !s.server_key.is_empty() {
+                    self.rail_icons.insert(s.server_key.clone(), s.server_icon.clone());
+                    let p = crate::avatars::server_icon_path(&s.server_key);
+                    if let Some(data) = image.filter(|_| s.server_icon.is_some()) {
+                        if let Some(dir) = p.parent() {
+                            let _ = std::fs::create_dir_all(dir);
+                        }
+                        let tmp = p.with_extension("tmp");
+                        if std::fs::write(&tmp, data).is_ok() {
+                            let _ = std::fs::rename(tmp, p);
+                        }
+                    } else {
+                        let _ = std::fs::remove_file(p);
+                    }
+                }
+            }
+            S2C::TransferLimits(l) => {
+                if l.valid() {
+                    s.transfer_limits = Some(l);
+                    s.upload_server_rate.set(l.upload_kib);
+                    if let Some(d) = self.dlg.server.as_mut().filter(|d| d.transfers.is_none()) {
+                        d.transfers = Some(l);
+                    }
+                }
+            }
+            S2C::Playing { client, game } => {
+                if let Some(name) = game.filter(|g| s.clients.contains_key(&client) && g.len() <= 240) {
+                    s.games.insert(client, name);
+                } else {
+                    s.games.remove(&client);
+                }
+            }
+            S2C::DmBlocks(list) => s.blocks = list,
+            S2C::OfflineVideoSent { uid, text, ts } => {
+                let name = s.people.iter().find(|p| p.uid == uid).map(|p| p.nickname.clone()).unwrap_or_else(|| uid.clone());
+                let id = s.dm_open(&uid, &name);
+                s.dm_push(
+                    id,
+                    ChatMessage {
+                        id: 0,
+                        target: TextTarget::Private(0),
+                        from: Some(s.me),
+                        from_uid: s.my_uid.clone(),
+                        from_name: s.client_name(s.me),
+                        ts,
+                        text,
+                    },
+                );
+            }
+            S2C::MediaOffer { from, stream, camera } => {
+                let Some(peer) = s.clients.get(&from).filter(|p| !s.blocks.contains(&p.uid)).cloned() else { return };
+                if !s.direct.offer(from, stream, camera, peer.uid.clone()) {
+                    s.conn.send(C2S::AnswerMedia { from, stream, accept: false });
+                    return;
+                }
+                let dm = s.dm_open(&peer.uid, &peer.nickname);
+                crate::ui::show_dm(s, dm, self.settings.dm_window);
+            }
+            S2C::MediaAnswer { peer, stream, accept } => s.direct.answer(&self.ctx, &s.conn, peer, stream, accept),
+            S2C::MediaEnded { peer, stream } => s.direct.ended(peer, stream),
             S2C::GifSearch(provider) => s.gif.provider = Some(provider),
             S2C::Gifs { query, items, next } => s.gif.got(query, items, next),
             S2C::ServerGifs { query, items, categories, next, total } => s.gif.got_library(query, items, categories, next, total),
@@ -2577,6 +2743,8 @@ impl VoxaApp {
                 s.clients.insert(c.id, c);
             }
             S2C::ClientLeft { id, reason } => {
+                s.games.remove(&id);
+                s.direct.peer_left(id);
                 if s.clients.get(&id).map(|c| c.channel == s.my_channel() && c.channel != NO_CHANNEL && id != s.me).unwrap_or(false) {
                     shared.play_tones(LEAVE_TONES);
                 }
@@ -3148,31 +3316,39 @@ impl VoxaApp {
                 t.state = TransferState::Failed(t!("Cancelled").into());
             } else if t.is_running() {
                 t.fail("Cancelled");
-                if !t.upload {
-                    let _ = std::fs::remove_file(&t.local);
-                }
                 s.conn.bulk_control(BulkC2S::Cancel { id });
             }
         }
     }
 
-    /// Starts queued transfers, at most `MAX_PARALLEL_TRANSFERS` at a time.
+    /// Starts queued transfers within both personal and server limits.
     fn pump_transfers(&mut self) {
         let Some(s) = &mut self.sess else { return };
         if !s.bulk_ready {
             return;
         }
-        let running = s.transfers.values().filter(|t| t.is_running()).count();
-        if running >= MAX_PARALLEL_TRANSFERS {
-            return;
+        let mut queued = Vec::new();
+        for upload in [true, false] {
+            let limit = |l: voxa_proto::transfers::TransferLimits| if upload { l.uploads } else { l.downloads };
+            let safety = if upload { 8 } else { 64 };
+            let cap = [Some(self.settings.transfers), s.transfer_limits]
+                .into_iter()
+                .flatten()
+                .map(limit)
+                .filter(|n| *n > 0)
+                .map(usize::from)
+                .fold(safety, usize::min);
+            let active = s.transfers.values().filter(|t| t.upload == upload && t.is_running()).count();
+            queued.extend(
+                s.transfers
+                    .iter()
+                    .filter(|(_, t)| {
+                        t.upload == upload && matches!(t.state, TransferState::Queued) && t.retry_after.is_none_or(|when| Instant::now() >= when)
+                    })
+                    .take(cap.saturating_sub(active))
+                    .map(|(&id, _)| id),
+            );
         }
-        let queued: Vec<u32> = s
-            .transfers
-            .iter()
-            .filter(|(_, t)| matches!(t.state, TransferState::Queued))
-            .map(|(id, _)| *id)
-            .take(MAX_PARALLEL_TRANSFERS - running)
-            .collect();
         let limit = s.file_limits.map(|l| l.max_upload_mb).unwrap_or(0);
         for id in queued {
             let Some(t) = s.transfers.get_mut(&id) else { continue };
@@ -3185,8 +3361,11 @@ impl VoxaApp {
                     }
                 };
                 t.size = size;
-                if limit > 0 && size > limit * 1024 * 1024 {
-                    t.state = TransferState::Failed(tf!("File is larger than the server limit ({})", crate::ui::fmt_size(limit * 1024 * 1024)));
+                if limit > 0 && size > limit.saturating_mul(1024 * 1024) {
+                    t.state = TransferState::Failed(tf!(
+                        "File is larger than the server limit ({})",
+                        crate::ui::fmt_size(limit.saturating_mul(1024 * 1024))
+                    ));
                     continue;
                 }
                 t.state = TransferState::Waiting;
@@ -3228,6 +3407,9 @@ impl eframe::App for VoxaApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.limit_frame_rate();
         self.process_events();
+        if let Some(s) = self.sess.as_mut().filter(|s| s.welcomed && s.supports("1.31.0")) {
+            s.direct.tick(&s.conn, ctx);
+        }
         self.handle_tray(ctx);
         self.handle_hotkeys();
         self.auto_away();
@@ -3339,6 +3521,27 @@ pub fn account_key(address: &str, uid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::safe_local_name;
+
+    #[test]
+    fn partial_download_only_replaces_the_destination_on_success() {
+        use std::{fs, io::Write};
+        let dir = std::env::temp_dir().join(format!("voxa-download-{:016x}", rand::random::<u64>()));
+        fs::create_dir(&dir).unwrap();
+        let dest = dir.join("report.txt");
+        fs::write(&dest, b"original").unwrap();
+        let mut cancelled = super::PartialDownload::create(&dest).unwrap();
+        cancelled.file.as_mut().unwrap().write_all(b"incomplete").unwrap();
+        let scratch = cancelled.path.clone();
+        drop(cancelled);
+        assert!(!scratch.exists());
+        assert_eq!(fs::read(&dest).unwrap(), b"original");
+        let mut complete = super::PartialDownload::create(&dest).unwrap();
+        complete.file.as_mut().unwrap().write_all(b"updated").unwrap();
+        complete.finish(&dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"updated");
+        fs::remove_file(dest).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
 
     /// Server-provided names must never leave the chosen download folder.
     #[test]

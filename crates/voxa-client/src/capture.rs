@@ -56,6 +56,7 @@ pub fn thumbnail(src: &Source, max_w: u32, max_h: u32) -> Option<egui::ColorImag
     Some(egui::ColorImage::new([w as usize, h as usize], out))
 }
 
+#[derive(Clone)]
 pub struct Captured {
     pub w: u32,
     pub h: u32,
@@ -394,10 +395,10 @@ impl Capturer {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 pub struct Capturer(Source);
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 impl Capturer {
     pub fn new(src: Source) -> Capturer {
         Capturer(src)
@@ -413,9 +414,40 @@ impl Capturer {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 pub fn sources() -> Vec<Source> {
     Vec::new()
+}
+
+#[cfg(target_os = "android")]
+pub struct Capturer(crate::projection::Screen);
+#[cfg(target_os = "android")]
+impl Capturer {
+    pub fn new(_: Source) -> Self {
+        Self(crate::projection::Screen::new())
+    }
+    pub fn grab(&mut self) -> Option<Captured> {
+        self.0.grab()
+    }
+    pub fn pending(&self) -> bool {
+        self.0.pending()
+    }
+    pub fn fast(&self) -> bool {
+        true
+    }
+    pub fn new_images(&self) -> u64 {
+        0
+    }
+}
+#[cfg(not(target_os = "android"))]
+impl Capturer {
+    pub fn pending(&self) -> bool {
+        false
+    }
+}
+#[cfg(target_os = "android")]
+pub fn sources() -> Vec<Source> {
+    vec![Source::Monitor { name: "Android screen or app".into(), x: 0, y: 0, w: 0, h: 0 }]
 }
 
 #[cfg(not(windows))]
